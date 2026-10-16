@@ -753,17 +753,6 @@ class Store:
         item.bullets.sort(key=lambda b: ids.index(b.source_ids[0]) if b.source_ids[0] in ids else -1)
         doc.omitted_bullet_ids = [i for i in doc.omitted_bullet_ids if i != bullet_id]
 
-    def export_document(self, doc_id: str, fmt: str) -> None:
-        app_id, _ = _split_doc_id(doc_id)
-        app = self._app_row(app_id)
-        if app.status not in ("approved", "submitted", "interview", "offer"):
-            raise ApiError(403, "PACK_NOT_APPROVED", "Approve the pack to unlock downloads.")
-        if fmt not in ("pdf", "docx"):
-            raise ApiError(422, "VALIDATION", "Format must be pdf or docx.")
-        raise ApiError(
-            501, "NOT_IMPLEMENTED", "PDF and DOCX export arrives with the document renderer. Your approved pack is saved."
-        )
-
     # ---- Intake runs (SRCH-06…08, PRF-05, UX-01) ----
 
     def estimate(self, channels: list[str]) -> Estimate:

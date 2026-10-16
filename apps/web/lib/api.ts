@@ -68,7 +68,7 @@ export const api = {
   approvePack: (id: string) => call<ApplicationWithJob>(`/api/applications/${id}/approve`, { method: "POST", body: {} }),
   editDocument: (docId: string, patch: { target: string; text?: string; bulletId?: string }) =>
     call<ApplicationWithJob>(`/api/documents/${docId}`, { method: "PATCH", body: patch }),
-  exportDocument: (docId: string, format: "pdf" | "docx") => call<never>(`/api/documents/${docId}/export?format=${format}`),
+  // Exports are plain <a download> links to /api/documents/:id/export (EXP-01).
 
   putCv: (cv: MasterCV) => call<{ version: number }>("/api/cv", { method: "PUT", body: cv }),
   putContact: (c: Contact) => call<Contact>("/api/cv/contact", { method: "PUT", body: c }),

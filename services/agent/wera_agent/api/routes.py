@@ -142,9 +142,8 @@ def edit_document(s: S, doc_id: str, body: DocumentPatchIn) -> ApplicationWithJo
     return s.edit_document(doc_id, body)
 
 
-@router.get("/documents/{doc_id}/export")
-def export_document(s: S, doc_id: str, format: str = "pdf") -> None:  # noqa: A002 — query name from SPEC §9.1
-    s.export_document(doc_id, format)
+# Exports have no agent route: the web app renders PDF and DOCX from the pack, the master CV
+# and the contact details it fetches here (ARCHITECTURE §4, EXP-02).
 
 
 # ---- intake ----

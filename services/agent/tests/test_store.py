@@ -129,10 +129,6 @@ class TestGate2AndTracker:
         nxt = api.ok("POST", f"/applications/{app['id']}/regenerate", {"note": "Make it shorter"})
         assert (nxt["status"], nxt["changeNote"]) == ("drafting", "Make it shorter")
 
-    def test_downloads_unlock_only_after_approval(self, api):
-        app = ready_app(api)
-        assert api.code("GET", f"/documents/{app['id']}.cv/export?format=pdf") == "PACK_NOT_APPROVED"
-
     def test_validates_cv_saves_and_bumps_the_version(self, api):
         cv = api.ok("GET", "/cv")
         assert api.ok("PUT", "/cv", cv)["version"] == cv["version"] + 1

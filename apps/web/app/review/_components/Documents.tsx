@@ -2,21 +2,14 @@
 
 import { Check, Copy, Minus, Plus } from "lucide-react";
 import { useState } from "react";
-import type { AnswerItem, CoverLetter, MasterCV, Role, TailoredCV } from "@/lib/types";
+import { roleDates, year } from "@/lib/format";
+import type { AnswerItem, CoverLetter, MasterCV, TailoredCV } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { cn } from "@/lib/ui/cn";
 import { useToast } from "@/lib/ui/Toast";
 import { EditableText } from "./EditableText";
 import { SourceTag, type CvLines } from "./SourceTag";
-
-const year = (ym?: string) => ym?.slice(0, 4) ?? "";
-
-/** TAIL-02: role headers and dates come from the master CV, never from model output. */
-function roleDates(role: Pick<Role, "start" | "end">): string {
-  const end = role.end === "present" ? "present" : year(role.end);
-  return year(role.start) === end ? end : `${year(role.start)} – ${end}`;
-}
 
 type Save = (target: string, text: string) => Promise<boolean>;
 

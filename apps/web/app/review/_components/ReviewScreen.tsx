@@ -84,14 +84,6 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
     await run(`line-${bulletId}`, () => api.editDocument(`${app.id}.cv`, { target: action, bulletId }), action === "add" ? `Added ${bulletId} back.` : `Removed ${bulletId}. It's listed under "Left out".`);
   };
 
-  const download = async (format: "pdf" | "docx") => {
-    try {
-      await api.exportDocument(`${app.id}.cv`, format);
-    } catch (err) {
-      toast({ tone: "attention", message: err instanceof Error ? err.message : "Export isn't available yet." });
-    }
-  };
-
   return (
     <div className="mx-auto max-w-[1180px]">
       <Link href="/review" className="inline-flex min-h-8 items-center gap-1.5 text-small font-semibold text-forest-700 hover:text-forest-900">
@@ -172,7 +164,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
               )}
             </div>
             <aside aria-label="Checks">
-              <ReviewRail pack={pack} approved={approved} cvVersion={cv.version} missingSourceIds={missingSourceIds} onDownload={download} />
+              <ReviewRail pack={pack} appId={app.id} approved={approved} cvVersion={cv.version} missingSourceIds={missingSourceIds} />
             </aside>
           </div>
         </>

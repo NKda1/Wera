@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
 
 // J2 and J3 in demo mode, in order, against one fresh server.
@@ -52,7 +53,7 @@ test("J3: review the drafted pack, approve it and track it", async ({ page }) =>
   await expect(page.getByText("Gate 2 · needs your approval")).toBeVisible();
   await expect(page.getByText("86%")).toBeVisible();
   await expect(page.getByText("Docker", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Download PDF" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Download Tailored CV as PDF" })).toBeDisabled();
 
   await page.getByRole("button", { name: "Source exp-idsu-01: show the original line" }).first().click();
   await expect(page.getByRole("dialog", { name: "Original line exp-idsu-01" })).toContainText("Master CV · AI Intern");
@@ -71,7 +72,22 @@ test("J3: review the drafted pack, approve it and track it", async ({ page }) =>
 
   await page.getByRole("button", { name: "Approve pack" }).click();
   await expect(page.getByText("Approved · ready to send")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Download PDF" })).toBeEnabled();
+
+  // EXP-01: all four files, as real downloads with ATS-safe names (ATSC-05).
+  for (const [label, expected] of [
+    ["Tailored CV as PDF", "Jordan-Ellery-CV-Fernhill-AI.pdf"],
+    ["Tailored CV as DOCX", "Jordan-Ellery-CV-Fernhill-AI.docx"],
+    ["Cover letter as PDF", "Jordan-Ellery-Letter-Fernhill-AI.pdf"],
+    ["Cover letter as DOCX", "Jordan-Ellery-Letter-Fernhill-AI.docx"],
+  ] as const) {
+    const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("link", { name: `Download ${label}` }).click()]);
+    expect(download.suggestedFilename()).toBe(expected);
+    const file = await download.path();
+    const bytes = await readFile(file);
+    expect(bytes.byteLength).toBeGreaterThan(5_000);
+    // A real PDF or a real zip (.docx), not an error page.
+    expect(bytes.subarray(0, 4).toString("latin1")).toBe(expected.endsWith(".pdf") ? "%PDF" : "PK\x03\x04");
+  }
 
   await page.getByRole("button", { name: "I've submitted it" }).click();
   await expect(page.getByText(/Submitted \d/)).toBeVisible();
