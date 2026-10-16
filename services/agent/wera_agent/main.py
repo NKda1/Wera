@@ -12,6 +12,7 @@ from .api.routes import router
 from .clock import now_ms
 from .db.session import transaction
 from .logging import configure as configure_logging
+from .observability import configure as configure_observability
 from .services.seed import is_seeded, seed
 from .settings import get_settings
 
@@ -38,6 +39,7 @@ def create_app(*, manage_database: bool = True) -> FastAPI:
         title="WERA agent", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan if manage_database else None
     )
     errors.install(app)
+    configure_observability(app)
 
     @app.middleware("http")
     async def require_token(request: Request, call_next):

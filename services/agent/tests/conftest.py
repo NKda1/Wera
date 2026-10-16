@@ -17,10 +17,12 @@ TOKEN = "test-agent-token"
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch) -> Iterator[None]:
-    """A fresh demo database per test, no .env.local, no keys, and a frozen clock."""
+    """A fresh demo database per test, no .env.local, no keys, no tracing, and a frozen clock."""
     monkeypatch.setitem(Settings.model_config, "env_file", None)
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wera-test.db'}")
     monkeypatch.setenv("WERA_DEMO_MODE", "true")
+    # DEMO-02: tests never send telemetry, even on a machine with a Logfire token.
+    monkeypatch.setenv("LOGFIRE_ENABLED", "false")
     monkeypatch.setenv("AGENT_TOKEN", TOKEN)
     for name in ("LLM_API_KEY", "FIRECRAWL_API_KEY", "ALERTS_IMAP_APP_PASSWORD", "ALERTS_IMAP_USER"):
         monkeypatch.delenv(name, raising=False)

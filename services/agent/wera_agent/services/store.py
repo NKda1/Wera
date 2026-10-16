@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
+import logfire
 import yaml
 from pydantic import ValidationError
 from sqlalchemy import func, select
@@ -62,6 +63,11 @@ DRAFT_STEPS = [("cv", 2500), ("letter", 4500), ("ats", 6000)]
 DRAFT_TOTAL_MS = DRAFT_STEPS[-1][1]
 RUN_MS = {"board_search": 6000, "email_alert": 3500, "watchlist": 2500}
 PACK_KINDS = ("cv", "letter", "ats", "answers")
+
+# The two gates are what WERA promises, so they are counted as well as logged. Ids only:
+# which jobs a person looks at is theirs (SPEC SEC-05).
+GATE1_DECISIONS = logfire.metric_counter("wera.gate1.decisions", unit="1", description="Gate 1 decisions, by action")
+GATE2_APPROVALS = logfire.metric_counter("wera.gate2.approvals", unit="1", description="Packs a person approved at Gate 2")
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"]
 
 
@@ -375,6 +381,8 @@ class Store:
         note = d.reason or (f"{d.days}d" if d.days else None)
         self.s.add(DecisionRow(job_id=job_id, gate=1, decision=d.action, note=note, decided_at=iso(now)))
         self.s.flush()
+        logfire.info("Gate 1 {action} on {job_id}", action=d.action, job_id=job_id, job_status=job.status)
+        GATE1_DECISIONS.add(1, {"action": d.action})
         return self.scored(job)
 
     def _find_duplicate(self, job: Job) -> ApplicationRow | None:
@@ -623,6 +631,8 @@ class Store:
         app.approved_at = iso(self.now)
         self.s.add(DecisionRow(job_id=app.job_id, gate=2, decision="approve", decided_at=app.approved_at))
         self.s.flush()
+        logfire.info("Gate 2 approved {app_id}", app_id=app_id, job_id=app.job_id)
+        GATE2_APPROVALS.add(1)
         return self._with_job(app, True)
 
     def patch_application(self, app_id: str, patch: ApplicationPatchIn) -> ApplicationWithJob:

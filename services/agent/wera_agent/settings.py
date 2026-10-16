@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     database_url: str | None = None
     data_dir: Path = ROOT / "data"
 
+    # Tracing. Off in effect without a Logfire project token; see wera_agent/observability.py.
+    logfire_enabled: bool = True
+
     # Service-to-service auth between the web app and this service (loopback only).
     agent_token: SecretStr | None = None
     agent_host: str = "127.0.0.1"
