@@ -1,8 +1,8 @@
-import { handle, type IdContext } from "@/lib/server/http";
-import { exportDocument } from "@/lib/server/store";
+import { forward, seg } from "@/lib/server/agent";
+import type { IdContext } from "@/lib/server/http";
 
-/** EXP-01/02: contact details are inserted here, on the server, at render time. */
+/** EXP-01/02: contact details are inserted on the server, at render time. */
 export async function GET(req: Request, { params }: IdContext) {
   const { id } = await params;
-  return handle(() => exportDocument(id, new URL(req.url).searchParams.get("format") ?? "pdf"));
+  return forward(req, `/documents/${seg(id)}/export`);
 }

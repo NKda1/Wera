@@ -5,8 +5,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { api, ApiRequestError, type Decision } from "@/lib/api";
 import { formatDate } from "@/lib/format";
-import type { shortlistMeta } from "@/lib/server/store";
-import type { IntakeChannel, IntakeRun, ScoredJob, SearchProfile } from "@/lib/types";
+import type { IntakeChannel, IntakeRun, ScoredJob, SearchProfile, ShortlistMeta } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { cn } from "@/lib/ui/cn";
@@ -20,7 +19,7 @@ import { JobCard } from "./JobCard";
 import { ProfileCard, type SiteOption } from "./ProfileCard";
 import { RunPanel, SearchDialog } from "./SearchRun";
 
-type Meta = ReturnType<typeof shortlistMeta>;
+type Meta = ShortlistMeta;
 type Filter = "london" | "graduate" | "alerts" | "score8" | "remote";
 
 const FILTERS: { id: Filter; label: string; test: (j: ScoredJob) => boolean }[] = [

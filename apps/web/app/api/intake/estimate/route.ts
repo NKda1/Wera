@@ -1,13 +1,6 @@
-import { handle } from "@/lib/server/http";
-import { estimate } from "@/lib/server/store";
-import type { IntakeChannel } from "@/lib/types";
+import { forward } from "@/lib/server/agent";
 
-const ALL: IntakeChannel[] = ["board_search", "email_alert", "watchlist"];
-
+/** PRF-05: queries and Firecrawl credits before a search runs. */
 export async function GET(req: Request) {
-  return handle(() => {
-    const raw = new URL(req.url).searchParams.get("channels");
-    const channels = raw ? (raw.split(",").filter((c) => ALL.includes(c as IntakeChannel)) as IntakeChannel[]) : ALL;
-    return estimate(channels);
-  });
+  return forward(req, "/intake/estimate");
 }

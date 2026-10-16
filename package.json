@@ -8,13 +8,17 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "pnpm --filter web dev",
+    "dev": "node scripts/dev.mjs",
     "build": "pnpm --filter web build",
     "start": "pnpm --filter web start",
-    "test": "pnpm --filter web test",
+    "test": "pnpm --filter web test && uv run --project services/agent pytest -q",
     "typecheck": "pnpm --filter web typecheck",
     "check:public-env": "node scripts/check-public-env.mjs",
     "scan:bundle": "node scripts/scan-bundle.mjs apps/web/.next/static",
     "check:secrets": "node scripts/check-public-env.mjs && node scripts/scan-bundle.mjs apps/web/.next/static"
+  },
+  "dependencies": {
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.118.0"
   }
 }

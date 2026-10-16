@@ -1,8 +1,8 @@
-import { handle, type IdContext } from "@/lib/server/http";
-import { approvePack } from "@/lib/server/store";
+import { forward, seg } from "@/lib/server/agent";
+import type { IdContext } from "@/lib/server/http";
 
 /** Gate 2 approval. Only a person can move an application to approved (§7.2). */
-export async function POST(_req: Request, { params }: IdContext) {
+export async function POST(req: Request, { params }: IdContext) {
   const { id } = await params;
-  return handle(() => approvePack(id));
+  return forward(req, `/applications/${seg(id)}/approve`);
 }

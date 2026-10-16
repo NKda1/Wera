@@ -1,7 +1,7 @@
-import { handle, type IdContext } from "@/lib/server/http";
-import { getJob } from "@/lib/server/store";
+import { forward, seg } from "@/lib/server/agent";
+import type { IdContext } from "@/lib/server/http";
 
-export async function GET(_req: Request, { params }: IdContext) {
+export async function GET(req: Request, { params }: IdContext) {
   const { id } = await params;
-  return handle(() => getJob(id));
+  return forward(req, `/jobs/${seg(id)}`);
 }

@@ -1,0 +1,19 @@
+# WERA behaviour (SPEC §9.2). Secrets never go here; they live in services/agent/.env.local.
+
+# Model id per tier (ARCHITECTURE §3.3). Pin dated ids; re-run the golden set before switching.
+models:
+  fast: qwen/qwen3.7-flash
+  scoring: qwen/qwen3.8-27b
+  writing: qwen/qwen3.8-max-0902
+
+# §8.2 fit weights. Normalised in code, so they needn't sum to 1.
+weights:
+  core: 0.35
+  adjacent: 0.20
+  experience: 0.20
+  eligibility: 0.15
+  freshness: 0.10
+
+ats_threshold: 0.75
+weekly_budget_usd: 5
+cv_pages: 1

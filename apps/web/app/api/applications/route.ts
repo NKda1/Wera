@@ -1,6 +1,5 @@
-import { handle } from "@/lib/server/http";
-import { listApplications } from "@/lib/server/store";
+import { forward } from "@/lib/server/agent";
 
-export async function GET() {
-  return handle(() => ({ items: listApplications() }));
+export async function GET(req: Request) {
+  return forward(req, "/applications");
 }

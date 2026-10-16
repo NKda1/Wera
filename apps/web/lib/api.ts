@@ -5,6 +5,7 @@ import type {
   ApplicationStatus,
   ApplicationWithJob,
   Contact,
+  Estimate,
   IntakeChannel,
   IntakeRun,
   MasterCV,
@@ -45,7 +46,7 @@ async function call<T>(path: string, init?: { method?: string; body?: unknown })
   return data as T;
 }
 
-export type Estimate = { queries: number; pages: number; credits: number; usd: number; companies: number; demo: boolean };
+export type { Estimate };
 export type Decision = { action: "approve" | "snooze" | "reject" | "unhide"; days?: 1 | 3 | 7; reason?: string; force?: boolean };
 
 export const api = {

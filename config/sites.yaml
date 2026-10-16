@@ -1,0 +1,19 @@
+# Boards searched by Firecrawl (SPEC §9.2, SRCH-04). A site can be enabled in the search
+# profile only after its terms and robots.txt were reviewed: set terms_reviewed_on.
+# linkedin.com is always excluded and can't be listed here.
+sites:
+  - domain: brightnetwork.co.uk
+    name: Bright Network
+    terms_reviewed_on: 2026-10-10
+  - domain: gradcracker.com
+    name: Gradcracker
+    terms_reviewed_on: 2026-10-10
+  - domain: welcometothejungle.com
+    name: Welcome to the Jungle
+    terms_reviewed_on: 2026-10-11
+  - domain: builtinlondon.uk
+    name: Built In London
+    terms_reviewed_on: 2026-10-11
+  - domain: otta.com
+    name: Otta
+    terms_reviewed_on: null
