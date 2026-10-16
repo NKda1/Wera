@@ -12,6 +12,9 @@
     "build": "pnpm --filter web build",
     "start": "pnpm --filter web start",
     "test": "pnpm --filter web test",
-    "typecheck": "pnpm --filter web typecheck"
+    "typecheck": "pnpm --filter web typecheck",
+    "check:public-env": "node scripts/check-public-env.mjs",
+    "scan:bundle": "node scripts/scan-bundle.mjs apps/web/.next/static",
+    "check:secrets": "node scripts/check-public-env.mjs && node scripts/scan-bundle.mjs apps/web/.next/static"
   }
 }

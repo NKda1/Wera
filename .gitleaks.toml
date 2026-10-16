@@ -1,0 +1,33 @@
+# Secret scanning for WERA (ARCHITECTURE §7.2 #6–7, SPEC SEC-01).
+# Runs in pre-commit (.pre-commit-config.yaml) and over the full history in CI.
+
+title = "WERA"
+
+[extend]
+useDefault = true
+
+# The default rules don't cover these providers yet.
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''\bsk-or-v1-[a-f0-9]{64}\b'''
+keywords = ["sk-or-"]
+
+[[rules]]
+id = "firecrawl-api-key"
+description = "Firecrawl API key"
+regex = '''\bfc-[a-f0-9]{32}\b'''
+keywords = ["fc-"]
+
+# Test fixtures use obviously fake keys made only of zeros or the word "fake".
+[[allowlists]]
+description = "Fake keys in tests"
+regexTarget = "match"
+regexes = ['''sk-or-v1-0{64}''', '''fc-0{32}''', '''(?i)fake''']
+
+# In .env.example-style snippets an empty `LLM_API_KEY=` makes the generic rule read the
+# next line's variable name as the value. An upper-case env var name is never a key.
+[[allowlists]]
+description = "Env var names read as values"
+regexTarget = "secret"
+regexes = ['''^[A-Z][A-Z0-9_]*=?$''']

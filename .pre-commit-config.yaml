@@ -1,0 +1,7 @@
+# Blocks a secret before it reaches a commit (ARCHITECTURE §7.2 #6).
+# One-time setup: uvx pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
