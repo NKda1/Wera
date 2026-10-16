@@ -1,0 +1,143 @@
+@import "tailwindcss";
+
+/*
+ * WERA design system v0.1 — green and white.
+ * Green means go. Amber means you need to look. Red only when something actually failed.
+ * The default Tailwind palette is removed so only these tokens can be used.
+ */
+@theme {
+  --color-*: initial;
+  --color-white: #ffffff;
+  --color-transparent: transparent;
+
+  --color-forest-900: #0b4a2d; /* headings, dark fills */
+  --color-forest-800: #0f5a37; /* primary hover */
+  --color-forest-700: #146c43; /* primary */
+  --color-leaf-500: #4c9a6b; /* graphics only */
+  --color-mint-200: #cfe5d7; /* chip hover, progress track */
+  --color-mint-100: #e3f1e8; /* selected, chips */
+  --color-mint-50: #f3f8f4; /* app ground */
+
+  --color-ink: #0e1f16; /* text */
+  --color-ink-2: #4a5d52; /* secondary text */
+  --color-line: #dce7df; /* borders */
+
+  --color-amber-700: #7a4800; /* attention text */
+  --color-amber-500: #b87503; /* attention dot and ring, graphics only */
+  --color-amber-100: #fbe6c2; /* attention border */
+  --color-amber-50: #fff4e0; /* attention fill */
+
+  --color-red-700: #a3261b; /* failures only */
+  --color-red-50: #fcebe9;
+
+  --color-code: #0f2419; /* .env snippet ground */
+
+  --radius-control: 10px;
+  --radius-card: 16px;
+
+  --text-display: 3rem;
+  --text-display--line-height: 1.05;
+  --text-display--letter-spacing: -0.025em;
+  --text-display--font-weight: 700;
+  --text-h1: 2.25rem;
+  --text-h1--line-height: 1.1;
+  --text-h1--letter-spacing: -0.02em;
+  --text-h1--font-weight: 700;
+  --text-h2: 1.3125rem;
+  --text-h2--line-height: 1.3;
+  --text-h2--letter-spacing: -0.01em;
+  --text-h2--font-weight: 700;
+  --text-body: 1rem;
+  --text-body--line-height: 1.5;
+  --text-small: 0.8125rem;
+  --text-small--line-height: 1.45;
+  --text-mono: 0.875rem;
+  --text-mono--line-height: 1.5;
+  --text-tag: 0.6875rem;
+  --text-tag--line-height: 1.3;
+
+  --shadow-card: 0 1px 2px rgb(14 31 22 / 0.04);
+  --shadow-pop: 0 12px 32px -8px rgb(14 31 22 / 0.18), 0 2px 6px rgb(14 31 22 / 0.08);
+
+  --animate-fade-in: fade-in 160ms ease-out;
+  --animate-slide-up: slide-up 200ms ease-out;
+  --animate-shimmer: shimmer 1.4s linear infinite;
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+  @keyframes shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+}
+
+@theme inline {
+  --font-sans: var(--font-instrument), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background: var(--color-mint-50);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-forest-700);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--color-mint-200);
+  }
+
+  dialog {
+    color: var(--color-ink);
+  }
+
+  dialog::backdrop {
+    background: rgb(14 31 22 / 0.42);
+  }
+
+  dialog[open] {
+    animation: var(--animate-slide-up);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}

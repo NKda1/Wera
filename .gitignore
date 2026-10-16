@@ -1,0 +1,22 @@
+# Secrets (ARCHITECTURE §7.2) — never commit real keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Dependencies and build output
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+
+# Test output
+test-results/
+playwright-report/
+
+# OS / editor
+.DS_Store

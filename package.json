@@ -1,0 +1,17 @@
+{
+  "name": "wera",
+  "private": true,
+  "description": "Open-source, agentic job-application assistant. A human approves every shortlist and every document.",
+  "license": "MIT",
+  "packageManager": "pnpm@10.34.7",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter web dev",
+    "build": "pnpm --filter web build",
+    "start": "pnpm --filter web start",
+    "test": "pnpm --filter web test",
+    "typecheck": "pnpm --filter web typecheck"
+  }
+}
