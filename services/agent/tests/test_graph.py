@@ -202,6 +202,82 @@ class TestCitationGuard:
         assert all(b.source_ids for s in doc.sections for i in s.items for b in i.bullets)
 
 
+class TestLetterRedraft:
+    """LTR-01: a letter is 3 or 4 paragraphs, so one that the guard cuts below three is asked
+    for again rather than shipped short."""
+
+    @staticmethod
+    def _spoil(count: int):
+        """A responder that makes `count` letter paragraphs unsupportable on the first attempt."""
+        real = demo.respond
+        calls: list[str] = []
+
+        def respond(task, variables, context, demo_input=None):
+            out = real(task, variables, context, demo_input)
+            if task == "letter.write":
+                calls.append(variables["note"])
+                if len(calls) == 1:
+                    for para in out["paragraphs"][:count]:
+                        para["text"] = f"{para['text']} I ran the Kubernetes platform for 40 teams."
+            return out
+
+        return respond, calls
+
+    def test_a_letter_cut_below_three_paragraphs_is_redrafted(self, client, approved, monkeypatch):
+        respond, calls = self._spoil(2)
+        monkeypatch.setattr(demo, "respond", respond)
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+
+        assert len(calls) == 2, "the short letter should have been asked for again"
+        # The second attempt was told what went wrong, in terms of its own output.
+        assert "citation check" in calls[1]
+        assert "paragraph" in calls[1]
+
+        with transaction() as session:
+            letter = Store(session).load_document(app_id, "letter", CoverLetter)
+        assert len(letter.paragraphs) >= 3
+        assert letter.guard.pass_
+
+    def test_one_dropped_paragraph_out_of_four_is_not_redrafted(self, client, approved, monkeypatch):
+        """Dropping one from four still leaves a letter worth sending, so it isn't paid for twice."""
+        respond, calls = self._spoil(1)
+        monkeypatch.setattr(demo, "respond", respond)
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+        with transaction() as session:
+            letter = Store(session).load_document(app_id, "letter", CoverLetter)
+        assert len(calls) == 1
+        assert len(letter.paragraphs) >= 3
+        # The drop is still shown to the person.
+        assert letter.guard.violations
+
+    def test_a_letter_that_stays_short_keeps_the_fuller_attempt_and_shows_why(self, client, approved, monkeypatch):
+        """Two tries is the cap. Rather than loop, WERA keeps the better letter with its
+        violations visible, so the person sees the problem at Gate 2."""
+        real = demo.respond
+        calls: list[int] = []
+
+        def always_bad(task, variables, context, demo_input=None):
+            out = real(task, variables, context, demo_input)
+            if task == "letter.write":
+                calls.append(1)
+                for para in out["paragraphs"][: 3 if len(calls) == 1 else 2]:
+                    para["text"] = f"{para['text']} I ran the Kubernetes platform for 40 teams."
+            return out
+
+        monkeypatch.setattr(demo, "respond", always_bad)
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+
+        assert len(calls) == 2  # asked twice, never a third time
+        with transaction() as session:
+            letter = Store(session).load_document(app_id, "letter", CoverLetter)
+        assert len(letter.paragraphs) == 2  # the fuller of the two attempts
+        assert not letter.guard.pass_
+        assert letter.guard.violations
+
+
 class TestAtsRetryCap:
     def test_tailoring_is_not_retried_for_ever(self, client, approved, monkeypatch):
         """ATSC-03: at most two extra attempts, however poor the coverage stays."""

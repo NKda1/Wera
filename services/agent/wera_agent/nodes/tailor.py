@@ -8,6 +8,7 @@ The job description reaches the model inside an untrusted-data block (§9.3): it
 input here that an employer — or someone posting as one — controls.
 """
 
+import logfire
 from sqlalchemy.orm import Session
 
 from ..llm.demo import PackInput, words
@@ -20,6 +21,11 @@ from .guard import guard_and_repair
 # Roughly how many bullets fit, by CV length. The model is told the budget; `estimate_pages`
 # checks what actually came back.
 LINES_PER_PAGE = 6
+
+# LTR-01: a letter is 3 or 4 paragraphs. One redraft when the guard leaves fewer — two calls is
+# the most a letter is worth, and the person can always ask for changes at Gate 2.
+MIN_PARAGRAPHS = 3
+MAX_LETTER_ATTEMPTS = 2
 
 
 def job_block(inp: PackInput) -> str:
@@ -118,22 +124,66 @@ def _guard_cv(session: Session, doc: TailoredCV, inp: PackInput) -> TailoredCV:
 
 
 def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
-    """LTR-01…05: 3–4 paragraphs, one company fact quoted from the post, every claim cited."""
+    """LTR-01…05: 3–4 paragraphs, one company fact quoted from the post, every claim cited.
+
+    The guard can drop a paragraph the CV doesn't back, and dropping one from a four-paragraph
+    letter leaves three — but dropping two leaves a letter too short to send (LTR-01). So a
+    letter that comes back under the minimum is asked for once more, told what was left out and
+    why. If the second one is no better, the fuller of the two is kept with its violations
+    showing, because a short letter the person can see the problem with beats a silent one.
+    """
     cv = inp.cv
     tailored = "\n".join(f"- {b.text}" for _, b in cv_locations(doc))
-    out = structured(
-        session,
-        "letter.write",
-        LetterOutput,
-        {
-            "cv": cv_text(cv),
-            "job": job_block(inp),
-            "tailored": tailored or "(no lines selected)",
-            "note": inp.note or "nothing in particular",
-        },
-        context={"cv": cv},
-        demo_input=inp,
+    best: CoverLetter | None = None
+    feedback: str | None = None
+
+    for _attempt in range(MAX_LETTER_ATTEMPTS):
+        out = structured(
+            session,
+            "letter.write",
+            LetterOutput,
+            {
+                "cv": cv_text(cv),
+                "job": job_block(inp),
+                "tailored": tailored or "(no lines selected)",
+                "note": _letter_note(inp.note, feedback),
+            },
+            context={"cv": cv},
+            demo_input=inp,
+        )
+        candidate = _guard_letter(session, out, inp)
+        if len(candidate.paragraphs) >= MIN_PARAGRAPHS:
+            return candidate
+        if best is None or len(candidate.paragraphs) > len(best.paragraphs):
+            best = candidate
+        feedback = _dropped_feedback(candidate)
+        logfire.info(
+            "Letter for {job_id} came back with {kept} paragraph(s); asking again",
+            job_id=inp.job.id,
+            kept=len(candidate.paragraphs),
+        )
+
+    return best  # type: ignore[return-value] — the loop always runs at least once
+
+
+def _letter_note(note: str | None, feedback: str | None) -> str:
+    parts = [p for p in (note, feedback) if p]
+    return "\n".join(parts) or "nothing in particular"
+
+
+def _dropped_feedback(candidate: CoverLetter) -> str:
+    """What to tell the model about its last attempt, in terms of its own output."""
+    reasons = [v.detail for v in candidate.guard.violations] or ["a claim the CV doesn't carry"]
+    return (
+        f"Your last letter lost {len(reasons)} paragraph(s) to WERA's citation check, leaving "
+        f"{len(candidate.paragraphs)} — too few. Reasons given: {' '.join(reasons)} "
+        f"Write {MIN_PARAGRAPHS} or 4 paragraphs where every claim is carried by the CV lines you cite."
     )
+
+
+def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverLetter:
+    """One model reply, guarded and assembled."""
+    cv = inp.cv
     paragraphs = [_cited(p) for p in out.paragraphs]
     # LTR-03: only a quote that really is in the post counts as one.
     quote = out.company_quote if out.company_quote and out.company_quote in (inp.job.description_md or "") else ""
