@@ -1225,6 +1225,36 @@
       "title": "Link",
       "type": "object"
     },
+    "ListDiff": {
+      "description": "What a regenerated profile would do to one list field (PRF-04).",
+      "properties": {
+        "added": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kept": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "added",
+        "removed",
+        "kept"
+      ],
+      "title": "ListDiff",
+      "type": "object"
+    },
     "Location": {
       "properties": {
         "city": {
@@ -1390,6 +1420,37 @@
       "title": "ProfileChannels",
       "type": "object"
     },
+    "ProfileProposalResult": {
+      "description": "A proposed profile and what it would change. Nothing is saved until the person PUTs it.",
+      "properties": {
+        "cvVersion": {
+          "type": "integer"
+        },
+        "diff": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ListDiff"
+              },
+              {
+                "$ref": "#/$defs/ScalarDiff"
+              }
+            ]
+          },
+          "type": "object"
+        },
+        "proposed": {
+          "$ref": "#/$defs/SearchProfile"
+        }
+      },
+      "required": [
+        "proposed",
+        "diff",
+        "cvVersion"
+      ],
+      "title": "ProfileProposalResult",
+      "type": "object"
+    },
     "Recency": {
       "enum": [
         "24h",
@@ -1501,6 +1562,22 @@
         "period"
       ],
       "title": "Salary",
+      "type": "object"
+    },
+    "ScalarDiff": {
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "title": "ScalarDiff",
       "type": "object"
     },
     "ScoredJob": {

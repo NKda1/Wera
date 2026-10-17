@@ -132,6 +132,28 @@ class IntakeRunRow(Base):
     settled: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class LlmCallRow(Base):
+    """One row per model call, for the weekly budget (COST-01) and the spend figure (SET-06).
+
+    PRIV-03: metadata only. No prompt text, no completion text, no error body from the
+    provider — just the task, the model, token counts, cost, latency and a sanitised code.
+    """
+
+    __tablename__ = "llm_calls"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task: Mapped[str] = mapped_column(String(32), index=True)
+    tier: Mapped[str] = mapped_column(String(16))
+    model: Mapped[str] = mapped_column(String(128))
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    code: Mapped[str | None] = mapped_column(String(32))
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    called_at: Mapped[str] = mapped_column(Iso, index=True)
+
+
 class KvRow(Base):
     """Small bits of app state: channel stats, id counter, the last run's new jobs."""
 

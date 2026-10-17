@@ -1,10 +1,43 @@
 # WERA behaviour (SPEC §9.2). Secrets never go here; they live in services/agent/.env.local.
 
 # Model id per tier (ARCHITECTURE §3.3). Pin dated ids; re-run the golden set before switching.
+# A person can change these in Settings; everything below is file-only.
 models:
   fast: qwen/qwen3.7-flash
   scoring: qwen/qwen3.8-27b
   writing: qwen/qwen3.8-max-0902
+
+# Tried in order when the tier's model fails with a transport or server error.
+fallbacks:
+  fast: [mistralai/mistral-small-3.2, google/gemini-2.5-flash]
+  scoring: [qwen/qwen3.7-flash]
+  writing: [qwen/qwen3.8-27b]
+
+# USD per million tokens, used to price llm_calls rows and enforce the weekly budget
+# (COST-01). CHECK THESE against https://openrouter.ai/models before trusting the spend
+# figure: a wrong number here makes the budget wrong. An unlisted model is charged at
+# `default`, which is deliberately high, so an unknown model is never free.
+prices:
+  default: { in: 3.0, out: 15.0 }
+  qwen/qwen3.7-flash: { in: 0.05, out: 0.20 }
+  qwen/qwen3.8-27b: { in: 0.20, out: 0.60 }
+  qwen/qwen3.8-max-0902: { in: 1.20, out: 6.00 }
+  mistralai/mistral-small-3.2: { in: 0.05, out: 0.15 }
+  google/gemini-2.5-flash: { in: 0.30, out: 2.50 }
+
+# SPEC §9.3, one row per task. No task has tools.
+tasks:
+  profile.generate: { tier: fast, max_tokens: 800, reasoning: "off" }
+  job.normalise: { tier: fast, max_tokens: 1200, reasoning: "off" }
+  email.extract: { tier: fast, max_tokens: 1500, reasoning: "off" }
+  keywords.extract: { tier: fast, max_tokens: 600, reasoning: "off" }
+  match.verdict: { tier: fast, max_tokens: 300, reasoning: "off" }
+  fit.score: { tier: scoring, max_tokens: 1200, reasoning: low }
+  cv.tailor: { tier: writing, max_tokens: 3000, reasoning: "on" }
+  letter.write: { tier: writing, max_tokens: 1500, reasoning: "on" }
+  guard.repair: { tier: writing, max_tokens: 1500, reasoning: low }
+  answers.draft: { tier: writing, max_tokens: 2000, reasoning: "on" }
+  outreach.draft: { tier: fast, max_tokens: 400, reasoning: "off" }
 
 # §8.2 fit weights. Normalised in code, so they needn't sum to 1.
 weights:
@@ -17,3 +50,8 @@ weights:
 ats_threshold: 0.75
 weekly_budget_usd: 5
 cv_pages: 1
+
+# One model call: how long to wait, and how many times to retry a transport error before
+# falling back. Schema failures are retried once by the gateway, not here.
+llm_timeout_seconds: 60
+llm_max_retries: 2

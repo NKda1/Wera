@@ -316,3 +316,52 @@ def generate_pack(inp: PackInput) -> Pack:
 def refresh_ats(pack: Pack, *, cv: MasterCV, evidence: FitEvidence, cv_pages: int, job: Job) -> AtsReport:
     """Recompute the ATS report after the user edits a document (format and coverage only)."""
     return build_ats(pack.cv, cv=cv, evidence=evidence, cv_pages=cv_pages, job=job, attempt=pack.ats.attempt)
+
+
+# ---------------------------------------------------------------------------
+# Task responders (DEMO-02)
+#
+# `llm.gateway.structured()` calls these instead of a model when demo mode is on. They return
+# the same dicts a model would, and the gateway validates them against the same schema, so the
+# demo path exercises the real contract rather than bypassing it.
+
+
+SENIORITY_WORDS = re.compile(r"^(senior|staff|principal|lead|head of|junior|graduate|intern)\s+", re.I)
+
+
+def _target_titles(cv: MasterCV) -> list[str]:
+    """Titles the CV supports, from its own role titles, with seniority words stripped."""
+    out: list[str] = []
+    for role in cv.experience:
+        title = SENIORITY_WORDS.sub("", role.title).strip()
+        # "AI Intern" → "AI Engineer": a demo stand-in for what the model would reason about.
+        title = re.sub(r"\bIntern\b", "Engineer", title, flags=re.I)
+        if title and title not in out:
+            out.append(title)
+    for skill in cv.skills[:2]:
+        candidate = f"{skill.name} Engineer"
+        if candidate not in out:
+            out.append(candidate)
+    return out[:8]
+
+
+def _profile_proposal(cv: MasterCV) -> dict:
+    return {
+        "titles": _target_titles(cv),
+        "skills": [s.name for s in cv.skills[:12]],
+        "locations": [cv.person.location],
+        "remote": "any",
+        "seniority": ["graduate", "junior", "entry"],
+        "exclude": ["Senior", "Staff", "Principal", "Lead"],
+        "recency": "7d",
+    }
+
+
+def respond(task: str, variables: dict, context: dict | None) -> dict:
+    """The demo answer for one §9.3 task. `context` carries the master CV when a task needs it."""
+    cv = (context or {}).get("cv")
+    if task == "profile.generate":
+        if cv is None:
+            raise KeyError("profile.generate needs the master CV in validation context")
+        return _profile_proposal(cv)
+    raise KeyError(f"No demo responder for task {task!r}. Add one here, next to the real prompt.")

@@ -34,6 +34,9 @@ class Settings(BaseSettings):
 
     llm_base_url: str = "https://openrouter.ai/api/v1"
     llm_api_key: SecretStr | None = None
+    # Optional OpenAI-compatible endpoint to call instead of the provider directly, so a PII
+    # gateway can sit in front of it without any node changing (see wera_agent/pii.py).
+    llm_proxy_url: str | None = None
     firecrawl_api_key: SecretStr | None = None
     alerts_imap_host: str | None = None
     alerts_imap_user: str | None = None

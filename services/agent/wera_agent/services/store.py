@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..clock import iso, now_ms, parse_ms
 from ..config import sites
+from ..db import state
 from ..db.models import (
     ApplicationRow,
     ContactRow,
@@ -30,20 +31,24 @@ from ..db.models import (
     KvRow,
     MasterCvRow,
     ProfileRow,
-    SettingsRow,
 )
 from ..domain.applications import ALLOWED
+from ..domain.profile_diff import profile_diff
 from ..domain.scoring import build_fit_report, js_round
 from ..domain.text import is_linkedin_url, title_case
 from ..domain.vocab import cv_line_index, master_cv_text, text_has_term
 from ..errors import ApiError, validation_error
 from ..llm.demo import PackInput, generate_pack, guard_cv, refresh_ats
+from ..llm.gateway import structured
+from ..llm.pricing import spent_this_week_usd
+from ..llm.prompts import cv_text, profile_text
 from ..schemas.api import (
     ApplicationPatchIn,
     DecisionIn,
     DocumentPatchIn,
     FoundCounts,
     NavCounts,
+    ProfileProposalResult,
     ShortlistMeta,
     SiteOption,
     TestResult,
@@ -51,11 +56,13 @@ from ..schemas.api import (
 from ..schemas.applications import Application, ApplicationJob, ApplicationListItem, ApplicationWithJob, DraftProgress
 from ..schemas.cv import Contact, CvLine, MasterCV
 from ..schemas.jobs import FitEvidence, FitWeights, Job, ScoredJob, SubScore
+from ..schemas.llm_outputs import ProfileProposal
 from ..schemas.pack import AnswerItem, AtsReport, Cited, CoverLetter, CvItem, CvSection, Pack, TailoredCV
 from ..schemas.profile import SearchProfile
 from ..schemas.runs import ChannelSummary, Estimate, IntakeRun, RunError, RunIds
 from ..schemas.settings import SecretsStatus, SettingsPatch, SettingsResponse
 from ..settings import get_settings, llm_provider_name
+from . import providers
 from .demo_data import DAY, MIN, first_run_seeds, seed_to_job
 
 # Pack drafting steps (PERF-03), the same timings as the web app's progress UI.
@@ -155,10 +162,10 @@ class Store:
         return self._cv_cache
 
     def _settings(self) -> dict[str, Any]:
-        return self.s.get(SettingsRow, 1).data  # type: ignore[union-attr]
+        return state.settings_data(self.s)
 
     def _save_settings(self, data: dict[str, Any]) -> None:
-        self.s.get(SettingsRow, 1).data = data  # type: ignore[union-attr]
+        state.save_settings_data(self.s, data)
 
     def _weights(self) -> FitWeights:
         return FitWeights.model_validate(self._settings()["weights"])
@@ -864,8 +871,7 @@ class Store:
         return cv
 
     def get_contact(self) -> Contact:
-        row = self.s.get(ContactRow, 1)
-        return Contact(email=row.email, phone=row.phone, address=row.address)  # type: ignore[union-attr]
+        return state.contact(self.s)
 
     def put_contact(self, contact: Contact) -> Contact:
         row = self.s.get(ContactRow, 1)
@@ -880,6 +886,40 @@ class Store:
         self.s.get(ProfileRow, 1).data = profile.model_dump(mode="json")  # type: ignore[union-attr]
         return profile
 
+    def generate_profile(self) -> ProfileProposalResult:
+        """PRF-01/PRF-04: propose a profile from the master CV and show what would change.
+
+        Saves nothing — the person reviews the diff field by field and then PUTs what they want.
+        """
+        cv = self.cv()
+        current = self._profile()
+        proposal = structured(
+            self.s,
+            "profile.generate",
+            ProfileProposal,
+            {"cv": cv_text(cv), "current": profile_text(current)},
+            context={"cv": cv},
+        )
+        # The model is told to use the CV's spellings and the schema enforces it; this keeps the
+        # order and casing the CV uses, so a proposal never renames a skill.
+        by_name = {s.name.casefold(): s.name for s in cv.skills}
+        skills = [by_name.get(s.casefold(), s) for s in proposal.skills]
+        proposed = SearchProfile(
+            titles=proposal.titles,
+            skills=skills,
+            locations=proposal.locations,
+            remote=proposal.remote,
+            seniority=proposal.seniority,
+            exclude=proposal.exclude,
+            # The person's own choices, not the model's: which boards, which channels.
+            sites=current.sites,
+            recency=proposal.recency,
+            channels=current.channels,
+            generated_from_cv_version=cv.version,
+            updated_at=iso(self.now),
+        )
+        return ProfileProposalResult(proposed=proposed, diff=profile_diff(current, proposed), cv_version=cv.version)
+
     # ---- Settings (SET-01…07) ----
 
     def get_settings(self) -> SettingsResponse:
@@ -889,6 +929,8 @@ class Store:
         return SettingsResponse.model_validate(
             {
                 **data,
+                # SET-06: the real figure, from the rows the gateway writes (not a stored number).
+                "spentThisWeekUsd": spent_this_week_usd(self.s, self.now),
                 "demoMode": env.wera_demo_mode,
                 "secrets": SecretsStatus.model_validate(env.secret_status()).model_dump(),
                 "llmProvider": llm_provider_name(data["baseUrl"]),
@@ -917,7 +959,10 @@ class Store:
             return TestResult(
                 ok=False, code="DEMO_MODE", message="The key is set. Demo mode makes no outbound calls, so it wasn't tested."
             )
-        return TestResult(ok=False, code="NOT_IMPLEMENTED", message="Live connection tests aren't built yet.")
+        result = providers.check(provider, env)
+        if result.ok and provider == "llm":
+            self._save_settings({**self._settings(), "llmLastCheckedAt": iso(self.now)})
+        return result
 
 
 # ---------------------------------------------------------------------------

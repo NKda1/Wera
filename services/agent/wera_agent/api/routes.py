@@ -19,6 +19,7 @@ from ..schemas.api import (
     ImportUrlIn,
     JobList,
     NavCounts,
+    ProfileProposalResult,
     RegenerateIn,
     RunIn,
     ShortlistMeta,
@@ -218,6 +219,12 @@ def get_profile(s: S) -> SearchProfile:
 @router.put("/profile")
 def put_profile(s: S, body: SearchProfile) -> SearchProfile:
     return s.put_profile(body)
+
+
+@router.post("/profile/generate")
+def generate_profile(s: S) -> ProfileProposalResult:
+    """PRF-01, PRF-04: propose a profile from the CV and show the diff. Saves nothing."""
+    return s.generate_profile()
 
 
 # ---- settings ----

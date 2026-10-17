@@ -37,12 +37,14 @@ export function JobsScreen({
   meta,
   profile,
   sites,
+  cvVersion,
   today,
 }: {
   jobs: ScoredJob[];
   meta: Meta;
   profile: SearchProfile;
   sites: SiteOption[];
+  cvVersion: number;
   today: string;
 }) {
   const router = useRouter();
@@ -171,7 +173,7 @@ export function JobsScreen({
 
       <div className="mt-6 flex flex-col gap-4">
         {runIds.length ? <RunPanel runIds={runIds} onFinished={onRunsFinished} /> : null}
-        <ProfileCard profile={profile} channels={meta.channels} sites={sites} onPasteJob={() => setImporting(true)} />
+        <ProfileCard profile={profile} channels={meta.channels} sites={sites} cvVersion={cvVersion} onPasteJob={() => setImporting(true)} />
       </div>
 
       <div className="mt-6 flex flex-wrap items-center justify-between gap-3">

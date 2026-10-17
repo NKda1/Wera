@@ -7,6 +7,7 @@ from pydantic import Field
 from .applications import ApplicationListItem, ApplicationStatus
 from .base import Model, Opt, check, required
 from .jobs import ScoredJob
+from .profile import SearchProfile
 from .runs import ChannelSummary
 
 
@@ -66,6 +67,27 @@ class TestResult(Model):
 
 class CvVersion(Model):
     version: int
+
+
+class ListDiff(Model):
+    """What a regenerated profile would do to one list field (PRF-04)."""
+
+    added: list[str]
+    removed: list[str]
+    kept: list[str]
+
+
+class ScalarDiff(Model):
+    from_: str = Field(alias="from")
+    to: str
+
+
+class ProfileProposalResult(Model):
+    """A proposed profile and what it would change. Nothing is saved until the person PUTs it."""
+
+    proposed: SearchProfile
+    diff: dict[str, ListDiff | ScalarDiff]
+    cv_version: int
 
 
 # ---- Request bodies ----

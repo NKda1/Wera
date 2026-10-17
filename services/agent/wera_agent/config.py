@@ -2,11 +2,15 @@
 
 from datetime import date
 from functools import lru_cache
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .paths import CONFIG_DIR
+
+type Tier = Literal["fast", "scoring", "writing"]
+type Effort = Literal["off", "low", "on"]
 
 
 class Site(BaseModel):
@@ -33,12 +37,42 @@ class Weights(BaseModel):
     freshness: float
 
 
+class Price(BaseModel):
+    """USD per million tokens."""
+
+    input: float = Field(alias="in")
+    output: float = Field(alias="out")
+
+
+class Task(BaseModel):
+    """One row of the SPEC §9.3 task table."""
+
+    tier: Tier
+    max_tokens: int
+    reasoning: Effort
+
+
 class WeraConfig(BaseModel):
     models: Models
+    fallbacks: dict[str, list[str]] = {}
+    prices: dict[str, Price]
+    tasks: dict[str, Task]
     weights: Weights
     ats_threshold: float = 0.75
     weekly_budget_usd: float = 5
     cv_pages: int = 1
+    llm_timeout_seconds: int = 60
+    llm_max_retries: int = 2
+
+    def task(self, name: str) -> Task:
+        try:
+            return self.tasks[name]
+        except KeyError:
+            raise KeyError(f"{name} isn't in config/wera.yaml tasks (SPEC §9.3)") from None
+
+    def price(self, model: str) -> Price:
+        """An unlisted model is charged at `default`, never at zero."""
+        return self.prices.get(model) or self.prices["default"]
 
 
 def _load(name: str) -> dict:

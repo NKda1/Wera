@@ -365,6 +365,14 @@ export interface Link {
   label: string;
   url: string;
 }
+/**
+ * What a regenerated profile would do to one list field (PRF-04).
+ */
+export interface ListDiff {
+  added: string[];
+  kept: string[];
+  removed: string[];
+}
 export interface MasterCV {
   education: Education[];
   experience: Role[];
@@ -409,8 +417,19 @@ export interface ProfileChannels {
   inbox: boolean;
   watchlist: boolean;
 }
-export interface RunIds {
-  runIds: string[];
+/**
+ * A proposed profile and what it would change. Nothing is saved until the person PUTs it.
+ */
+export interface ProfileProposalResult {
+  cvVersion: number;
+  diff: {
+    [k: string]: ListDiff | ScalarDiff;
+  };
+  proposed: SearchProfile;
+}
+export interface ScalarDiff {
+  from: string;
+  to: string;
 }
 export interface SearchProfile {
   channels: ProfileChannels;
@@ -424,6 +443,9 @@ export interface SearchProfile {
   skills: string[];
   titles: string[];
   updatedAt: string;
+}
+export interface RunIds {
+  runIds: string[];
 }
 export interface SecretsStatus {
   firecrawl: SecretStatus;

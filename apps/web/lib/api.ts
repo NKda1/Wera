@@ -9,6 +9,7 @@ import type {
   IntakeChannel,
   IntakeRun,
   MasterCV,
+  ProfileProposalResult,
   ScoredJob,
   SearchProfile,
   Settings,
@@ -59,6 +60,8 @@ export const api = {
   cancelRun: (id: string) => call<IntakeRun>(`/api/intake/runs/${id}/cancel`, { method: "POST", body: {} }),
 
   putProfile: (p: SearchProfile) => call<SearchProfile>("/api/profile", { method: "PUT", body: p }),
+  /** PRF-04: a proposal and its diff. Nothing is saved until putProfile. */
+  generateProfile: () => call<ProfileProposalResult>("/api/profile/generate", { method: "POST", body: {} }),
 
   listApplications: () => call<{ items: (ApplicationWithJob & { coverage?: number })[] }>("/api/applications"),
   getApplication: (id: string) => call<ApplicationWithJob>(`/api/applications/${id}`),
