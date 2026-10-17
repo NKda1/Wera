@@ -79,7 +79,10 @@ def seed(session: Session, now: int) -> None:
         st.save_job(session, *seed_to_job(s, now), created_at=iso(now))
 
     store = st.Store(session, now)
-    for a in jobs["applications"]:
+    # Demo applications come with drafted packs, and drafting goes through the gateway — which
+    # outside demo mode means real model calls on fixture data, charged to the person's budget
+    # the first time they start WERA for real. So these belong to demo mode only.
+    for a in jobs["applications"] if settings.wera_demo_mode else []:
         job, evidence, questions = seed_to_job(a["job"], now, "closed" if a["status"] == "rejected" else "in_application")
         st.save_job(session, job, evidence, questions, created_at=iso(now))
         created = now - a["daysAgo"] * DAY

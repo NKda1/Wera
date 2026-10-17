@@ -18,7 +18,13 @@ SecretStatus = Literal["set", "missing", "invalid"]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=(AGENT_DIR / ".env", AGENT_DIR / ".env.local"), extra="ignore")
+    # One .env.local at the repo root holds the keys for both processes, and the last file wins,
+    # so the root file is authoritative. Every path here is gitignored (`.env` and `.env.*`
+    # match at any depth) and gitleaks blocks a key in a commit either way (SEC-01).
+    model_config = SettingsConfigDict(
+        env_file=(AGENT_DIR / ".env", AGENT_DIR / ".env.local", ROOT / ".env", ROOT / ".env.local"),
+        extra="ignore",
+    )
 
     wera_demo_mode: bool = True
     database_url: str | None = None

@@ -2,13 +2,14 @@
 browser never calls this service directly."""
 
 from collections.abc import Iterator
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Query, status
 
 from ..db.session import transaction
 from ..errors import ApiError
 from ..graphs.application import advance
+from ..llm.gateway import flush_unrecorded
 from ..schemas.api import (
     ApplicationList,
     ApplicationPatchIn,
@@ -43,12 +44,19 @@ STATUSES = ["new", "shortlisted", "in_application", "snoozed", "rejected", "hidd
 
 
 def store() -> Iterator[Store]:
-    with transaction() as session:
-        s = Store(session)
-        yield s
+    deferred: list[tuple[Any, str]] = []
+    try:
+        with transaction() as session:
+            s = Store(session)
+            deferred = s.deferred
+            yield s
+    finally:
+        # Runs even when the request failed, because a model call that failed still cost money
+        # and its row was rolled back with the rest of the work (see gateway._record).
+        flush_unrecorded()
     # Committed by now, so background work sees the decision it is acting on and doesn't
     # contend with this request for the write lock (see wera_agent/tasks.py).
-    for coro, name in s.deferred:
+    for coro, name in deferred:
         spawn(coro, name=name)
 
 

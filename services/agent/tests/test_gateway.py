@@ -14,10 +14,11 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from wera_agent.clock import iso
+from wera_agent.config import wera
 from wera_agent.db.models import ContactRow, LlmCallRow
 from wera_agent.domain.profile_diff import diff_lists, profile_diff
 from wera_agent.errors import ApiError
-from wera_agent.llm import prompts
+from wera_agent.llm import gateway, prompts
 from wera_agent.llm.gateway import structured
 from wera_agent.llm.pricing import WEEK_MS, spent_this_week_usd
 from wera_agent.pii import ContactRedactor
@@ -77,9 +78,15 @@ def garbage() -> httpx.Response:
 
 @pytest.fixture
 def live(monkeypatch):
-    """Demo mode off and a key set, so `structured()` takes the real path."""
+    """Demo mode off, a key set, and the provider answered by respx.
+
+    The provider SDK builds its own HTTP client, which respx can't patch, so the gateway's
+    `http_client` seam is pointed at respx's transport. pytest-socket fails the test if anything
+    still reaches for the network.
+    """
     monkeypatch.setenv("WERA_DEMO_MODE", "false")
     monkeypatch.setenv("LLM_API_KEY", "sk-or-v1-testkey")
+    monkeypatch.setattr(gateway, "http_client", httpx.Client(transport=httpx.MockTransport(respx.mock.handler)))
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -117,8 +124,10 @@ class TestHappyPath:
         (row,) = calls(store)
         assert (row.task, row.tier, row.ok, row.attempt) == ("profile.generate", "fast", True, 1)
         assert (row.input_tokens, row.output_tokens) == (1000, 500)
-        # config/wera.yaml prices the fast model at $0.05/$0.20 per million.
-        assert row.cost_usd == pytest.approx(1000 * 0.05 / 1e6 + 500 * 0.20 / 1e6)
+        # Priced from config/wera.yaml, read here rather than hardcoded so changing a model's
+        # price doesn't silently make this test wrong.
+        price = wera().price(FAST)
+        assert row.cost_usd == pytest.approx((1000 * price.input + 500 * price.output) / 1e6)
         assert row.latency_ms >= 0
         # PRIV-03: the row has no column that could hold prompt or reply text.
         assert not {"prompt", "completion", "text", "messages"} & set(LlmCallRow.__table__.columns.keys())
@@ -262,6 +271,24 @@ class TestContactNeverLeaves:
         assert "7700900123" not in sent
         assert "12 Example Street" not in sent
         assert "[[EMAIL]]" in sent and "[[PHONE]]" in sent and "[[ADDRESS]]" in sent
+
+    @respx.mock
+    def test_a_placeholder_echoed_back_is_restored(self, store, live):
+        """A model answers with the text it was given, so a masked value comes back masked. It
+        must not reach the database as a placeholder — WERA would search for "[[ADDRESS]]"."""
+        row = store.s.get(ContactRow, 1)
+        row.email, row.phone, row.address = "jordan@example.com", "+44 7700 900123", "London"
+        store.s.flush()
+        echo = {**GOOD, "locations": ["[[ADDRESS]]", "Berlin"]}
+        respx.post(COMPLETIONS).mock(return_value=reply(echo))
+        out = structured(
+            store.s,
+            "profile.generate",
+            ProfileProposal,
+            {"cv": f"{prompts.cv_text(store.cv())}\nBased in London", "current": "none"},
+            context={"cv": store.cv()},
+        )
+        assert out.locations == ["London", "Berlin"]
 
     def test_the_redactor_puts_them_back(self):
         contact = Contact(email="a@b.com", phone="+44 7700 900123", address="12 Example Street")

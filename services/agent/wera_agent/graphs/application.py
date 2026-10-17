@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from ..db.session import transaction
 from ..errors import ApiError
+from ..llm.gateway import flush_unrecorded
 from ..services import drafting
 from ..services.store import Store
 
@@ -206,6 +207,10 @@ async def advance(job_id: str, resume: dict[str, Any] | None) -> None:
         except Exception as exc:  # noqa: BLE001 — a background task must not die silently
             logfire.exception("Drafting {job_id} failed", job_id=job_id)
             await _record_failure(job_id, exc)
+        finally:
+            # A failed model call still cost money; its row was rolled back with the step that
+            # failed, so it is written here (see gateway._record).
+            flush_unrecorded()
 
 
 async def _record_failure(job_id: str, exc: BaseException) -> None:

@@ -10,7 +10,6 @@ dependencies = [
   "httpx==0.28.1",
   "langchain-core==1.6.11",
   "langchain-openai==1.7.2",
-  "langchain-openrouter==0.2.9",
   "langgraph==1.2.15",
   "langgraph-checkpoint-sqlite==3.1.2",
   "logfire[fastapi]==5.2.0",
