@@ -6,16 +6,24 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
   "alembic==1.20.0",
+  "apscheduler==3.11.3",
+  "dkimpy==1.1.8",
   "fastapi==0.143.2",
+  "fastembed==0.9.0",
+  "firecrawl-py==4.50.0",
   "httpx==0.28.1",
+  "imapclient==4.1.0",
   "langchain-core==1.6.11",
   "langchain-openai==1.7.2",
   "langgraph==1.2.15",
   "langgraph-checkpoint-sqlite==3.1.2",
   "logfire[fastapi]==5.2.0",
+  "numpy==2.5.4",
   "pydantic==2.14.1",
   "pydantic-settings==2.16.0",
   "pyyaml==6.0.3",
+  "rapidfuzz==3.14.6",
+  "selectolax==1.0.1",
   "sqlalchemy==2.1.4",
   "uvicorn==0.54.0",
 ]
@@ -46,6 +54,10 @@ packages = ["wera_agent"]
 testpaths = ["tests"]
 # DEMO-02: tests never touch the network. Loopback stays open for the in-process ASGI client.
 addopts = "--disable-socket --allow-unix-socket --allow-hosts=127.0.0.1,localhost"
+
+[tool.logfire]
+# Tests and one-off scripts don't configure logfire; the warning adds nothing.
+ignore_no_config = true
 
 [tool.ruff]
 line-length = 130

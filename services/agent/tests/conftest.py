@@ -23,6 +23,7 @@ def isolated(tmp_path, monkeypatch) -> Iterator[None]:
     monkeypatch.setenv("WERA_DEMO_MODE", "true")
     # DEMO-02: tests never send telemetry, even on a machine with a Logfire token.
     monkeypatch.setenv("LOGFIRE_ENABLED", "false")
+    monkeypatch.setenv("LOGFIRE_IGNORE_NO_CONFIG", "1")
     monkeypatch.setenv("AGENT_TOKEN", TOKEN)
     for name in ("LLM_API_KEY", "FIRECRAWL_API_KEY", "ALERTS_IMAP_APP_PASSWORD", "ALERTS_IMAP_USER"):
         monkeypatch.delenv(name, raising=False)
@@ -64,6 +65,20 @@ class Api:
 @pytest.fixture
 def api(client) -> Api:
     return Api(client)
+
+
+@pytest.fixture
+def outbound(monkeypatch):
+    """Demo mode off, for tests of code that makes real requests.
+
+    The shared HTTP client refuses every outbound call in demo mode (DEMO-02), so a test of a
+    live source has to turn it off. pytest-socket still fails the test if anything escapes the
+    respx mock.
+    """
+    monkeypatch.setenv("WERA_DEMO_MODE", "false")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture

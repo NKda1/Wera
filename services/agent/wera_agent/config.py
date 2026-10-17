@@ -23,6 +23,23 @@ class Site(BaseModel):
         return self.terms_reviewed_on is not None
 
 
+class Sender(BaseModel):
+    """An email sender WERA will read alerts from (MAIL-03)."""
+
+    domain: str
+    parser: Literal["linkedin", "indeed", "generic"]
+    enabled: bool = True
+
+
+class Company(BaseModel):
+    """An employer whose public ATS feed WERA watches (ATS-01)."""
+
+    name: str
+    vendor: Literal["greenhouse", "lever", "ashby"]
+    token: str
+    enabled: bool = True
+
+
 class Models(BaseModel):
     fast: str
     scoring: str
@@ -85,6 +102,16 @@ def sites() -> list[Site]:
     out = [Site.model_validate(s) for s in _load("sites.yaml").get("sites", [])]
     # SRCH-03: linkedin.com can never be a search site, whatever the file says.
     return [s for s in out if not (s.domain == "linkedin.com" or s.domain.endswith(".linkedin.com"))]
+
+
+@lru_cache
+def senders() -> list[Sender]:
+    return [Sender.model_validate(s) for s in _load("senders.yaml").get("senders", []) if s.get("enabled", True)]
+
+
+@lru_cache
+def companies() -> list[Company]:
+    return [Company.model_validate(c) for c in _load("companies.yaml").get("companies", []) if c.get("enabled", True)]
 
 
 @lru_cache

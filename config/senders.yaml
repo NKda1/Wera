@@ -1,0 +1,24 @@
+# Who may put a job in front of you by email (MAIL-03).
+#
+# An alert email is untrusted input: anyone can send one, and a job ad is a natural place to
+# hide an instruction aimed at a model. So two things must both hold before WERA reads one.
+#
+# 1. The sender's domain is on this list.
+# 2. DKIM verifies *and* the signing `d=` domain is aligned with that domain — a signature from
+#    somewhere else doesn't count, which is what stops a forged From: header.
+#
+# Anything else is recorded as rejected_unauthenticated and never parsed. Add a sender only
+# after you have seen a real alert from it.
+senders:
+  - domain: linkedin.com
+    parser: linkedin
+    enabled: true
+  - domain: indeed.com
+    parser: indeed
+    enabled: true
+  - domain: brightnetwork.co.uk
+    parser: generic
+    enabled: true
+  - domain: gradcracker.com
+    parser: generic
+    enabled: true

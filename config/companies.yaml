@@ -1,0 +1,28 @@
+# Employers whose public job feed WERA watches (ATS-01).
+#
+# These are the boards Greenhouse, Lever and Ashby publish for anyone — no key, no scraping, no
+# terms to accept. A company here is checked on the daily watchlist run, and a job that stops
+# appearing in its feed is marked closed (ATS-03).
+#
+# `token` is the board identifier in the employer's careers URL, not a secret:
+#   https://job-boards.greenhouse.io/<token>      https://jobs.lever.co/<token>
+#   https://jobs.ashbyhq.com/<token>
+#
+# The entries below are the demo set. Replace them with the employers you actually want to watch.
+companies:
+  - name: Fernhill AI
+    vendor: greenhouse
+    token: fernhillai
+    enabled: true
+  - name: Northwind Labs
+    vendor: greenhouse
+    token: northwindlabs
+    enabled: true
+  - name: Saltmarsh Analytics
+    vendor: lever
+    token: saltmarsh
+    enabled: true
+  - name: Veridian Health
+    vendor: ashby
+    token: veridianhealth
+    enabled: true
