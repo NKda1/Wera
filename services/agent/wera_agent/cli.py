@@ -78,10 +78,23 @@ def _reset(yes: bool) -> int:
     Base.metadata.drop_all(engine())
     with engine().begin() as conn:
         conn.exec_driver_sql("DROP TABLE IF EXISTS alembic_version")
+    _drop_checkpoints()
     reset_caches()
     ensure_database()
     print(f"Reset {label} database and seeded it.")
     return 0
+
+
+def _drop_checkpoints() -> None:
+    """Gate threads belong to the data that was just deleted, so they go with it."""
+    from pathlib import Path
+
+    from .graphs.checkpointer import checkpoint_target
+
+    kind, target = checkpoint_target()
+    if kind == "sqlite" and target != ":memory:":
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{target}{suffix}").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

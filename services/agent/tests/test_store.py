@@ -12,6 +12,13 @@ def ready_app(api) -> dict:
     return next(a for a in api.ok("GET", "/applications")["items"] if a["status"] == "ready_for_review")
 
 
+def approve_and_draft(api, drafted, job_id: str) -> dict:
+    """Gate 1 approval, then wait for the graph to draft the pack."""
+    api.ok("POST", f"/jobs/{job_id}/decision", {"action": "approve"})
+    drafted()
+    return next(a for a in api.ok("GET", "/applications")["items"] if a["jobId"] == job_id)
+
+
 class TestGate1:
     def test_lists_the_shortlist_best_first(self, api):
         jobs = api.ok("GET", "/jobs")["items"]
@@ -19,30 +26,39 @@ class TestGate1:
         assert [j["fit"]["total"] for j in jobs[:5]] == [8.6, 8.1, 7.4, 7.0, 6.2]
         assert api.ok("GET", "/nav") == {"jobs": 12, "review": 2, "demoMode": True}
 
-    def test_approving_creates_a_drafting_application_that_becomes_ready(self, api):
+    def test_approving_drafts_a_pack_and_waits_at_gate_2(self, api, drafted):
         api.ok("POST", "/jobs/job-fernhill-mle/decision", {"action": "approve"})
         app = next(a for a in api.ok("GET", "/applications")["items"] if a["jobId"] == "job-fernhill-mle")
+        # The decision returns before the pack exists: drafting happens after the response.
         assert app["status"] == "drafting"
         assert "pack" not in api.ok("GET", f"/applications/{app['id']}")
-        clock.advance(7000)
-        assert api.ok("GET", f"/applications/{app['id']}")["status"] == "ready_for_review"
+
+        drafted()
+        done = api.ok("GET", f"/applications/{app['id']}")
+        assert done["status"] == "ready_for_review"
+        assert done["pack"]["cv"]["sections"]
+        assert done["pack"]["letter"]["paragraphs"]
+        assert done["pack"]["ats"]["coverage"] > 0
         assert api.ok("GET", "/nav")["jobs"] == 11
         assert api.ok("GET", "/nav")["review"] == 3
 
-    def test_snoozes_rejects_and_refuses_a_second_decision(self, api):
+    def test_snoozes_rejects_and_refuses_a_second_decision(self, api, drafted):
         api.ok("POST", "/jobs/job-northwind-swe/decision", {"action": "snooze", "days": 3})
         api.ok("POST", "/jobs/job-kestrel-jaie/decision", {"action": "reject", "reason": "Wrong location"})
         assert "job-northwind-swe" not in [j["id"] for j in api.ok("GET", "/jobs")["items"]]
         assert api.code("POST", "/jobs/job-kestrel-jaie/decision", {"action": "approve"}) == "INVALID_STATE"
+        drafted()
 
-    def test_snoozed_jobs_come_back(self, api):
+    def test_snoozed_jobs_come_back(self, api, drafted):
         api.ok("POST", "/jobs/job-northwind-swe/decision", {"action": "snooze", "days": 1})
+        drafted()
         clock.advance(24 * 60 * 60 * 1000 + 1)
         assert "job-northwind-swe" in [j["id"] for j in api.ok("GET", "/jobs")["items"]]
 
-    def test_warns_before_a_second_application_to_the_same_company_and_title(self, api):
+    def test_warns_before_a_second_application_to_the_same_company_and_title(self, api, drafted):
         assert api.code("POST", "/jobs/job-lumen-be/decision", {"action": "approve"}) == "DUPLICATE_APPLICATION"
         assert api.code("POST", "/jobs/job-lumen-be/decision", {"action": "approve", "force": True}) == "OK"
+        drafted()
 
     def test_refuses_model_work_once_the_weekly_budget_is_used(self, api):
         api.ok("PUT", "/settings", {"weeklyBudgetUsd": 0.01})

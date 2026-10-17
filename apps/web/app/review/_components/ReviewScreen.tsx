@@ -14,7 +14,6 @@ import { Help, Label, Textarea } from "@/lib/ui/Field";
 import { Pill } from "@/lib/ui/Pill";
 import { Tabs } from "@/lib/ui/Tabs";
 import { useToast } from "@/lib/ui/Toast";
-import { DRAFT_TOTAL_MS } from "@/lib/drafting";
 import { AnswerPack, CvPaper, LetterPaper } from "./Documents";
 import { DraftProgress } from "./DraftProgress";
 import { ReviewRail } from "./ReviewRail";
@@ -59,7 +58,9 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
         (id) => !lines[id],
       )
     : [];
-  const readyAt = app.draftStartedAt ? new Date(new Date(app.draftStartedAt).getTime() + DRAFT_TOTAL_MS).toISOString() : app.createdAt;
+  // When drafting began. Phase 1 added a fixed 6s to guess when it finished; the graph
+  // takes as long as the models take, so the honest figure is the one that is stored.
+  const draftedAt = app.draftStartedAt ?? app.createdAt;
 
   const run = async (key: string, fn: () => Promise<ApplicationWithJob>, ok?: string) => {
     setBusy(key);
@@ -97,7 +98,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
           <h1 className="mt-3 text-[30px] leading-[1.1] font-bold tracking-[-0.02em] sm:text-h1">{app.job.title}</h1>
           <p className="mt-1.5 text-[15px] text-ink-2">
             {app.job.company} · {formatLocation(app.job)} · fit {app.job.fitTotal.toFixed(1)} ·{" "}
-            {app.status === "drafting" ? "drafting now" : `drafted ${formatAgo(readyAt)}`}
+            {app.status === "drafting" ? "drafting now" : `drafted ${formatAgo(draftedAt)}`}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

@@ -1,9 +1,11 @@
 """WERA's data and workflow behind the SPEC §9.1 routes: state machines (§7), Gate 1 and
 Gate 2, intake runs, documents and settings, on the database.
 
-Ported from the web app's Phase 1 demo store. Drafts and demo intake runs still advance
-with time (no background workers yet); the LangGraph application graph replaces drafting
-in a later milestone, and real intake replaces the demo runs.
+The store owns the database state machine and is what the HTTP routes talk to. Drafting a pack
+is the application graph's job (graphs/application.py): its nodes call the helpers under "what
+the application graph's nodes call" below, so each transition has one implementation.
+
+Demo intake runs still advance with time; real intake replaces them in a later milestone.
 """
 
 import re
@@ -38,7 +40,7 @@ from ..domain.scoring import build_fit_report, js_round
 from ..domain.text import is_linkedin_url, title_case
 from ..domain.vocab import cv_line_index, master_cv_text, text_has_term
 from ..errors import ApiError, validation_error
-from ..llm.demo import PackInput, generate_pack, guard_cv, refresh_ats
+from ..llm.demo import PackInput, guard_cv, refresh_ats
 from ..llm.gateway import structured
 from ..llm.pricing import spent_this_week_usd
 from ..llm.prompts import cv_text, profile_text
@@ -65,9 +67,8 @@ from ..settings import get_settings, llm_provider_name
 from . import providers
 from .demo_data import DAY, MIN, first_run_seeds, seed_to_job
 
-# Pack drafting steps (PERF-03), the same timings as the web app's progress UI.
-DRAFT_STEPS = [("cv", 2500), ("letter", 4500), ("ats", 6000)]
-DRAFT_TOTAL_MS = DRAFT_STEPS[-1][1]
+# The order the graph drafts a pack in, which the review screen shows as progress (PERF-03).
+DRAFT_ORDER = ("cv", "letter", "ats")
 RUN_MS = {"board_search": 6000, "email_alert": 3500, "watchlist": 2500}
 PACK_KINDS = ("cv", "letter", "ats", "answers")
 
@@ -143,6 +144,13 @@ def _human(status: str) -> str:
     return status.replace("_", " ")
 
 
+def _required(app_id: str | None) -> str:
+    """A graph node always has an application by the time it drafts; this says so out loud."""
+    if not app_id:
+        raise ApiError(409, "INVALID_STATE", "This thread has no application to draft into.")
+    return app_id
+
+
 class Store:
     """One unit of work on the database. Methods mirror the web app's API routes."""
 
@@ -150,6 +158,15 @@ class Store:
         self.s = session
         self.now = now if now is not None else now_ms()
         self._cv_cache: MasterCV | None = None
+        # Set by `decide` when an approval creates an application, so the route can hand it to
+        # the graph thread it resumes.
+        self.started_application_id: str | None = None
+        # Work to start once this unit of work is committed; see wera_agent/tasks.py.
+        self.deferred: list[tuple[Any, str]] = []
+
+    def defer(self, coro: Any, *, name: str) -> None:
+        """Run this after the transaction closes, not inside it."""
+        self.deferred.append((coro, name))
 
     # ---- loading ----
 
@@ -199,9 +216,8 @@ class Store:
                 job = self._job(row)
                 job.status, job.snoozed_until = "new", None
                 save_job(self.s, job)
-        for app in self.s.scalars(select(ApplicationRow).where(ApplicationRow.status == "drafting")).all():
-            if app.draft_started_at and now - parse_ms(app.draft_started_at) >= DRAFT_TOTAL_MS:
-                app.status = "ready_for_review"
+        # Drafting is no longer time-based: the application graph moves an application to
+        # ready_for_review when its nodes have actually finished (see graphs/application.py).
         for run in self.s.scalars(select(IntakeRunRow).where(IntakeRunRow.status == "running")).all():
             elapsed = now - parse_ms(run.started_at)
             run.progress = min(1, elapsed / run.duration_ms)
@@ -379,7 +395,9 @@ class Store:
                     )
                 job.status = "in_application"
                 save_job(self.s, job)
-                self.create_application(f"app-{job.id[4:]}-{self._next_id()}", job, status="drafting", created_at=iso(now))
+                app_id = f"app-{job.id[4:]}-{self._next_id()}"
+                self.create_application(app_id, job, status="drafting", created_at=iso(now))
+                self.started_application_id = app_id
             elif d.action == "snooze":
                 job.status, job.snoozed_until = "snoozed", iso(now + (d.days or 1) * DAY)
             else:
@@ -499,26 +517,118 @@ class Store:
     def create_application(
         self, app_id: str, job: Job, *, status: str, created_at: str, note: str | None = None, **fields: Any
     ) -> ApplicationRow:
+        """The row only. The documents arrive from the application graph, node by node."""
         row = ApplicationRow(
-            id=app_id, job_id=job.id, status=status, created_at=created_at, draft_started_at=created_at, **fields
+            id=app_id,
+            job_id=job.id,
+            status=status,
+            created_at=created_at,
+            draft_started_at=created_at,
+            draft_step="cv" if status == "drafting" else None,
+            change_note=note,
+            **fields,
         )
         self.s.add(row)
         self.s.flush()
-        self._save_pack(app_id, self._make_pack(job, note))
         return row
 
-    def _make_pack(self, job: Job, note: str | None = None) -> Pack:
-        questions = self._job_row(job.id).questions
-        return generate_pack(
-            PackInput(
-                job=job,
-                evidence=self._evidence(job.id),
-                questions=list(questions),
-                cv=self.cv(),
-                cv_pages=self._settings()["cvPages"],
-                note=note,
-            )
+    # ---- what the application graph's nodes call ----
+
+    def pack_input(self, job_id: str, *, note: str | None = None) -> PackInput:
+        """Everything a writing node needs, read fresh from the database."""
+        job = self._job(self._job_row(job_id))
+        return PackInput(
+            job=job,
+            evidence=self._evidence(job_id),
+            questions=list(self._job_row(job_id).questions),
+            cv=self.cv(),
+            cv_pages=self._settings()["cvPages"],
+            note=note,
         )
+
+    def set_draft_step(self, app_id: str | None, step: str) -> None:
+        """Records which document is being drafted (PERF-03).
+
+        The graph commits this on its own before the model call, so a screen polling in another
+        request sees the step that is running — not the one that just finished.
+        """
+        app = self._app_row(_required(app_id))
+        app.draft_step = step
+        app.draft_started_at = app.draft_started_at or iso(self.now)
+        self.s.flush()
+
+    def draft_input(self, app_id: str | None, *, note: str | None) -> PackInput:
+        """What a writing step needs, with the person's own change note if they left one."""
+        app = self._app_row(_required(app_id))
+        return self.pack_input(app.job_id, note=note or app.change_note)
+
+    def save_document(self, app_id: str | None, kind: str, document: Any) -> None:
+        """One document, as a new version (G2-02); earlier versions stay."""
+        self._save_document(_required(app_id), kind, document.model_dump(mode="json"))
+
+    def save_answers(self, app_id: str | None, items: list[AnswerItem]) -> None:
+        self._save_document(_required(app_id), "answers", {"items": [a.model_dump(mode="json") for a in items]})
+
+    def _save_document(self, app_id: str, kind: str, content: dict[str, Any]) -> None:
+        current = (
+            self.s.scalar(
+                select(func.max(DocumentRow.version)).where(DocumentRow.application_id == app_id, DocumentRow.kind == kind)
+            )
+            or 0
+        )
+        self.s.add(DocumentRow(application_id=app_id, kind=kind, version=current + 1, content=content, created_at=iso(self.now)))
+        self.s.flush()
+
+    def load_document[T](self, app_id: str | None, kind: str, model: type[T]) -> T:
+        row = self.s.scalars(
+            select(DocumentRow)
+            .where(DocumentRow.application_id == _required(app_id), DocumentRow.kind == kind)
+            .order_by(DocumentRow.version.desc())
+            .limit(1)
+        ).first()
+        if row is None:
+            raise ApiError(409, "INVALID_STATE", f"This application has no {kind} yet.")
+        return model.model_validate(row.content)  # type: ignore[attr-defined]
+
+    def mark_ready(self, app_id: str | None) -> None:
+        """The pack is drafted and Gate 2 is waiting on a person."""
+        app = self._app_row(_required(app_id))
+        app.status, app.draft_step, app.change_note = "ready_for_review", None, None
+        self.s.flush()
+
+    def clear_draft_step(self, app_id: str | None) -> None:
+        self._app_row(_required(app_id)).draft_step = None
+        self.s.flush()
+
+    def mark_draft_failed(self, job_id: str, code: str, message: str) -> None:
+        """Drafting stopped. The job goes back on the shortlist so the person can retry, and the
+        reason is kept on the application rather than lost in a log."""
+        app = self.s.scalars(
+            select(ApplicationRow)
+            .where(ApplicationRow.job_id == job_id, ApplicationRow.status == "drafting")
+            .order_by(ApplicationRow.created_at.desc())
+            .limit(1)
+        ).first()
+        if app is None:
+            return
+        app.status, app.draft_step = "changes_requested", None
+        app.notes = f"{message} ({code})"
+        self.s.flush()
+
+    def job_questions(self, job_id: str) -> list[str]:
+        return list(self._job_row(job_id).questions)
+
+    def set_job_questions(self, job_id: str, questions: list[str]) -> None:
+        self._job_row(job_id).questions = questions
+        self.s.flush()
+
+    def application_job_id(self, app_id: str) -> str:
+        """Which job an application belongs to — the graph's threads are keyed by job."""
+        return self._app_row(app_id).job_id
+
+    def drafting_job_ids(self) -> list[str]:
+        """Jobs whose application is mid-draft — the candidates for restart recovery (REL-03)."""
+        return list(self.s.scalars(select(ApplicationRow.job_id).where(ApplicationRow.status == "drafting")).all())
 
     def _load_pack(self, app_id: str) -> Pack | None:
         rows = self.s.scalars(select(DocumentRow).where(DocumentRow.application_id == app_id).order_by(DocumentRow.version)).all()
@@ -541,18 +651,7 @@ class Store:
             "answers": {"items": [a.model_dump(mode="json") for a in pack.answers]},
         }
         for kind in kinds:
-            current = (
-                self.s.scalar(
-                    select(func.max(DocumentRow.version)).where(DocumentRow.application_id == app_id, DocumentRow.kind == kind)
-                )
-                or 0
-            )
-            self.s.add(
-                DocumentRow(
-                    application_id=app_id, kind=kind, version=current + 1, content=content[kind], created_at=iso(self.now)
-                )
-            )
-        self.s.flush()
+            self._save_document(app_id, kind, content[kind])
 
     def _app_row(self, app_id: str) -> ApplicationRow:
         row = self.s.get(ApplicationRow, app_id)
@@ -561,11 +660,11 @@ class Store:
         return row
 
     def _draft(self, app: ApplicationRow) -> DraftProgress | None:
-        if app.status != "drafting" or not app.draft_started_at:
+        """Which document the graph is on, and how far through the pack that is (PERF-03)."""
+        if app.status != "drafting":
             return None
-        elapsed = self.now - parse_ms(app.draft_started_at)
-        step = next((s for s, ends in DRAFT_STEPS if elapsed < ends), DRAFT_STEPS[-1][0])
-        return DraftProgress(step=step, progress=min(1, elapsed / DRAFT_TOTAL_MS))
+        step = app.draft_step if app.draft_step in DRAFT_ORDER else DRAFT_ORDER[0]
+        return DraftProgress(step=step, progress=(DRAFT_ORDER.index(step) + 1) / (len(DRAFT_ORDER) + 1))
 
     def _with_job(self, app: ApplicationRow, include_pack: bool, pack: Pack | None = None) -> ApplicationWithJob:
         job = self._job(self._job_row(app.job_id))
@@ -620,11 +719,12 @@ class Store:
         if app.status not in ("ready_for_review", "changes_requested"):
             raise ApiError(409, "INVALID_STATE", "Only a pack waiting for review can be regenerated.")
         self._assert_budget()
-        job = self._job(self._job_row(app.job_id))
+        # Back to drafting. The graph redrafts from Gate 2 with the note as hints; the previous
+        # versions of each document stay, so nothing the person saw is lost (G2-02).
         app.status = "drafting"
         app.change_note = note.strip() or None
         app.draft_started_at = iso(self.now)
-        self._save_pack(app.id, self._make_pack(job, note))
+        app.draft_step = DRAFT_ORDER[0]
         self.s.add(DecisionRow(job_id=app.job_id, gate=2, decision="request_changes", note=note, decided_at=iso(self.now)))
         self.s.flush()
         return self._with_job(app, True)

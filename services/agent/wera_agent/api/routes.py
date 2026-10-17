@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, Depends, Query, status
 
 from ..db.session import transaction
 from ..errors import ApiError
+from ..graphs.application import advance
 from ..schemas.api import (
     ApplicationList,
     ApplicationPatchIn,
@@ -33,6 +34,7 @@ from ..schemas.profile import SearchProfile
 from ..schemas.runs import Estimate, IntakeRun, RunIds
 from ..schemas.settings import SettingsPatch, SettingsResponse
 from ..services.store import Store
+from ..tasks import spawn
 
 router = APIRouter()
 
@@ -42,7 +44,12 @@ STATUSES = ["new", "shortlisted", "in_application", "snoozed", "rejected", "hidd
 
 def store() -> Iterator[Store]:
     with transaction() as session:
-        yield Store(session)
+        s = Store(session)
+        yield s
+    # Committed by now, so background work sees the decision it is acting on and doesn't
+    # contend with this request for the write lock (see wera_agent/tasks.py).
+    for coro, name in s.deferred:
+        spawn(coro, name=name)
 
 
 S = Annotated[Store, Depends(store)]
@@ -102,8 +109,18 @@ def get_job(s: S, job_id: str) -> ScoredJob:
 
 @router.post("/jobs/{job_id}/decision")
 def decide(s: S, job_id: str, body: DecisionIn) -> ScoredJob:
-    """Gate 1: approve, snooze (1, 3 or 7 days) or reject (G1-02). Every decision is logged (MATCH-06)."""
-    return s.decide(job_id, body)
+    """Gate 1: approve, snooze (1, 3 or 7 days) or reject (G1-02). Every decision is logged (MATCH-06).
+
+    The decision is saved before the response goes out; the pack is drafted after it, by the
+    application graph, so the person isn't left waiting on a model call.
+    """
+    job = s.decide(job_id, body)
+    if body.action != "unhide":
+        s.defer(
+            advance(job_id, {"action": body.action, "applicationId": s.started_application_id, "note": body.reason}),
+            name=f"gate1:{job_id}",
+        )
+    return job
 
 
 # ---- applications and Gate 2 ----
@@ -122,19 +139,31 @@ def get_application(s: S, app_id: str) -> ApplicationWithJob:
 @router.patch("/applications/{app_id}")
 def patch_application(s: S, app_id: str, body: ApplicationPatchIn) -> ApplicationWithJob:
     """Tracker updates: status (only §7.2 transitions), notes and follow-up date."""
-    return s.patch_application(app_id, body)
+    job_id = s.application_job_id(app_id)
+    out = s.patch_application(app_id, body)
+    if body.status == "discarded":
+        # Gate 2, the third option: the thread ends rather than being left waiting.
+        s.defer(advance(job_id, {"action": "discard"}), name=f"gate2:{job_id}")
+    return out
 
 
 @router.post("/applications/{app_id}/regenerate")
 def regenerate(s: S, app_id: str, body: RegenerateIn) -> ApplicationWithJob:
     """Gate 2 "Request changes": the note goes to the writer and the pack is drafted again."""
-    return s.regenerate(app_id, body.note[:1000])
+    note = body.note[:1000]
+    job_id = s.application_job_id(app_id)
+    out = s.regenerate(app_id, note)
+    s.defer(advance(job_id, {"action": "request_changes", "note": note}), name=f"gate2:{job_id}")
+    return out
 
 
 @router.post("/applications/{app_id}/approve")
 def approve(s: S, app_id: str) -> ApplicationWithJob:
     """Gate 2 approval. Only a person can move an application to approved (§7.2)."""
-    return s.approve_pack(app_id)
+    job_id = s.application_job_id(app_id)
+    out = s.approve_pack(app_id)
+    s.defer(advance(job_id, {"action": "approve"}), name=f"gate2:{job_id}")
+    return out
 
 
 @router.patch("/documents/{doc_id}")

@@ -4,7 +4,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { DRAFT_TOTAL_MS } from "@/lib/drafting";
 import { formatAgo, formatLocation, pct } from "@/lib/format";
 import type { ApplicationWithJob } from "@/lib/types";
 import { Button, ButtonLink } from "@/lib/ui/Button";
@@ -108,7 +107,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function PackRow({ app, primary }: { app: Item; primary?: boolean }) {
-  const readyAt = app.draftStartedAt ? new Date(new Date(app.draftStartedAt).getTime() + DRAFT_TOTAL_MS).toISOString() : app.createdAt;
+  // When drafting began. Phase 1 added a fixed 6s to guess when it finished; the graph
+  // takes as long as the models take, so the honest figure is the one that is stored.
+  const draftedAt = app.draftStartedAt ?? app.createdAt;
   return (
     <Card className="flex flex-wrap items-center gap-4 p-5">
       <ScoreRing score={app.job.fitTotal} size="sm" />
@@ -119,7 +120,7 @@ function PackRow({ app, primary }: { app: Item; primary?: boolean }) {
           </Link>
         </h3>
         <p className="text-small text-ink-2">
-          {app.job.company} · {formatLocation(app.job)} · {app.status === "approved" ? `approved ${formatAgo(app.approvedAt)}` : `drafted ${formatAgo(readyAt)}`}
+          {app.job.company} · {formatLocation(app.job)} · {app.status === "approved" ? `approved ${formatAgo(app.approvedAt)}` : `drafted ${formatAgo(draftedAt)}`}
           {app.coverage != null ? ` · ATS ${pct(app.coverage)}` : ""}
         </p>
       </div>

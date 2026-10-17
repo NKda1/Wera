@@ -13,8 +13,6 @@ Two rules hold everywhere:
 The schema is attached by `gateway.structured()` through `with_structured_output()`, so these
 templates never describe the JSON shape; keeping it in one place stops the two drifting.
 
-Writing-tier prompts (`cv.tailor`, `letter.write`, `answers.draft`, `guard.repair`) arrive with
-the LangGraph nodes that call them.
 """
 
 from typing import Any
@@ -184,8 +182,76 @@ OUTREACH_DRAFT = ChatPromptTemplate.from_messages(
     ]
 )
 
+CV_TAILOR = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "Choose which lines of this CV to show for this job, and order them so the strongest "
+            "evidence comes first.\n\n"
+            "This is selection, not writing. Keep each line's wording as it is in the CV — you may "
+            "fix tense or trim a trailing clause, nothing more. Cite the id of every line you use. "
+            "List the ids you left out in `omittedBulletIds`; leaving a line out is normal and the "
+            "applicant can add it back.\n\n"
+            f"{_HONESTY}\n\n"
+            "Keep it to what fits {pages} page(s): about {budget} lines in total, at most 3 per role. "
+            "Skills must be the CV's own skills, spelled the same way.\n\n" + _DATA_RULE,
+        ),
+        ("human", "CV:\n{cv}\n\n{job}\n\nKeywords worth covering: {keywords}\n\nWhat the applicant asked for: {note}"),
+    ]
+)
+
+LETTER_WRITE = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "Write a cover letter of 3 or 4 paragraphs, 250–350 words: why this job, what in the "
+            "applicant's record fits it, and a close. Cite the CV line ids behind each paragraph.\n\n"
+            f"{_HONESTY}\n\n"
+            "Quote one fact about the company word for word from the post, in `companyQuote`, and use "
+            "it in the letter — it shows the letter was written for this job. Plain and specific: no "
+            "flattery, no 'I am passionate about', no claim the CV doesn't carry.\n\n" + _DATA_RULE,
+        ),
+        (
+            "human",
+            "CV:\n{cv}\n\n{job}\n\nThe tailored CV this letter goes with:\n{tailored}\n\nWhat the applicant asked for: {note}",
+        ),
+    ]
+)
+
+ANSWERS_DRAFT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "Answer each application question from the CV, citing the line ids you used.\n\n"
+            f"{_HONESTY}\n\n"
+            "If the CV has no evidence for a question, return `null` for that answer — the applicant "
+            "writes it themselves. A null answer is the right answer when the CV is silent; a guess "
+            "is not. Two or three sentences each.\n\n" + _DATA_RULE,
+        ),
+        ("human", "CV:\n{cv}\n\n{job}\n\nQuestions:\n{questions}"),
+    ]
+)
+
+GUARD_REPAIR = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "One line of a tailored CV or letter failed WERA's citation check. Rewrite it so every "
+            "claim it makes is carried by the cited lines, keeping the same meaning and length.\n\n"
+            "Fix it by removing or softening what isn't supported — never by citing a different line "
+            "to justify what the text says. If the line can't be supported by its sources, return "
+            "`null` for `item` and WERA will drop it and tell the applicant.\n\n" + _HONESTY,
+        ),
+        ("human", "The line:\n{text}\n\nIt cites these master-CV entries:\n{sources}\n\nWhat failed:\n{violations}"),
+    ]
+)
+
 TEMPLATES: dict[str, ChatPromptTemplate] = {
     "profile.generate": PROFILE_GENERATE,
+    "cv.tailor": CV_TAILOR,
+    "letter.write": LETTER_WRITE,
+    "answers.draft": ANSWERS_DRAFT,
+    "guard.repair": GUARD_REPAIR,
     "keywords.extract": KEYWORDS_EXTRACT,
     "match.verdict": MATCH_VERDICT,
     "fit.score": FIT_SCORE,

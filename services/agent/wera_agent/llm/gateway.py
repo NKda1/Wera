@@ -199,8 +199,13 @@ def structured[Out: BaseModel](
     variables: dict[str, Any],
     *,
     context: dict[str, Any] | None = None,
+    demo_input: Any = None,
 ) -> Out:
-    """Runs one §9.3 task and returns a validated object, or raises `ApiError` with a §9.4 code."""
+    """Runs one §9.3 task and returns a validated object, or raises `ApiError` with a §9.4 code.
+
+    `context` is the Pydantic validation context — pass `{"cv": cv}` so the CV-aware checks run.
+    `demo_input` is for the demo responders only: the real path never reads it.
+    """
     cfg = wera()
     spec = cfg.task(task)
     saved = state.settings_data(session)
@@ -223,7 +228,7 @@ def structured[Out: BaseModel](
         started = time.monotonic()
         model = f"demo:{saved.get('models', {}).get(spec.tier, spec.tier)}"
         try:
-            out = _validate(Output, demo.respond(task, prompt_vars, context), context)
+            out = _validate(Output, demo.respond(task, prompt_vars, context, demo_input), context)
         except ValidationError as exc:
             _record(session, task=task, tier=spec.tier, model=model, started=started, attempt=1, ok=False, code=BAD_OUTPUT)
             raise ApiError(500, BAD_OUTPUT, f"The demo responder for {task} doesn't match its schema.") from exc

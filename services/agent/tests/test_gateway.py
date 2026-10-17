@@ -96,8 +96,9 @@ def generate(store, **kwargs):
     )
 
 
-def calls(store) -> list[LlmCallRow]:
-    return list(store.s.scalars(select(LlmCallRow).order_by(LlmCallRow.id)).all())
+def calls(store, task: str = "profile.generate") -> list[LlmCallRow]:
+    """Rows for one task. Seeding the demo database drafts packs, so the table isn't empty."""
+    return list(store.s.scalars(select(LlmCallRow).where(LlmCallRow.task == task).order_by(LlmCallRow.id)).all())
 
 
 class TestHappyPath:

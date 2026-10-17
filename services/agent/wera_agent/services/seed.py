@@ -16,6 +16,7 @@ from ..schemas.cv import MasterCV
 from ..settings import get_settings
 from . import store as st
 from .demo_data import DAY, MIN, fixture, seed_to_job
+from .drafting import draft_pack
 
 
 def is_seeded(session: Session) -> bool:
@@ -97,3 +98,6 @@ def seed(session: Session, now: int) -> None:
             else None,
             notes=a.get("notes"),
         )
+        # The demo starts with finished packs, drafted by the same steps the graph runs, so the
+        # review screen has something to show before anyone approves anything.
+        draft_pack(session, app_id, ready=a["status"] == "ready_for_review")

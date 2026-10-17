@@ -4,7 +4,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from wera_agent import clock
+from wera_agent import clock, tasks
 from wera_agent.db.session import reset_caches, transaction
 from wera_agent.main import create_app
 from wera_agent.paths import FIXTURES_DIR
@@ -64,6 +64,21 @@ class Api:
 @pytest.fixture
 def api(client) -> Api:
     return Api(client)
+
+
+@pytest.fixture
+def drafted():
+    """Waits for the application graph to finish what a request set off.
+
+    A Gate 1 approval returns as soon as the decision is saved; the pack is drafted after the
+    response. Tests that care about the pack wait here, which is also what the review screen
+    does by polling.
+    """
+
+    def wait() -> None:
+        tasks.drain(timeout=60)
+
+    return wait
 
 
 @pytest.fixture

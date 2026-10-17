@@ -83,6 +83,9 @@ class ApplicationRow(Base):
     status: Mapped[str] = mapped_column(String(32), index=True)
     created_at: Mapped[str] = mapped_column(Iso)
     draft_started_at: Mapped[str | None] = mapped_column(Iso)
+    # Which document the graph is drafting. Phase 1 inferred this from elapsed time; a real
+    # node writes it now, and the review screen polls it (PERF-03).
+    draft_step: Mapped[str | None] = mapped_column(String(16))
     change_note: Mapped[str | None] = mapped_column(Text)
     approved_at: Mapped[str | None] = mapped_column(Iso)
     submitted_at: Mapped[str | None] = mapped_column(Iso)

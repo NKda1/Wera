@@ -1,13 +1,15 @@
 """The agent's FastAPI app. It listens on loopback and only answers the web app, which
 proves itself with a shared bearer token (AGENT_TOKEN)."""
 
+import asyncio
 import secrets
 from contextlib import asynccontextmanager
 
+import logfire
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import errors
+from . import errors, tasks
 from .api.routes import router
 from .clock import now_ms
 from .db.session import transaction
@@ -30,7 +32,16 @@ def ensure_database() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     ensure_database()
+    tasks.bind(asyncio.get_running_loop())
+    # REL-03: a thread that stopped mid-draft because the process went away is picked up here.
+    # One waiting at a gate is left alone — that one is waiting for a person, not for WERA.
+    from .graphs.application import resume_unfinished
+
+    resumed = await resume_unfinished()
+    if resumed:
+        logfire.info("Resumed {count} unfinished application thread(s) after restart", count=resumed)
     yield
+    await tasks.adrain(timeout=30)
 
 
 def create_app(*, manage_database: bool = True) -> FastAPI:

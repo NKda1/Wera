@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass
 
 from ..domain.guard import check_cited
+from ..domain.questions import SENSITIVE, kind, links_answer
 from ..domain.scoring import should_retry_tailoring
 from ..domain.vocab import skill_text, text_has_term
 from ..nodes.ats import build_ats
@@ -27,11 +28,6 @@ from ..schemas.pack import (
     TailoredCV,
 )
 
-SENSITIVE = re.compile(
-    r"(authori[sz]ed to work|right to work|visa|sponsor|salary|compensation|gender|ethnic|\brace\b|disabilit|veteran|criminal|convict|pronoun|sexual orientation|demographic|\bage\b)",
-    re.I,
-)
-
 
 @dataclass
 class PackInput:
@@ -41,6 +37,8 @@ class PackInput:
     cv: MasterCV
     cv_pages: int
     note: str | None = None
+    # The tailored CV, once a node has one: the letter and the answers are written against it.
+    doc: TailoredCV | None = None
 
 
 def lc_first(s: str) -> str:
@@ -253,9 +251,8 @@ def _build_answers(inp: PackInput, doc: TailoredCV) -> list[AnswerItem]:
         qid = f"q{i + 1}"
         if SENSITIVE.search(question):
             out.append(AnswerItem(id=qid, question=question, answer=None, source_ids=[], sensitive=True))
-        elif re.search(r"github|portfolio|website", question, re.I):
-            links = "\n".join(f"{ln.label}: {ln.url}" for ln in cv.person.links)
-            out.append(AnswerItem(id=qid, question=question, answer=links or None, source_ids=[], sensitive=False))
+        elif kind(question) == "links":
+            out.append(AnswerItem(id=qid, question=question, answer=links_answer(cv), source_ids=[], sensitive=False))
         elif re.match(r"^why\b", question, re.I) and cv.summary:
             fact = company_fact(job.description_md, job.company)
             answer = (
@@ -357,11 +354,75 @@ def _profile_proposal(cv: MasterCV) -> dict:
     }
 
 
-def respond(task: str, variables: dict, context: dict | None) -> dict:
-    """The demo answer for one §9.3 task. `context` carries the master CV when a task needs it."""
+def _budget(inp: PackInput) -> tuple[int, int]:
+    """How many lines fit, and how many per role — the Phase 1 rule, kept."""
+    short = bool(re.search(r"\b(short|shorter|trim|tighter|one page|1 page)\b", inp.note or "", re.I))
+    total = 5 if inp.cv_pages == 1 else 9
+    per_role = 2 if inp.cv_pages == 1 or short else 3
+    return (total - 1 if short else total), per_role
+
+
+def _cites(item: Cited) -> dict:
+    return {"text": item.text, "sourceIds": item.source_ids}
+
+
+def _tailor_output(inp: PackInput) -> dict:
+    """Selection, as the writing tier would return it. Keyword hints ride in on the note, which
+    `_note_hints` already reads, so the ATS retry loop needs nothing extra here."""
+    total, per_role = _budget(inp)
+    doc = _build_cv(inp, _select_bullets(inp, total, per_role, []))
+    items = {s.kind: [{"roleId": i.role_id, "bullets": [_cites(b) for b in i.bullets]} for i in s.items] for s in doc.sections}
+    return {
+        "summary": _cites(doc.summary),
+        "experience": items.get("experience", []),
+        "projects": items.get("projects", []),
+        "skills": doc.skills,
+        "omittedBulletIds": doc.omitted_bullet_ids,
+    }
+
+
+def _letter_output(inp: PackInput) -> dict:
+    if inp.doc is None:
+        raise KeyError("letter.write needs the tailored CV")
+    letter = _build_letter(inp, inp.doc)
+    return {
+        "greeting": letter.greeting,
+        "paragraphs": [_cites(p) for p in letter.paragraphs],
+        "signoff": letter.signoff,
+        "companyQuote": letter.company_fact.quote,
+    }
+
+
+def _answers_output(inp: PackInput) -> dict:
+    """Only the questions a model would really be asked: the node answers the sensitive and
+    link ones itself, so returning them here would break the schema that requires citations."""
+    drafted = _build_answers(inp, inp.doc or TailoredCV.model_construct(sections=[]))
+    return {
+        "answers": [{"id": a.id, "answer": a.answer, "sourceIds": a.source_ids} for a in drafted if kind(a.question) == "draft"],
+    }
+
+
+def respond(task: str, variables: dict, context: dict | None, demo_input: PackInput | None = None) -> dict:
+    """The demo answer for one §9.3 task.
+
+    `context` carries the master CV; `demo_input` carries the job, evidence and questions for the
+    pack tasks. The gateway validates whatever comes back against the same schema as a real reply.
+    """
     cv = (context or {}).get("cv")
     if task == "profile.generate":
         if cv is None:
             raise KeyError("profile.generate needs the master CV in validation context")
         return _profile_proposal(cv)
+    if task == "guard.repair":
+        # The demo writer only ever copies master-CV lines, so there is nothing to repair. Saying
+        # so (rather than inventing a fix) is what the real model does when it can't help either.
+        return {"item": None}
+    if demo_input is None:
+        raise KeyError(f"The demo responder for {task!r} needs demo_input=PackInput")
+    if task == "cv.tailor":
+        return _tailor_output(demo_input)
+    if task == "letter.write":
+        return _letter_output(demo_input)
+    if task == "answers.draft":
+        return _answers_output(demo_input)
     raise KeyError(f"No demo responder for task {task!r}. Add one here, next to the real prompt.")
