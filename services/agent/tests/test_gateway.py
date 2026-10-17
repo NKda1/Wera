@@ -60,6 +60,22 @@ def reply(payload: dict, *, model: str = FAST, tokens: tuple[int, int] = (1000, 
     )
 
 
+def truncated() -> httpx.Response:
+    """A reply cut off because the model's thinking used the whole token budget."""
+    return httpx.Response(
+        200,
+        json={
+            "id": "gen-test",
+            "model": FAST,
+            "object": "chat.completion",
+            "created": 0,
+            "system_fingerprint": "fp-test",
+            "choices": [{"index": 0, "finish_reason": "length", "message": {"role": "assistant", "content": ""}}],
+            "usage": {"prompt_tokens": 800, "completion_tokens": 2700, "total_tokens": 3500},
+        },
+    )
+
+
 def garbage() -> httpx.Response:
     """A reply that isn't the JSON the schema asked for at all."""
     return httpx.Response(
@@ -193,6 +209,20 @@ class TestBadOutput:
         with pytest.raises(ApiError):
             store.generate_profile()
         assert store.get_profile() == before
+
+
+class TestTruncation:
+    @respx.mock
+    def test_a_cut_off_reply_says_so_and_is_not_retried(self, store, live):
+        """A budget too small for the model's thinking cuts the answer off. Retrying would cut
+        it off the same way, so WERA names the cause instead of calling it a bad shape."""
+        route = respx.post(COMPLETIONS).mock(return_value=truncated())
+        with pytest.raises(ApiError) as caught:
+            generate(store)
+        assert caught.value.code == "LLM_TRUNCATED"
+        assert "token budget" in caught.value.message
+        assert route.call_count == 1  # not retried
+        assert calls(store)[-1].code == "LLM_TRUNCATED"
 
 
 class TestFallbacks:

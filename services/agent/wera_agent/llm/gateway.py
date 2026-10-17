@@ -46,6 +46,7 @@ AUTH = "LLM_AUTH_FAILED"
 QUOTA = "LLM_QUOTA"
 RATE = "LLM_RATE_LIMITED"
 TIMEOUT = "LLM_TIMEOUT"
+TRUNCATED = "LLM_TRUNCATED"
 BAD_OUTPUT = "LLM_BAD_OUTPUT"
 UPSTREAM = "LLM_UPSTREAM"
 BUDGET = "BUDGET_REACHED"
@@ -58,6 +59,11 @@ MESSAGES = {
     ),
     RATE: "The model provider is rate-limiting WERA. Wait a moment and try again.",
     TIMEOUT: "The model took too long to answer.",
+    TRUNCATED: (
+        "The model ran out of room before it finished — its thinking used the whole token "
+        "budget. Give this task more tokens in config/wera.yaml, or choose a model that thinks "
+        "less for this tier in Settings."
+    ),
     BAD_OUTPUT: "The model didn't answer in the shape WERA needs, twice. Nothing was saved.",
     UPSTREAM: "The model provider couldn't be reached.",
     BUDGET: "This week's budget is used up. Raise it in Settings, or wait for the week to roll over.",
@@ -348,6 +354,21 @@ def structured[Out: BaseModel](
         turn = [*messages, ("human", RETRY_NOTE.format(errors=errors))] if errors else messages
         try:
             result: Any = chain.invoke(turn)
+        except openai.LengthFinishReasonError:
+            # The provider cut the reply off mid-answer. Retrying with the same budget would cut
+            # it off again, so this is reported rather than retried.
+            _record(
+                session,
+                task=task,
+                tier=spec.tier,
+                model=models[0],
+                started=started,
+                attempt=attempt,
+                ok=False,
+                code=TRUNCATED,
+            )
+            logfire.warn("{task} was cut off at {tokens} tokens", task=task, tokens=spec.max_tokens + _HEADROOM[spec.reasoning])
+            raise _fail(TRUNCATED) from None
         except (OutputParserException, ValidationError, JSONDecodeError) as exc:
             # The provider answered; it just didn't answer in the required shape. That is a bad
             # reply to retry, not a provider WERA couldn't reach.
@@ -363,12 +384,36 @@ def structured[Out: BaseModel](
                 session, task=task, tier=spec.tier, model=models[0], started=started, attempt=attempt, ok=False, code=BAD_OUTPUT
             )
             errors = _problems(problem)
-            logfire.warn("{task} returned an unusable shape on attempt {attempt}", task=task, attempt=attempt)
+            logfire.warn(
+                "{task} returned an unusable shape on attempt {attempt}: {fields}",
+                task=task,
+                attempt=attempt,
+                fields=_problem_fields(problem),
+            )
             continue
 
         raw = result.get("raw") if isinstance(result, dict) else None
         usage = getattr(raw, "usage_metadata", None) or {}
-        model = (getattr(raw, "response_metadata", {}) or {}).get("model_name") or models[0]
+        metadata = getattr(raw, "response_metadata", {}) or {}
+        model = metadata.get("model_name") or models[0]
+
+        if metadata.get("finish_reason") == "length":
+            # The reply was cut off, so there is nothing to validate and nothing a retry would
+            # fix: the same budget would cut off the same way. Say what actually happened.
+            _record(
+                session,
+                task=task,
+                tier=spec.tier,
+                model=model,
+                started=started,
+                attempt=attempt,
+                ok=False,
+                code=TRUNCATED,
+                usage=usage,
+            )
+            logfire.warn("{task} was cut off at {tokens} tokens", task=task, tokens=spec.max_tokens + _HEADROOM[spec.reasoning])
+            raise _fail(TRUNCATED)
+
         parsed = result.get("parsed") if isinstance(result, dict) else result
         problem = result.get("parsing_error") if isinstance(result, dict) else None
 
@@ -394,9 +439,22 @@ def structured[Out: BaseModel](
             usage=usage,
         )
         errors = _problems(problem)
-        logfire.warn("{task} returned an unusable shape on attempt {attempt}", task=task, attempt=attempt)
+        logfire.warn(
+            "{task} returned an unusable shape on attempt {attempt}: {fields}",
+            task=task,
+            attempt=attempt,
+            fields=_problem_fields(problem),
+        )
 
     raise _fail(BAD_OUTPUT)
+
+
+def _problem_fields(problem: Any) -> str:
+    """Which fields a model got wrong, for the log. Field paths and rule names only — no values,
+    so a log line can't carry anything about the person (PRIV-03)."""
+    if isinstance(problem, ValidationError):
+        return ", ".join(sorted({f"{'.'.join(str(p) for p in e['loc'])} ({e['type']})" for e in problem.errors()})) or "unknown"
+    return "reply was not valid JSON"
 
 
 def _problems(problem: Any) -> str:

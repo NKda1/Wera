@@ -52,7 +52,10 @@ def configure(app: FastAPI) -> None:
             environment="demo" if s.wera_demo_mode else "real",
             send_to_logfire="if-token-present" if s.logfire_enabled else False,
             data_dir=ROOT / ".logfire",
-            console=False,
+            # Warnings and errors print to the terminal; spans and info lines don't, so `pnpm dev`
+            # stays readable. Without this a drafting failure was visible only in Logfire, which
+            # is no help to someone running WERA with no token.
+            console=logfire.ConsoleOptions(min_log_level="warn", span_style="simple"),
         )
         _configured = True
         if s.logfire_enabled:

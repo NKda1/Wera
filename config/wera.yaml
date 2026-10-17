@@ -5,7 +5,7 @@
 models:
   fast: qwen/qwen3.7-flash
   scoring: qwen/qwen3.8-27b
-  writing: qwen/qwen3.8-max-0902
+  writing: deepseek/deepseek-v4.1-flash-1017
 
 # Tried in order when the tier's model fails with a transport or server error. A different
 # vendor first, so a provider outage doesn't take every attempt with it.
@@ -23,6 +23,7 @@ prices:
   qwen/qwen3.7-flash: { in: 0.03, out: 0.13 }
   qwen/qwen3.8-27b: { in: 0.24, out: 2.20 }
   qwen/qwen3.8-max-0902: { in: 2.00, out: 6.00 }
+  deepseek/deepseek-v4.1-flash-1017: { in: 0.15, out: 0.60 }
   mistralai/mistral-small-3.2-24b-instruct: { in: 0.09, out: 0.25 }
   google/gemini-2.5-flash-lite: { in: 0.10, out: 0.40 }
 
