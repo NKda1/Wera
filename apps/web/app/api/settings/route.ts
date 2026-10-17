@@ -1,12 +1,10 @@
-import { handle, readJson } from "@/lib/server/http";
-import { parse, SettingsPatchSchema } from "@/lib/server/schemas";
-import { getSettings, putSettings } from "@/lib/server/store";
+import { forward } from "@/lib/server/agent";
 
-/** Non-secret settings plus key status (set / missing). Key values are never read here (SET-01, SET-07). */
-export async function GET() {
-  return handle(() => getSettings());
+/** Non-secret settings plus key status (set / missing). Key values never reach this app (SET-01, SET-07). */
+export async function GET(req: Request) {
+  return forward(req, "/settings");
 }
 
 export async function PUT(req: Request) {
-  return handle(async () => putSettings(parse(SettingsPatchSchema, await readJson(req))));
+  return forward(req, "/settings");
 }

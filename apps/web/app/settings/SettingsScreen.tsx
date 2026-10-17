@@ -210,9 +210,32 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
   );
 }
 
-function KeysCard({ settings }: { settings: SettingsResponse }) {
+/** SET-02: one live check per provider. The reply is already sanitised by the agent (§9.4). */
+function TestConnection({ provider }: { provider: "llm" | "firecrawl" | "inbox" }) {
   const toast = useToast();
   const [testing, setTesting] = useState(false);
+  return (
+    <Button
+      variant="secondary"
+      busy={testing}
+      onClick={async () => {
+        setTesting(true);
+        try {
+          const r = await api.testProvider(provider);
+          toast({ tone: r.ok ? "ok" : "attention", message: r.message });
+        } catch (err) {
+          toast({ tone: "error", message: err instanceof Error ? err.message : "Test failed." });
+        } finally {
+          setTesting(false);
+        }
+      }}
+    >
+      Test connection
+    </Button>
+  );
+}
+
+function KeysCard({ settings }: { settings: SettingsResponse }) {
   const missing = Object.values(settings.secrets).some((s) => s !== "set");
   return (
     <Card className="p-5 sm:p-6" aria-labelledby="keys-title">
@@ -230,30 +253,23 @@ function KeysCard({ settings }: { settings: SettingsResponse }) {
               ? `Set on server · ${settings.llmProvider}`
               : "Not set · scoring and writing use the mock model in demo mode."
           }
-          action={
-            <Button
-              variant="secondary"
-              busy={testing}
-              onClick={async () => {
-                setTesting(true);
-                try {
-                  const r = await api.testProvider("llm");
-                  toast({ tone: r.ok ? "ok" : "attention", message: r.message });
-                } catch (err) {
-                  toast({ tone: "error", message: err instanceof Error ? err.message : "Test failed." });
-                } finally {
-                  setTesting(false);
-                }
-              }}
-            >
-              Test connection
-            </Button>
-          }
+          action={settings.secrets.llm === "set" ? <TestConnection provider="llm" /> : undefined}
         />
         <KeyRow
           name="FIRECRAWL_API_KEY"
           status={settings.secrets.firecrawl}
           detail={settings.secrets.firecrawl === "set" ? "Set on server · job-board discovery is on." : "Not set · job-board discovery is off. Greenhouse, Lever and Ashby imports still work."}
+          action={settings.secrets.firecrawl === "set" ? <TestConnection provider="firecrawl" /> : undefined}
+        />
+        <KeyRow
+          name="ALERTS_IMAP_APP_PASSWORD"
+          status={settings.secrets.inbox}
+          detail={
+            settings.secrets.inbox === "set"
+              ? `Set on server · read-only access to ${settings.inbox.folder}.`
+              : "Not set · the alert inbox channel is off."
+          }
+          action={settings.secrets.inbox === "set" ? <TestConnection provider="inbox" /> : undefined}
         />
       </ul>
       {missing ? (

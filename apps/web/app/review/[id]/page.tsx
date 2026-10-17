@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { agent } from "@/lib/server/agent";
 import { ApiError } from "@/lib/server/http";
-import { cvLines, getApplication, getCv, getJob } from "@/lib/server/store";
 import { ReviewScreen } from "../_components/ReviewScreen";
 
 export const metadata: Metadata = { title: "Review pack" };
@@ -12,11 +12,11 @@ export default async function ReviewPackPage({ params }: { params: Promise<{ id:
   const { id } = await params;
   let app;
   try {
-    app = getApplication(id);
+    app = await agent.getApplication(id);
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) notFound();
     throw err;
   }
-  const job = getJob(app.jobId);
-  return <ReviewScreen initial={app} cv={getCv()} lines={cvLines()} vendor={job.ats ? VENDORS[job.ats.vendor] : undefined} />;
+  const [job, cv, lines] = await Promise.all([agent.getJob(app.jobId), agent.getCv(), agent.cvLines()]);
+  return <ReviewScreen initial={app} cv={cv} lines={lines} vendor={job.ats ? VENDORS[job.ats.vendor] : undefined} />;
 }

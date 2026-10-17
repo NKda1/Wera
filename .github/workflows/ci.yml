@@ -50,17 +50,42 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: No NEXT_PUBLIC_ secrets (SEC-03)
         run: pnpm check:public-env
+      - name: TypeScript contracts match the Pydantic schemas (SCH-03)
+        run: pnpm --filter web check:contracts
       - run: pnpm typecheck
-      - run: pnpm test
+      - run: pnpm --filter web test
       - run: pnpm build
       - name: No key-like strings in the client bundle (SEC-02, T-02)
         run: pnpm scan:bundle
+
+  agent:
+    name: Agent (lint, tests, schemas)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/agent
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - name: Tests, with outbound network blocked (DEMO-02)
+        run: uv run pytest -q
+      - name: Committed JSON Schemas match the Pydantic models (SCH-03)
+        run: uv run wera schemas --check
 
   e2e:
     name: End-to-end journeys (demo mode)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --project services/agent
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:

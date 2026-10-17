@@ -1,24 +1,24 @@
 "use client";
 
-import { Check, Lock } from "lucide-react";
+import { Check, Download, Lock } from "lucide-react";
 import type { AtsReport, Pack } from "@/lib/types";
-import { Button } from "@/lib/ui/Button";
+import { buttonClass } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { Chip, ChipList } from "@/lib/ui/Chip";
 import { cn } from "@/lib/ui/cn";
 
 export function ReviewRail({
   pack,
+  appId,
   approved,
   cvVersion,
   missingSourceIds,
-  onDownload,
 }: {
   pack: Pack;
+  appId: string;
   approved: boolean;
   cvVersion: number;
   missingSourceIds: string[];
-  onDownload: (format: "pdf" | "docx") => void;
 }) {
   const bullets = pack.cv.sections.flatMap((s) => s.items.flatMap((i) => i.bullets));
   const cited = bullets.filter((b) => b.sourceIds.length > 0).length;
@@ -73,18 +73,46 @@ export function ReviewRail({
         </p>
       ) : null}
 
-      <div className="grid grid-cols-2 gap-2">
-        <Button variant="secondary" disabled={!approved} onClick={() => onDownload("pdf")}>
-          {!approved ? <Lock className="size-3.5" aria-hidden="true" /> : null}
-          Download PDF
-        </Button>
-        <Button variant="secondary" disabled={!approved} onClick={() => onDownload("docx")}>
-          {!approved ? <Lock className="size-3.5" aria-hidden="true" /> : null}
-          Download DOCX
-        </Button>
-      </div>
-      {!approved ? <p className="-mt-2 text-small text-ink-2">Approve the pack to unlock downloads.</p> : null}
+      {/* EXP-01: the CV and the letter, each as PDF and DOCX. Contact details are added by the route. */}
+      <section aria-label="Downloads" className="flex flex-col gap-3">
+        {(
+          [
+            ["Tailored CV", "cv"],
+            ["Cover letter", "letter"],
+          ] as const
+        ).map(([label, kind]) => (
+          <div key={kind}>
+            <p className="mb-1.5 text-small font-semibold text-ink-2">{label}</p>
+            <div className="grid grid-cols-2 gap-2">
+              {(["pdf", "docx"] as const).map((format) => (
+                <DownloadLink key={format} docId={`${appId}.${kind}`} format={format} label={label} approved={approved} />
+              ))}
+            </div>
+          </div>
+        ))}
+        {!approved ? <p className="text-small text-ink-2">Approve the pack to unlock downloads.</p> : null}
+      </section>
     </div>
+  );
+}
+
+/** A real browser download, so the file is streamed rather than fetched into memory. */
+function DownloadLink({ docId, format, label, approved }: { docId: string; format: "pdf" | "docx"; label: string; approved: boolean }) {
+  const name = format.toUpperCase();
+  const describe = `Download ${label} as ${name}`;
+  if (!approved) {
+    return (
+      <button type="button" disabled className={buttonClass("secondary")} aria-label={describe}>
+        <Lock className="size-3.5" aria-hidden="true" />
+        {name}
+      </button>
+    );
+  }
+  return (
+    <a href={`/api/documents/${encodeURIComponent(docId)}/export?format=${format}`} download className={buttonClass("secondary")} aria-label={describe}>
+      <Download className="size-4" aria-hidden="true" />
+      {name}
+    </a>
   );
 }
 

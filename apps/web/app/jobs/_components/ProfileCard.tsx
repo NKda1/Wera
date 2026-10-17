@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api, ApiRequestError } from "@/lib/api";
-import type { ChannelSummary, Recency, SearchProfile, Seniority } from "@/lib/types";
+import type { ChannelSummary, ProfileProposalResult, Recency, SearchProfile, Seniority } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card, CardHeader, SectionLabel } from "@/lib/ui/Card";
 import { Chip, ChipList } from "@/lib/ui/Chip";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/ui/cn";
 import { Dialog } from "@/lib/ui/Dialog";
 import { Checkbox, FieldError, Label, Select } from "@/lib/ui/Field";
 import { useToast } from "@/lib/ui/Toast";
+import { RegenerateDialog } from "./RegenerateDialog";
 
 export type SiteOption = { domain: string; name: string; reviewed: boolean };
 
@@ -21,14 +22,33 @@ export function ProfileCard({
   profile,
   channels,
   sites,
+  cvVersion,
   onPasteJob,
 }: {
   profile: SearchProfile;
   channels: ChannelSummary[];
   sites: SiteOption[];
+  cvVersion: number;
   onPasteJob: () => void;
 }) {
+  const toast = useToast();
   const [editing, setEditing] = useState(false);
+  const [proposal, setProposal] = useState<ProfileProposalResult>();
+  const [generating, setGenerating] = useState(false);
+  // PRF-04: the CV has moved on since this profile was generated.
+  const stale = cvVersion > profile.generatedFromCvVersion;
+
+  const regenerate = async () => {
+    setGenerating(true);
+    try {
+      setProposal(await api.generateProfile());
+    } catch (err) {
+      toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't propose a profile." });
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   return (
     <Card className="p-5 sm:p-6" aria-labelledby="profile-title">
       <CardHeader
@@ -36,11 +56,23 @@ export function ProfileCard({
         title="Searching with your master CV"
         description="This search profile was generated from your CV. Edit it any time; every result is matched back against the CV."
         action={
-          <Button variant="secondary" onClick={() => setEditing(true)}>
-            Edit profile
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={regenerate} busy={generating}>
+              Regenerate from CV
+            </Button>
+            <Button variant="secondary" onClick={() => setEditing(true)}>
+              Edit profile
+            </Button>
+          </div>
         }
       />
+
+      {stale ? (
+        <p className="mt-4 rounded-control bg-amber-50 px-3.5 py-2.5 text-small text-amber-700">
+          This profile came from master CV v{profile.generatedFromCvVersion}; you&apos;re on v{cvVersion} now. Regenerate to see what
+          would change — you choose what to keep.
+        </p>
+      ) : null}
 
       <div className="mt-5 grid gap-x-8 gap-y-4 sm:grid-cols-2">
         <ChipGroup label="Target titles" items={profile.titles} />
@@ -68,6 +100,7 @@ export function ProfileCard({
       </button>
 
       {editing ? <ProfileDialog profile={profile} sites={sites} onClose={() => setEditing(false)} /> : null}
+      {proposal ? <RegenerateDialog result={proposal} current={profile} onClose={() => setProposal(undefined)} /> : null}
     </Card>
   );
 }

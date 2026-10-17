@@ -1,0 +1,2166 @@
+{
+  "$defs": {
+    "AnswerItem": {
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "sensitive": {
+          "type": "boolean"
+        },
+        "sourceIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "question",
+        "answer",
+        "sourceIds",
+        "sensitive"
+      ],
+      "title": "AnswerItem",
+      "type": "object"
+    },
+    "ApiErrorBody": {
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorDetail"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "title": "ApiErrorBody",
+      "type": "object"
+    },
+    "Application": {
+      "properties": {
+        "approvedAt": {
+          "type": "string"
+        },
+        "changeNote": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "draftStartedAt": {
+          "type": "string"
+        },
+        "followUpAt": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "pack": {
+          "$ref": "#/$defs/Pack"
+        },
+        "status": {
+          "$ref": "#/$defs/ApplicationStatus"
+        },
+        "submittedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "jobId",
+        "status",
+        "createdAt"
+      ],
+      "title": "Application",
+      "type": "object"
+    },
+    "ApplicationJob": {
+      "properties": {
+        "applyUrl": {
+          "type": "string"
+        },
+        "company": {
+          "type": "string"
+        },
+        "fitTotal": {
+          "type": "number"
+        },
+        "id": {
+          "type": "string"
+        },
+        "linkedinUrl": {
+          "type": "string"
+        },
+        "location": {
+          "$ref": "#/$defs/Location"
+        },
+        "remote": {
+          "anyOf": [
+            {
+              "enum": [
+                "remote",
+                "hybrid",
+                "onsite"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "company",
+        "location",
+        "remote",
+        "fitTotal"
+      ],
+      "title": "ApplicationJob",
+      "type": "object"
+    },
+    "ApplicationList": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ApplicationListItem"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "ApplicationList",
+      "type": "object"
+    },
+    "ApplicationListItem": {
+      "properties": {
+        "approvedAt": {
+          "type": "string"
+        },
+        "changeNote": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "draft": {
+          "$ref": "#/$defs/DraftProgress"
+        },
+        "draftStartedAt": {
+          "type": "string"
+        },
+        "followUpAt": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "job": {
+          "$ref": "#/$defs/ApplicationJob"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "pack": {
+          "$ref": "#/$defs/Pack"
+        },
+        "status": {
+          "$ref": "#/$defs/ApplicationStatus"
+        },
+        "submittedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "jobId",
+        "status",
+        "createdAt",
+        "job"
+      ],
+      "title": "ApplicationListItem",
+      "type": "object"
+    },
+    "ApplicationStatus": {
+      "enum": [
+        "drafting",
+        "ready_for_review",
+        "changes_requested",
+        "approved",
+        "submitted",
+        "interview",
+        "offer",
+        "rejected",
+        "discarded",
+        "withdrawn"
+      ],
+      "type": "string"
+    },
+    "ApplicationWithJob": {
+      "properties": {
+        "approvedAt": {
+          "type": "string"
+        },
+        "changeNote": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "draft": {
+          "$ref": "#/$defs/DraftProgress"
+        },
+        "draftStartedAt": {
+          "type": "string"
+        },
+        "followUpAt": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "job": {
+          "$ref": "#/$defs/ApplicationJob"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "pack": {
+          "$ref": "#/$defs/Pack"
+        },
+        "status": {
+          "$ref": "#/$defs/ApplicationStatus"
+        },
+        "submittedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "jobId",
+        "status",
+        "createdAt",
+        "job"
+      ],
+      "title": "ApplicationWithJob",
+      "type": "object"
+    },
+    "Ats": {
+      "properties": {
+        "boardToken": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "vendor": {
+          "enum": [
+            "greenhouse",
+            "lever",
+            "ashby"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "vendor",
+        "boardToken",
+        "jobId"
+      ],
+      "title": "Ats",
+      "type": "object"
+    },
+    "AtsKeyword": {
+      "properties": {
+        "inMasterCv": {
+          "type": "boolean"
+        },
+        "matched": {
+          "type": "boolean"
+        },
+        "term": {
+          "type": "string"
+        },
+        "weight": {
+          "enum": [
+            "required",
+            "nice"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "term",
+        "weight",
+        "matched",
+        "inMasterCv"
+      ],
+      "title": "AtsKeyword",
+      "type": "object"
+    },
+    "AtsReport": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "coverage": {
+          "type": "number"
+        },
+        "formatChecks": {
+          "items": {
+            "$ref": "#/$defs/FormatCheck"
+          },
+          "type": "array"
+        },
+        "keywords": {
+          "items": {
+            "$ref": "#/$defs/AtsKeyword"
+          },
+          "type": "array"
+        },
+        "pages": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "keywords",
+        "coverage",
+        "formatChecks",
+        "pages",
+        "attempt"
+      ],
+      "title": "AtsReport",
+      "type": "object"
+    },
+    "Bullet": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "tags"
+      ],
+      "title": "Bullet",
+      "type": "object"
+    },
+    "Channel": {
+      "enum": [
+        "board_search",
+        "email_alert",
+        "watchlist",
+        "manual"
+      ],
+      "type": "string"
+    },
+    "ChannelSummary": {
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/IntakeChannel"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "stats": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel",
+        "detail",
+        "stats",
+        "enabled"
+      ],
+      "title": "ChannelSummary",
+      "type": "object"
+    },
+    "Cited": {
+      "properties": {
+        "editedByUser": {
+          "type": "boolean"
+        },
+        "sourceIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "sourceIds"
+      ],
+      "title": "Cited",
+      "type": "object"
+    },
+    "CompanyFact": {
+      "properties": {
+        "quote": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "quote"
+      ],
+      "title": "CompanyFact",
+      "type": "object"
+    },
+    "Contact": {
+      "description": "CV-06: stored separately from the CV and never sent to a model.",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "email"
+      ],
+      "title": "Contact",
+      "type": "object"
+    },
+    "CoverLetter": {
+      "properties": {
+        "companyFact": {
+          "$ref": "#/$defs/CompanyFact"
+        },
+        "greeting": {
+          "type": "string"
+        },
+        "guard": {
+          "$ref": "#/$defs/GuardResult"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "paragraphs": {
+          "items": {
+            "$ref": "#/$defs/Cited"
+          },
+          "type": "array"
+        },
+        "signoff": {
+          "type": "string"
+        },
+        "wordCount": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "jobId",
+        "greeting",
+        "paragraphs",
+        "signoff",
+        "companyFact",
+        "wordCount",
+        "guard"
+      ],
+      "title": "CoverLetter",
+      "type": "object"
+    },
+    "CvItem": {
+      "properties": {
+        "bullets": {
+          "items": {
+            "$ref": "#/$defs/Cited"
+          },
+          "type": "array"
+        },
+        "roleId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "roleId",
+        "bullets"
+      ],
+      "title": "CvItem",
+      "type": "object"
+    },
+    "CvLine": {
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "where": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "where"
+      ],
+      "title": "CvLine",
+      "type": "object"
+    },
+    "CvSection": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/CvItem"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "enum": [
+            "experience",
+            "projects"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "items"
+      ],
+      "title": "CvSection",
+      "type": "object"
+    },
+    "CvVersion": {
+      "properties": {
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "CvVersion",
+      "type": "object"
+    },
+    "DraftProgress": {
+      "properties": {
+        "progress": {
+          "type": "number"
+        },
+        "step": {
+          "$ref": "#/$defs/DraftStep"
+        }
+      },
+      "required": [
+        "step",
+        "progress"
+      ],
+      "title": "DraftProgress",
+      "type": "object"
+    },
+    "DraftStep": {
+      "enum": [
+        "cv",
+        "letter",
+        "ats"
+      ],
+      "type": "string"
+    },
+    "Education": {
+      "properties": {
+        "degree": {
+          "type": "string"
+        },
+        "end": {
+          "$ref": "#/$defs/YearMonth"
+        },
+        "id": {
+          "type": "string"
+        },
+        "institution": {
+          "type": "string"
+        },
+        "notes": {
+          "items": {
+            "$ref": "#/$defs/Bullet"
+          },
+          "type": "array"
+        },
+        "start": {
+          "$ref": "#/$defs/YearMonth"
+        }
+      },
+      "required": [
+        "id",
+        "degree",
+        "institution"
+      ],
+      "title": "Education",
+      "type": "object"
+    },
+    "ErrorDetail": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "ErrorDetail",
+      "type": "object"
+    },
+    "Estimate": {
+      "properties": {
+        "companies": {
+          "type": "integer"
+        },
+        "credits": {
+          "type": "integer"
+        },
+        "demo": {
+          "type": "boolean"
+        },
+        "pages": {
+          "type": "integer"
+        },
+        "queries": {
+          "type": "integer"
+        },
+        "usd": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "queries",
+        "pages",
+        "credits",
+        "usd",
+        "companies",
+        "demo"
+      ],
+      "title": "Estimate",
+      "type": "object"
+    },
+    "FitEvidence": {
+      "description": "Sub-scores as produced by the scoring model. The total is never model output (MATCH-04).",
+      "properties": {
+        "adjacent": {
+          "$ref": "#/$defs/SubScore"
+        },
+        "core": {
+          "$ref": "#/$defs/SubScore"
+        },
+        "cvBulletIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "eligibility": {
+          "$ref": "#/$defs/SubScore"
+        },
+        "experience": {
+          "$ref": "#/$defs/SubScore"
+        },
+        "jobQuote": {
+          "type": "string"
+        },
+        "keywords": {
+          "items": {
+            "$ref": "#/$defs/JobKeyword"
+          },
+          "type": "array"
+        },
+        "model": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "core",
+        "adjacent",
+        "experience",
+        "eligibility",
+        "reason",
+        "jobQuote",
+        "cvBulletIds",
+        "keywords",
+        "model"
+      ],
+      "title": "FitEvidence",
+      "type": "object"
+    },
+    "FitReport": {
+      "properties": {
+        "adjacent": {
+          "$ref": "#/$defs/SubScore"
+        },
+        "core": {
+          "$ref": "#/$defs/SubScore"
+        },
+        "cvBulletIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "eligibility": {
+          "$ref": "#/$defs/SubScore"
+        },
+        "experience": {
+          "$ref": "#/$defs/SubScore"
+        },
+        "freshness": {
+          "type": "number"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "jobQuote": {
+          "type": "string"
+        },
+        "keywords": {
+          "items": {
+            "$ref": "#/$defs/JobKeyword"
+          },
+          "type": "array"
+        },
+        "model": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "roughOnly": {
+          "type": "boolean"
+        },
+        "total": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "core",
+        "adjacent",
+        "experience",
+        "eligibility",
+        "reason",
+        "jobQuote",
+        "cvBulletIds",
+        "keywords",
+        "model",
+        "jobId",
+        "freshness",
+        "total",
+        "roughOnly"
+      ],
+      "title": "FitReport",
+      "type": "object"
+    },
+    "FitWeights": {
+      "properties": {
+        "adjacent": {
+          "type": "number"
+        },
+        "core": {
+          "type": "number"
+        },
+        "eligibility": {
+          "type": "number"
+        },
+        "experience": {
+          "type": "number"
+        },
+        "freshness": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "core",
+        "adjacent",
+        "experience",
+        "eligibility",
+        "freshness"
+      ],
+      "title": "FitWeights",
+      "type": "object"
+    },
+    "FormatCheck": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "pass": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "pass",
+        "message"
+      ],
+      "title": "FormatCheck",
+      "type": "object"
+    },
+    "FoundCounts": {
+      "properties": {
+        "board": {
+          "type": "integer"
+        },
+        "inbox": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "watchlist": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "board",
+        "inbox",
+        "watchlist"
+      ],
+      "title": "FoundCounts",
+      "type": "object"
+    },
+    "GuardResult": {
+      "properties": {
+        "pass": {
+          "type": "boolean"
+        },
+        "repaired": {
+          "type": "boolean"
+        },
+        "violations": {
+          "items": {
+            "$ref": "#/$defs/Violation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "pass",
+        "violations",
+        "repaired"
+      ],
+      "title": "GuardResult",
+      "type": "object"
+    },
+    "InboxSettings": {
+      "properties": {
+        "emailsThisWeek": {
+          "type": "integer"
+        },
+        "folder": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "lastCheckedAt": {
+          "type": "string"
+        },
+        "senders": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "label",
+        "folder",
+        "lastCheckedAt",
+        "emailsThisWeek",
+        "senders"
+      ],
+      "title": "InboxSettings",
+      "type": "object"
+    },
+    "IntakeChannel": {
+      "enum": [
+        "board_search",
+        "email_alert",
+        "watchlist"
+      ],
+      "type": "string"
+    },
+    "IntakeRun": {
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/IntakeChannel"
+        },
+        "creditsUsed": {
+          "type": "integer"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/RunError"
+          },
+          "type": "array"
+        },
+        "finishedAt": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "newJobs": {
+          "type": "integer"
+        },
+        "progress": {
+          "type": "number"
+        },
+        "queries": {
+          "type": "integer"
+        },
+        "results": {
+          "type": "integer"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "partial",
+            "failed",
+            "cancelled"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "channel",
+        "status",
+        "startedAt",
+        "progress",
+        "queries",
+        "results",
+        "newJobs",
+        "creditsUsed",
+        "errors"
+      ],
+      "title": "IntakeRun",
+      "type": "object"
+    },
+    "Job": {
+      "properties": {
+        "applyUrl": {
+          "type": "string"
+        },
+        "ats": {
+          "$ref": "#/$defs/Ats"
+        },
+        "company": {
+          "type": "string"
+        },
+        "dedupeKey": {
+          "type": "string"
+        },
+        "descriptionMd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "descriptionStatus": {
+          "enum": [
+            "full",
+            "partial",
+            "missing"
+          ],
+          "type": "string"
+        },
+        "firstSeen": {
+          "type": "string"
+        },
+        "hiddenReason": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "lastSeen": {
+          "type": "string"
+        },
+        "linkedinUrl": {
+          "type": "string"
+        },
+        "location": {
+          "$ref": "#/$defs/Location"
+        },
+        "postedAt": {
+          "type": "string"
+        },
+        "remote": {
+          "anyOf": [
+            {
+              "enum": [
+                "remote",
+                "hybrid",
+                "onsite"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "salary": {
+          "$ref": "#/$defs/Salary"
+        },
+        "seniority": {
+          "$ref": "#/$defs/Seniority"
+        },
+        "snoozedUntil": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/JobSource"
+          },
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/JobStatus"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "dedupeKey",
+        "title",
+        "company",
+        "location",
+        "remote",
+        "descriptionMd",
+        "descriptionStatus",
+        "sources",
+        "language",
+        "firstSeen",
+        "lastSeen",
+        "status"
+      ],
+      "title": "Job",
+      "type": "object"
+    },
+    "JobKeyword": {
+      "properties": {
+        "term": {
+          "type": "string"
+        },
+        "weight": {
+          "enum": [
+            "required",
+            "nice"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "term",
+        "weight"
+      ],
+      "title": "JobKeyword",
+      "type": "object"
+    },
+    "JobList": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ScoredJob"
+          },
+          "type": "array"
+        },
+        "next": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "items",
+        "next"
+      ],
+      "title": "JobList",
+      "type": "object"
+    },
+    "JobSource": {
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "seenAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel",
+        "detail",
+        "seenAt"
+      ],
+      "title": "JobSource",
+      "type": "object"
+    },
+    "JobStatus": {
+      "enum": [
+        "new",
+        "shortlisted",
+        "in_application",
+        "snoozed",
+        "rejected",
+        "hidden",
+        "closed",
+        "archived"
+      ],
+      "type": "string"
+    },
+    "Language": {
+      "properties": {
+        "level": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "level"
+      ],
+      "title": "Language",
+      "type": "object"
+    },
+    "Link": {
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "url"
+      ],
+      "title": "Link",
+      "type": "object"
+    },
+    "ListDiff": {
+      "description": "What a regenerated profile would do to one list field (PRF-04).",
+      "properties": {
+        "added": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kept": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "added",
+        "removed",
+        "kept"
+      ],
+      "title": "ListDiff",
+      "type": "object"
+    },
+    "Location": {
+      "properties": {
+        "city": {
+          "type": "string"
+        },
+        "country": {
+          "type": "string"
+        },
+        "raw": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "raw"
+      ],
+      "title": "Location",
+      "type": "object"
+    },
+    "MasterCV": {
+      "properties": {
+        "education": {
+          "items": {
+            "$ref": "#/$defs/Education"
+          },
+          "type": "array"
+        },
+        "experience": {
+          "items": {
+            "$ref": "#/$defs/Role"
+          },
+          "type": "array"
+        },
+        "languages": {
+          "items": {
+            "$ref": "#/$defs/Language"
+          },
+          "type": "array"
+        },
+        "person": {
+          "$ref": "#/$defs/Person"
+        },
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/Role"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/Skill"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "$ref": "#/$defs/Summary"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "person",
+        "experience",
+        "projects",
+        "education",
+        "skills",
+        "languages"
+      ],
+      "title": "MasterCV",
+      "type": "object"
+    },
+    "NavCounts": {
+      "properties": {
+        "demoMode": {
+          "type": "boolean"
+        },
+        "jobs": {
+          "type": "integer"
+        },
+        "review": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "jobs",
+        "review",
+        "demoMode"
+      ],
+      "title": "NavCounts",
+      "type": "object"
+    },
+    "Pack": {
+      "properties": {
+        "answers": {
+          "items": {
+            "$ref": "#/$defs/AnswerItem"
+          },
+          "type": "array"
+        },
+        "ats": {
+          "$ref": "#/$defs/AtsReport"
+        },
+        "cv": {
+          "$ref": "#/$defs/TailoredCV"
+        },
+        "letter": {
+          "$ref": "#/$defs/CoverLetter"
+        }
+      },
+      "required": [
+        "cv",
+        "letter",
+        "ats",
+        "answers"
+      ],
+      "title": "Pack",
+      "type": "object"
+    },
+    "Person": {
+      "properties": {
+        "headline": {
+          "type": "string"
+        },
+        "links": {
+          "items": {
+            "$ref": "#/$defs/Link"
+          },
+          "type": "array"
+        },
+        "location": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "location",
+        "links"
+      ],
+      "title": "Person",
+      "type": "object"
+    },
+    "ProfileChannels": {
+      "properties": {
+        "boardSearch": {
+          "type": "boolean"
+        },
+        "inbox": {
+          "type": "boolean"
+        },
+        "watchlist": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "boardSearch",
+        "inbox",
+        "watchlist"
+      ],
+      "title": "ProfileChannels",
+      "type": "object"
+    },
+    "ProfileProposalResult": {
+      "description": "A proposed profile and what it would change. Nothing is saved until the person PUTs it.",
+      "properties": {
+        "cvVersion": {
+          "type": "integer"
+        },
+        "diff": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ListDiff"
+              },
+              {
+                "$ref": "#/$defs/ScalarDiff"
+              }
+            ]
+          },
+          "type": "object"
+        },
+        "proposed": {
+          "$ref": "#/$defs/SearchProfile"
+        }
+      },
+      "required": [
+        "proposed",
+        "diff",
+        "cvVersion"
+      ],
+      "title": "ProfileProposalResult",
+      "type": "object"
+    },
+    "Recency": {
+      "enum": [
+        "24h",
+        "7d",
+        "30d"
+      ],
+      "type": "string"
+    },
+    "Role": {
+      "properties": {
+        "bullets": {
+          "items": {
+            "$ref": "#/$defs/Bullet"
+          },
+          "type": "array"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/YearMonth"
+            },
+            {
+              "const": "present",
+              "type": "string"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "org": {
+          "type": "string"
+        },
+        "start": {
+          "$ref": "#/$defs/YearMonth"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "org",
+        "start",
+        "end",
+        "bullets"
+      ],
+      "title": "Role",
+      "type": "object"
+    },
+    "RunError": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "RunError",
+      "type": "object"
+    },
+    "RunIds": {
+      "properties": {
+        "runIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "runIds"
+      ],
+      "title": "RunIds",
+      "type": "object"
+    },
+    "Salary": {
+      "properties": {
+        "currency": {
+          "type": "string"
+        },
+        "max": {
+          "type": "number"
+        },
+        "min": {
+          "type": "number"
+        },
+        "period": {
+          "enum": [
+            "year",
+            "month",
+            "day",
+            "hour"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "period"
+      ],
+      "title": "Salary",
+      "type": "object"
+    },
+    "ScalarDiff": {
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "title": "ScalarDiff",
+      "type": "object"
+    },
+    "ScoredJob": {
+      "properties": {
+        "applyUrl": {
+          "type": "string"
+        },
+        "ats": {
+          "$ref": "#/$defs/Ats"
+        },
+        "company": {
+          "type": "string"
+        },
+        "dedupeKey": {
+          "type": "string"
+        },
+        "descriptionMd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "descriptionStatus": {
+          "enum": [
+            "full",
+            "partial",
+            "missing"
+          ],
+          "type": "string"
+        },
+        "firstSeen": {
+          "type": "string"
+        },
+        "fit": {
+          "$ref": "#/$defs/FitReport"
+        },
+        "hiddenReason": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "lastSeen": {
+          "type": "string"
+        },
+        "linkedinUrl": {
+          "type": "string"
+        },
+        "location": {
+          "$ref": "#/$defs/Location"
+        },
+        "postedAt": {
+          "type": "string"
+        },
+        "remote": {
+          "anyOf": [
+            {
+              "enum": [
+                "remote",
+                "hybrid",
+                "onsite"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "salary": {
+          "$ref": "#/$defs/Salary"
+        },
+        "seniority": {
+          "$ref": "#/$defs/Seniority"
+        },
+        "snoozedUntil": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/JobSource"
+          },
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/JobStatus"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "dedupeKey",
+        "title",
+        "company",
+        "location",
+        "remote",
+        "descriptionMd",
+        "descriptionStatus",
+        "sources",
+        "language",
+        "firstSeen",
+        "lastSeen",
+        "status",
+        "fit"
+      ],
+      "title": "ScoredJob",
+      "type": "object"
+    },
+    "SearchProfile": {
+      "properties": {
+        "channels": {
+          "$ref": "#/$defs/ProfileChannels"
+        },
+        "exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "generatedFromCvVersion": {
+          "type": "integer"
+        },
+        "locations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "recency": {
+          "$ref": "#/$defs/Recency"
+        },
+        "remote": {
+          "enum": [
+            "any",
+            "remote_only",
+            "no_remote"
+          ],
+          "type": "string"
+        },
+        "seniority": {
+          "items": {
+            "$ref": "#/$defs/Seniority"
+          },
+          "type": "array"
+        },
+        "sites": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "titles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "titles",
+        "skills",
+        "locations",
+        "remote",
+        "seniority",
+        "exclude",
+        "sites",
+        "recency",
+        "channels",
+        "generatedFromCvVersion",
+        "updatedAt"
+      ],
+      "title": "SearchProfile",
+      "type": "object"
+    },
+    "SecretStatus": {
+      "enum": [
+        "set",
+        "missing",
+        "invalid"
+      ],
+      "type": "string"
+    },
+    "SecretsStatus": {
+      "properties": {
+        "firecrawl": {
+          "$ref": "#/$defs/SecretStatus"
+        },
+        "inbox": {
+          "$ref": "#/$defs/SecretStatus"
+        },
+        "llm": {
+          "$ref": "#/$defs/SecretStatus"
+        }
+      },
+      "required": [
+        "llm",
+        "firecrawl",
+        "inbox"
+      ],
+      "title": "SecretsStatus",
+      "type": "object"
+    },
+    "Seniority": {
+      "enum": [
+        "intern",
+        "graduate",
+        "junior",
+        "entry",
+        "mid"
+      ],
+      "type": "string"
+    },
+    "Settings": {
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "cvPages": {
+          "enum": [
+            1,
+            2
+          ],
+          "type": "integer"
+        },
+        "demoMode": {
+          "type": "boolean"
+        },
+        "inbox": {
+          "$ref": "#/$defs/InboxSettings"
+        },
+        "models": {
+          "$ref": "#/$defs/TierModels"
+        },
+        "redactContact": {
+          "type": "boolean"
+        },
+        "spentThisWeekUsd": {
+          "type": "number"
+        },
+        "weeklyBudgetUsd": {
+          "type": "number"
+        },
+        "weights": {
+          "$ref": "#/$defs/FitWeights"
+        }
+      },
+      "required": [
+        "demoMode",
+        "redactContact",
+        "weeklyBudgetUsd",
+        "spentThisWeekUsd",
+        "cvPages",
+        "baseUrl",
+        "models",
+        "weights",
+        "inbox"
+      ],
+      "title": "Settings",
+      "type": "object"
+    },
+    "SettingsResponse": {
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "cvPages": {
+          "enum": [
+            1,
+            2
+          ],
+          "type": "integer"
+        },
+        "demoMode": {
+          "type": "boolean"
+        },
+        "inbox": {
+          "$ref": "#/$defs/InboxSettings"
+        },
+        "llmLastCheckedAt": {
+          "type": "string"
+        },
+        "llmProvider": {
+          "type": "string"
+        },
+        "models": {
+          "$ref": "#/$defs/TierModels"
+        },
+        "redactContact": {
+          "type": "boolean"
+        },
+        "secrets": {
+          "$ref": "#/$defs/SecretsStatus"
+        },
+        "spentThisWeekUsd": {
+          "type": "number"
+        },
+        "weeklyBudgetUsd": {
+          "type": "number"
+        },
+        "weights": {
+          "$ref": "#/$defs/FitWeights"
+        }
+      },
+      "required": [
+        "demoMode",
+        "redactContact",
+        "weeklyBudgetUsd",
+        "spentThisWeekUsd",
+        "cvPages",
+        "baseUrl",
+        "models",
+        "weights",
+        "inbox",
+        "secrets",
+        "llmProvider"
+      ],
+      "title": "SettingsResponse",
+      "type": "object"
+    },
+    "ShortlistMeta": {
+      "properties": {
+        "activeRunIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "channels": {
+          "items": {
+            "$ref": "#/$defs/ChannelSummary"
+          },
+          "type": "array"
+        },
+        "found": {
+          "$ref": "#/$defs/FoundCounts"
+        },
+        "hidden": {
+          "items": {
+            "$ref": "#/$defs/ScoredJob"
+          },
+          "type": "array"
+        },
+        "newJobIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rejected": {
+          "type": "integer"
+        },
+        "snoozed": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "found",
+        "channels",
+        "newJobIds",
+        "hidden",
+        "snoozed",
+        "rejected",
+        "activeRunIds"
+      ],
+      "title": "ShortlistMeta",
+      "type": "object"
+    },
+    "SiteOption": {
+      "properties": {
+        "domain": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "reviewed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "domain",
+        "name",
+        "reviewed"
+      ],
+      "title": "SiteOption",
+      "type": "object"
+    },
+    "Skill": {
+      "properties": {
+        "aliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "level": {
+          "$ref": "#/$defs/SkillLevel"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "Skill",
+      "type": "object"
+    },
+    "SkillLevel": {
+      "enum": [
+        "familiar",
+        "proficient",
+        "expert"
+      ],
+      "type": "string"
+    },
+    "SubScore": {
+      "properties": {
+        "cvBulletIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "jobQuote": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "score",
+        "jobQuote",
+        "cvBulletIds"
+      ],
+      "title": "SubScore",
+      "type": "object"
+    },
+    "Summary": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text"
+      ],
+      "title": "Summary",
+      "type": "object"
+    },
+    "TailoredCV": {
+      "properties": {
+        "cvVersion": {
+          "type": "integer"
+        },
+        "guard": {
+          "$ref": "#/$defs/GuardResult"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "omittedBulletIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/CvSection"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "$ref": "#/$defs/Cited"
+        }
+      },
+      "required": [
+        "jobId",
+        "cvVersion",
+        "summary",
+        "sections",
+        "skills",
+        "omittedBulletIds",
+        "guard"
+      ],
+      "title": "TailoredCV",
+      "type": "object"
+    },
+    "TestResult": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ok",
+        "message"
+      ],
+      "title": "TestResult",
+      "type": "object"
+    },
+    "TierModels": {
+      "properties": {
+        "fast": {
+          "type": "string"
+        },
+        "scoring": {
+          "type": "string"
+        },
+        "writing": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fast",
+        "scoring",
+        "writing"
+      ],
+      "title": "TierModels",
+      "type": "object"
+    },
+    "Violation": {
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "location",
+        "rule",
+        "detail"
+      ],
+      "title": "Violation",
+      "type": "object"
+    },
+    "YearMonth": {
+      "pattern": "^\\d{4}-\\d{2}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated from the Pydantic models in services/agent/wera_agent/schemas (serialization mode). Do not edit.",
+  "title": "WERA responses"
+}

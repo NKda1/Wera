@@ -1,11 +1,10 @@
-import { handle, readJson } from "@/lib/server/http";
-import { ContactSchema, parse } from "@/lib/server/schemas";
-import { getContact, putContact } from "@/lib/server/store";
+import { forward } from "@/lib/server/agent";
 
-export async function GET() {
-  return handle(() => getContact());
+/** Contact details are stored apart from the CV and never sent to a model (CV-06). */
+export async function GET(req: Request) {
+  return forward(req, "/cv/contact");
 }
 
 export async function PUT(req: Request) {
-  return handle(async () => putContact(parse(ContactSchema, await readJson(req))));
+  return forward(req, "/cv/contact");
 }

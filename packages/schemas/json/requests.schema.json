@@ -1,0 +1,248 @@
+{
+  "$defs": {
+    "ApplicationPatchIn": {
+      "properties": {
+        "followUpAt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notes": {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ApplicationStatus"
+        }
+      },
+      "title": "ApplicationPatchIn",
+      "type": "object"
+    },
+    "ApplicationStatus": {
+      "enum": [
+        "drafting",
+        "ready_for_review",
+        "changes_requested",
+        "approved",
+        "submitted",
+        "interview",
+        "offer",
+        "rejected",
+        "discarded",
+        "withdrawn"
+      ],
+      "type": "string"
+    },
+    "CvImportIn": {
+      "properties": {
+        "yaml": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "title": "CvImportIn",
+      "type": "object"
+    },
+    "DecisionIn": {
+      "properties": {
+        "action": {
+          "enum": [
+            "approve",
+            "snooze",
+            "reject",
+            "unhide"
+          ],
+          "type": "string"
+        },
+        "days": {
+          "enum": [
+            1,
+            3,
+            7
+          ],
+          "type": "integer"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "reason": {
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "DecisionIn",
+      "type": "object"
+    },
+    "DocumentPatchIn": {
+      "properties": {
+        "bulletId": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 4000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "DocumentPatchIn",
+      "type": "object"
+    },
+    "ImportTextIn": {
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "ImportTextIn",
+      "type": "object"
+    },
+    "ImportUrlIn": {
+      "properties": {
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "ImportUrlIn",
+      "type": "object"
+    },
+    "InboxPatch": {
+      "properties": {
+        "senders": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "senders"
+      ],
+      "title": "InboxPatch",
+      "type": "object"
+    },
+    "PatchWeights": {
+      "properties": {
+        "adjacent": {
+          "type": "number"
+        },
+        "core": {
+          "type": "number"
+        },
+        "eligibility": {
+          "type": "number"
+        },
+        "experience": {
+          "type": "number"
+        },
+        "freshness": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "core",
+        "adjacent",
+        "experience",
+        "eligibility",
+        "freshness"
+      ],
+      "title": "PatchWeights",
+      "type": "object"
+    },
+    "RegenerateIn": {
+      "properties": {
+        "note": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "title": "RegenerateIn",
+      "type": "object"
+    },
+    "RunIn": {
+      "properties": {
+        "channels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "title": "RunIn",
+      "type": "object"
+    },
+    "SettingsPatch": {
+      "description": "Non-secret settings a person can change. Keys are set in the environment only (SET-07).",
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "cvPages": {
+          "enum": [
+            1,
+            2
+          ],
+          "type": "integer"
+        },
+        "inbox": {
+          "$ref": "#/$defs/InboxPatch"
+        },
+        "models": {
+          "$ref": "#/$defs/TierModels"
+        },
+        "redactContact": {
+          "type": "boolean"
+        },
+        "weeklyBudgetUsd": {
+          "type": "number"
+        },
+        "weights": {
+          "$ref": "#/$defs/PatchWeights"
+        }
+      },
+      "title": "SettingsPatch",
+      "type": "object"
+    },
+    "TierModels": {
+      "properties": {
+        "fast": {
+          "type": "string"
+        },
+        "scoring": {
+          "type": "string"
+        },
+        "writing": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fast",
+        "scoring",
+        "writing"
+      ],
+      "title": "TierModels",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated from the Pydantic models in services/agent/wera_agent/schemas (validation mode). Do not edit.",
+  "title": "WERA requests"
+}

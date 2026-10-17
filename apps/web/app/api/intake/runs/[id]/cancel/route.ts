@@ -1,7 +1,7 @@
-import { handle, type IdContext } from "@/lib/server/http";
-import { cancelRun } from "@/lib/server/store";
+import { forward, seg } from "@/lib/server/agent";
+import type { IdContext } from "@/lib/server/http";
 
-export async function POST(_req: Request, { params }: IdContext) {
+export async function POST(req: Request, { params }: IdContext) {
   const { id } = await params;
-  return handle(() => cancelRun(id));
+  return forward(req, `/intake/runs/${seg(id)}/cancel`);
 }

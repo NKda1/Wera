@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
-import { getSettings } from "@/lib/server/store";
+import { agent } from "@/lib/server/agent";
 import { SettingsScreen } from "./SettingsScreen";
 
 export const metadata: Metadata = { title: "Settings" };
 
-export default function SettingsPage() {
-  return <SettingsScreen initial={getSettings()} />;
+export default async function SettingsPage() {
+  return <SettingsScreen initial={await agent.getSettings()} />;
 }

@@ -1,11 +1,10 @@
-import { handle, readJson } from "@/lib/server/http";
-import { getCv, putCv } from "@/lib/server/store";
+import { forward } from "@/lib/server/agent";
 
 /** The master CV without contact details (those are fetched separately; CV-06). */
-export async function GET() {
-  return handle(() => getCv());
+export async function GET(req: Request) {
+  return forward(req, "/cv");
 }
 
 export async function PUT(req: Request) {
-  return handle(async () => putCv(await readJson(req)));
+  return forward(req, "/cv");
 }

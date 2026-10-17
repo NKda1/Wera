@@ -5,9 +5,11 @@ import type {
   ApplicationStatus,
   ApplicationWithJob,
   Contact,
+  Estimate,
   IntakeChannel,
   IntakeRun,
   MasterCV,
+  ProfileProposalResult,
   ScoredJob,
   SearchProfile,
   Settings,
@@ -45,7 +47,7 @@ async function call<T>(path: string, init?: { method?: string; body?: unknown })
   return data as T;
 }
 
-export type Estimate = { queries: number; pages: number; credits: number; usd: number; companies: number; demo: boolean };
+export type { Estimate };
 export type Decision = { action: "approve" | "snooze" | "reject" | "unhide"; days?: 1 | 3 | 7; reason?: string; force?: boolean };
 
 export const api = {
@@ -58,6 +60,8 @@ export const api = {
   cancelRun: (id: string) => call<IntakeRun>(`/api/intake/runs/${id}/cancel`, { method: "POST", body: {} }),
 
   putProfile: (p: SearchProfile) => call<SearchProfile>("/api/profile", { method: "PUT", body: p }),
+  /** PRF-04: a proposal and its diff. Nothing is saved until putProfile. */
+  generateProfile: () => call<ProfileProposalResult>("/api/profile/generate", { method: "POST", body: {} }),
 
   listApplications: () => call<{ items: (ApplicationWithJob & { coverage?: number })[] }>("/api/applications"),
   getApplication: (id: string) => call<ApplicationWithJob>(`/api/applications/${id}`),
@@ -67,7 +71,7 @@ export const api = {
   approvePack: (id: string) => call<ApplicationWithJob>(`/api/applications/${id}/approve`, { method: "POST", body: {} }),
   editDocument: (docId: string, patch: { target: string; text?: string; bulletId?: string }) =>
     call<ApplicationWithJob>(`/api/documents/${docId}`, { method: "PATCH", body: patch }),
-  exportDocument: (docId: string, format: "pdf" | "docx") => call<never>(`/api/documents/${docId}/export?format=${format}`),
+  // Exports are plain <a download> links to /api/documents/:id/export (EXP-01).
 
   putCv: (cv: MasterCV) => call<{ version: number }>("/api/cv", { method: "PUT", body: cv }),
   putContact: (c: Contact) => call<Contact>("/api/cv/contact", { method: "PUT", body: c }),

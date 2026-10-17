@@ -1,0 +1,47 @@
+{
+  "titles": [
+    "AI Engineer",
+    "Graduate Software Engineer",
+    "ML Engineer",
+    "Backend Engineer (Python)"
+  ],
+  "skills": [
+    "Python",
+    "FastAPI",
+    "TypeScript",
+    "LangGraph",
+    "PostgreSQL",
+    "LLM guardrails"
+  ],
+  "locations": [
+    "London",
+    "Amsterdam",
+    "Dublin",
+    "Berlin",
+    "Zurich"
+  ],
+  "remote": "any",
+  "seniority": [
+    "graduate",
+    "junior",
+    "entry"
+  ],
+  "exclude": [
+    "Senior",
+    "Staff",
+    "10+ years"
+  ],
+  "sites": [
+    "brightnetwork.co.uk",
+    "gradcracker.com",
+    "welcometothejungle.com",
+    "builtinlondon.uk"
+  ],
+  "recency": "7d",
+  "channels": {
+    "boardSearch": true,
+    "inbox": true,
+    "watchlist": true
+  },
+  "generatedFromCvVersion": 4
+}

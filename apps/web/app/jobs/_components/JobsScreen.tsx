@@ -5,8 +5,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { api, ApiRequestError, type Decision } from "@/lib/api";
 import { formatDate } from "@/lib/format";
-import type { shortlistMeta } from "@/lib/server/store";
-import type { IntakeChannel, IntakeRun, ScoredJob, SearchProfile } from "@/lib/types";
+import type { IntakeChannel, IntakeRun, ScoredJob, SearchProfile, ShortlistMeta } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { cn } from "@/lib/ui/cn";
@@ -20,7 +19,7 @@ import { JobCard } from "./JobCard";
 import { ProfileCard, type SiteOption } from "./ProfileCard";
 import { RunPanel, SearchDialog } from "./SearchRun";
 
-type Meta = ReturnType<typeof shortlistMeta>;
+type Meta = ShortlistMeta;
 type Filter = "london" | "graduate" | "alerts" | "score8" | "remote";
 
 const FILTERS: { id: Filter; label: string; test: (j: ScoredJob) => boolean }[] = [
@@ -38,12 +37,14 @@ export function JobsScreen({
   meta,
   profile,
   sites,
+  cvVersion,
   today,
 }: {
   jobs: ScoredJob[];
   meta: Meta;
   profile: SearchProfile;
   sites: SiteOption[];
+  cvVersion: number;
   today: string;
 }) {
   const router = useRouter();
@@ -172,7 +173,7 @@ export function JobsScreen({
 
       <div className="mt-6 flex flex-col gap-4">
         {runIds.length ? <RunPanel runIds={runIds} onFinished={onRunsFinished} /> : null}
-        <ProfileCard profile={profile} channels={meta.channels} sites={sites} onPasteJob={() => setImporting(true)} />
+        <ProfileCard profile={profile} channels={meta.channels} sites={sites} cvVersion={cvVersion} onPasteJob={() => setImporting(true)} />
       </div>
 
       <div className="mt-6 flex flex-wrap items-center justify-between gap-3">

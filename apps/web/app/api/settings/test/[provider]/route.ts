@@ -1,7 +1,7 @@
-import { handle } from "@/lib/server/http";
-import { testProvider } from "@/lib/server/store";
+import { forward, seg } from "@/lib/server/agent";
 
-export async function POST(_req: Request, { params }: { params: Promise<{ provider: string }> }) {
+/** SET-02: checks a provider connection from the agent service and returns a sanitised result. */
+export async function POST(req: Request, { params }: { params: Promise<{ provider: string }> }) {
   const { provider } = await params;
-  return handle(() => testProvider(provider));
+  return forward(req, `/settings/test/${seg(provider)}`);
 }

@@ -1,4 +1,4 @@
-import type { Channel, Job } from "./types";
+import type { Channel, Job, Role } from "./types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -40,6 +40,14 @@ export function formatDate(iso: string | undefined, opts: Intl.DateTimeFormatOpt
 export function formatTime(iso: string | undefined): string {
   if (!iso) return "";
   return new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(iso));
+}
+
+export const year = (ym?: string) => ym?.slice(0, 4) ?? "";
+
+/** TAIL-02: role dates come from the master CV, never from model output. Shared by the review paper and the exports. */
+export function roleDates(role: Pick<Role, "start" | "end">): string {
+  const end = role.end === "present" ? "present" : year(role.end);
+  return year(role.start) === end ? end : `${year(role.start)} – ${end}`;
 }
 
 export function formatLocation(job: Pick<Job, "location" | "remote">): string {
