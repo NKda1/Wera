@@ -402,6 +402,76 @@ def _answers_output(inp: PackInput) -> dict:
     }
 
 
+# Terms a job ad asks for that WERA can recognise without a model, used by the demo's scoring.
+DEMO_TECH = (
+    "Python",
+    "TypeScript",
+    "FastAPI",
+    "Next.js",
+    "PostgreSQL",
+    "LangChain",
+    "LangGraph",
+    "REST APIs",
+    "Docker",
+    "Kubernetes",
+    "AWS",
+    "GCP",
+    "Azure",
+    "React",
+    "Django",
+    "SQL",
+    "LLM guardrails",
+    "Prompt engineering",
+    "Presidio",
+    "evaluation",
+    "agents",
+)
+
+
+def _demo_keywords(job_text: str, cv: MasterCV) -> list[dict]:
+    """ATSC-01, deterministically: the terms the ad actually contains.
+
+    A term the CV also claims is treated as `required` — in the demo that makes coverage
+    meaningful, because the keywords a person can match are the ones that matter to them.
+    """
+    cv_terms = {s.name for s in cv.skills}
+    found: list[dict] = []
+    for term in (*[s.name for s in cv.skills], *DEMO_TECH):
+        if any(term == f["term"] for f in found):
+            continue
+        if text_has_term(job_text, term):
+            found.append({"term": term, "weight": "required" if term in cv_terms else "nice"})
+    return found[:25]
+
+
+def _demo_subscore(job_text: str, cv: MasterCV, terms: list[str], *, floor: float) -> dict:
+    """A sub-score from how much of the CV the ad actually asks for."""
+    hits = [t for t in terms if text_has_term(job_text, t)]
+    score = min(10.0, floor + 2.0 * len(hits))
+    quote = next((line.strip() for line in job_text.split("\n") if len(line.strip()) > 40), "")
+    ids = [b.id for r in [*cv.experience, *cv.projects] for b in r.bullets if any(text_has_term(b.text, t) for t in hits)]
+    return {"score": score, "jobQuote": quote[:200], "cvBulletIds": ids[:4]}
+
+
+def _fit_score_output(variables: dict, cv: MasterCV) -> dict:
+    """MATCH-04 in the demo: four sub-scores with evidence, and no total."""
+    job_text = str(variables.get("job") or "")
+    core = [s.name for s in cv.skills[:5]]
+    adjacent = [s.name for s in cv.skills[5:12]]
+    experience = [b.text for r in cv.experience for b in r.bullets][:6]
+    quote = next((line.strip() for line in job_text.split("\n") if len(line.strip()) > 40), "")
+    return {
+        "core": _demo_subscore(job_text, cv, core, floor=2.0),
+        "adjacent": _demo_subscore(job_text, cv, adjacent, floor=2.0),
+        "experience": _demo_subscore(job_text, cv, experience[:3], floor=3.0),
+        # Eligibility is a rules question, not a reading question, so the demo answers it flatly.
+        "eligibility": {"score": 7.0, "jobQuote": quote[:200], "cvBulletIds": []},
+        "reason": "Matches the CV on the skills this ad asks for.",
+        "jobQuote": quote[:200],
+        "cvBulletIds": [b.id for r in cv.experience for b in r.bullets][:3],
+    }
+
+
 def respond(task: str, variables: dict, context: dict | None, demo_input: PackInput | None = None) -> dict:
     """The demo answer for one §9.3 task.
 
@@ -413,6 +483,18 @@ def respond(task: str, variables: dict, context: dict | None, demo_input: PackIn
         if cv is None:
             raise KeyError("profile.generate needs the master CV in validation context")
         return _profile_proposal(cv)
+    if task == "keywords.extract":
+        if cv is None:
+            raise KeyError("keywords.extract needs the master CV in validation context")
+        return {"keywords": _demo_keywords(str(variables.get("job") or ""), cv)}
+    if task == "fit.score":
+        if cv is None:
+            raise KeyError("fit.score needs the master CV in validation context")
+        return _fit_score_output(variables, cv)
+    if task == "email.extract":
+        # Demo mode never opens a mailbox (DEMO-02), so there is no email to read. Returning
+        # nothing is honest; inventing cards would make the demo look like it had an inbox.
+        return {"cards": []}
     if task == "guard.repair":
         # The demo writer only ever copies master-CV lines, so there is nothing to repair. Saying
         # so (rather than inventing a fix) is what the real model does when it can't help either.

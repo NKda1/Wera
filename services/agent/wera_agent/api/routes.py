@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, Query, status
 from ..db.session import transaction
 from ..errors import ApiError
 from ..graphs.application import advance
+from ..graphs.intake import run_intake
 from ..llm.gateway import flush_unrecorded
 from ..schemas.api import (
     ApplicationList,
@@ -35,6 +36,9 @@ from ..schemas.profile import SearchProfile
 from ..schemas.runs import Estimate, IntakeRun, RunIds
 from ..schemas.settings import SettingsPatch, SettingsResponse
 from ..services.store import Store
+
+# Aliased: this module already has a `get_settings` *route*, which would shadow it.
+from ..settings import get_settings as environment
 from ..tasks import spawn
 
 router = APIRouter()
@@ -195,10 +199,16 @@ def estimate(s: S, channels: str | None = None) -> Estimate:
 
 @router.post("/intake/run")
 def start_run(s: S, body: RunIn) -> RunIds:
+    """UX-01: the run's rows exist before the response, so the UI can poll immediately; the
+    fetching happens afterwards, outside this request's transaction."""
     chosen = [c for c in (body.channels if body.channels is not None else CHANNELS) if c in CHANNELS]
     if not chosen:
         raise ApiError(422, "VALIDATION", "Choose at least one channel.")
-    return s.start_runs(chosen)
+    ids = s.start_runs(chosen)
+    if not environment().wera_demo_mode:
+        # DEMO-02: demo runs are simulated against the fixtures and make no outbound request.
+        s.defer(run_intake(chosen, ids), name=f"intake:{','.join(chosen)}")
+    return RunIds(run_ids=list(ids.values()))
 
 
 @router.get("/intake/runs/{run_id}")

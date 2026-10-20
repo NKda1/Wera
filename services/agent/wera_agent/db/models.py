@@ -73,6 +73,9 @@ class FitReportRow(Base):
     evidence: Mapped[dict[str, Any]]
     model: Mapped[str] = mapped_column(String(128))
     cv_version: Mapped[int | None] = mapped_column(Integer)
+    # COST-04: with the CV version and the model, this is the whole cache key. A job whose
+    # description changed is a different job to score.
+    job_hash: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[str] = mapped_column(Iso)
 
 

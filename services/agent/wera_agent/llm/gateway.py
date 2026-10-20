@@ -54,8 +54,10 @@ BUDGET = "BUDGET_REACHED"
 MESSAGES = {
     AUTH: "The model provider rejected the API key. Check LLM_API_KEY in .env.local.",
     QUOTA: (
-        "The model provider wouldn't accept the request on the credit left. Top up the account, "
-        "or pick a cheaper model for this tier in Settings."
+        "The model provider wouldn't accept the request on the credit left — it reserves the "
+        "whole token budget up front, so a task can be refused while credit remains. Top up the "
+        "account, pick a cheaper model for this tier in Settings, or lower the task's max_tokens "
+        "in config/wera.yaml."
     ),
     RATE: "The model provider is rate-limiting WERA. Wait a moment and try again.",
     TIMEOUT: "The model took too long to answer.",
@@ -98,6 +100,12 @@ _REASONING: dict[Effort, dict[str, Any]] = {
 # too small. Kept modest: a provider reserves credit for the whole `max_tokens` whether or not
 # it uses it, so generous headroom makes calls fail on cost rather than on content.
 _HEADROOM: dict[Effort, int] = {"off": 0, "low": 600, "on": 1200}
+
+# What a cut-off reply's second attempt gets. How long a model thinks varies per call, so the
+# retry buys room instead of carrying feedback. Only the tokens actually generated are billed,
+# so the larger ceiling costs nothing unless it is used — it only raises what the provider
+# reserves against the balance for that one call.
+TRUNCATION_RETRY_FACTOR = 2
 
 
 def _code_for(exc: BaseException) -> str:
@@ -183,6 +191,30 @@ def _chain[Out: BaseModel](
     return chain.with_fallbacks([one(m) for m in rest], exceptions_to_handle=RETRYABLE)
 
 
+def _reported_cost(metadata: dict[str, Any]) -> float | None:
+    """What the provider says the call cost, if it says. OpenRouter returns this on every reply."""
+    cost = (metadata.get("token_usage") or {}).get("cost")
+    return float(cost) if isinstance(cost, int | float) else None
+
+
+def _usage_from(exc: BaseException) -> dict[str, Any] | None:
+    """The tokens a *failed* call still consumed.
+
+    A reply cut off at the token ceiling was generated and billed in full; recording it as free
+    made WERA's spend figure — and therefore the weekly cap (COST-01) — read an order of
+    magnitude low. The provider attaches the usage to the exception, so it is read from there.
+    """
+    completion = getattr(exc, "completion", None) or getattr(exc, "response", None)
+    usage = getattr(completion, "usage", None)
+    if usage is None:
+        return None
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    if prompt is None and completion_tokens is None:
+        return None
+    return {"input_tokens": prompt or 0, "output_tokens": completion_tokens or 0}
+
+
 def _record(
     session: Session,
     *,
@@ -194,6 +226,7 @@ def _record(
     ok: bool,
     code: str | None = None,
     usage: dict[str, Any] | None = None,
+    reported_cost: float | None = None,
 ) -> float:
     """Records the call and returns what it cost (PRIV-03: metadata only).
 
@@ -203,10 +236,15 @@ def _record(
     takes one writer at a time, so it can't be written here either; `flush_unrecorded` writes it
     once the caller's transaction has closed. Spend is recorded whether or not the work it was
     for succeeded (COST-01).
+
+    `reported_cost` is the provider's own figure, preferred over the local price table whenever
+    it is sent: the table is a copy of a published price and goes stale silently, and measured
+    against a real OpenRouter reply it read about 12% low. The table stays for the pre-flight
+    budget estimate, where there is no reply to read a price from yet.
     """
     tokens_in = int((usage or {}).get("input_tokens") or 0)
     tokens_out = int((usage or {}).get("output_tokens") or 0)
-    cost = cost_usd(model, tokens_in, tokens_out)
+    cost = reported_cost if reported_cost is not None else cost_usd(model, tokens_in, tokens_out)
     row = {
         "task": task,
         "tier": tier,
@@ -345,29 +383,49 @@ def structured[Out: BaseModel](
         return out
 
     models = [saved["models"][spec.tier], *cfg.fallbacks.get(spec.tier, [])]
-    chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=spec.max_tokens, reasoning=spec.reasoning)
+    ceiling = spec.max_tokens
+    chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=spec.reasoning)
     messages = template(task).format_messages(**prompt_vars)
     errors: str | None = None
+
+    def cut_off(*, model: str, usage: Any, reported: float | None, started: float, attempt: int) -> bool:
+        """Records a cut-off reply and says whether to try again with more room.
+
+        Both the SDK's `LengthFinishReasonError` and a `finish_reason` of "length" mean the same
+        thing, and which one arrives depends on the provider and the structured-output method,
+        so they share this.
+        """
+        nonlocal ceiling, chain, errors
+        _record(
+            session,
+            task=task,
+            tier=spec.tier,
+            model=model,
+            started=started,
+            attempt=attempt,
+            ok=False,
+            code=TRUNCATED,
+            usage=usage,
+            reported_cost=reported,
+        )
+        logfire.warn("{task} was cut off at {tokens} tokens", task=task, tokens=ceiling + _HEADROOM[spec.reasoning])
+        if attempt > 1:
+            return False
+        ceiling *= TRUNCATION_RETRY_FACTOR
+        chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=spec.reasoning)
+        errors = None  # nothing was wrong with the shape; the reply never got as far as a shape
+        return True
 
     for attempt in (1, 2):
         started = time.monotonic()
         turn = [*messages, ("human", RETRY_NOTE.format(errors=errors))] if errors else messages
         try:
             result: Any = chain.invoke(turn)
-        except openai.LengthFinishReasonError:
-            # The provider cut the reply off mid-answer. Retrying with the same budget would cut
-            # it off again, so this is reported rather than retried.
-            _record(
-                session,
-                task=task,
-                tier=spec.tier,
-                model=models[0],
-                started=started,
-                attempt=attempt,
-                ok=False,
-                code=TRUNCATED,
-            )
-            logfire.warn("{task} was cut off at {tokens} tokens", task=task, tokens=spec.max_tokens + _HEADROOM[spec.reasoning])
+        except openai.LengthFinishReasonError as exc:
+            # Cut off mid-answer, but generated and billed in full — so its tokens are recorded,
+            # and it gets one more pass with a bigger ceiling.
+            if cut_off(model=models[0], usage=_usage_from(exc), reported=None, started=started, attempt=attempt):
+                continue
             raise _fail(TRUNCATED) from None
         except (OutputParserException, ValidationError, JSONDecodeError) as exc:
             # The provider answered; it just didn't answer in the required shape. That is a bad
@@ -380,8 +438,22 @@ def structured[Out: BaseModel](
             raise _fail(code) from None
 
         if result is None:  # the parse failed above; skip straight to the retry
+            # This reply was generated and billed, but when the provider SDK raises during its
+            # own parse the response body is gone with it, so there is usually no usage to read
+            # and the row records zero. That is a known undercount in the spend figure, kept
+            # small by prompting so the shape is right first time (see `REASON_LIMIT`): when
+            # every fit.score reply overran its reason limit, this path alone made WERA's
+            # recorded spend read 2.2x low against the provider's own figure.
             _record(
-                session, task=task, tier=spec.tier, model=models[0], started=started, attempt=attempt, ok=False, code=BAD_OUTPUT
+                session,
+                task=task,
+                tier=spec.tier,
+                model=models[0],
+                started=started,
+                attempt=attempt,
+                ok=False,
+                code=BAD_OUTPUT,
+                usage=_usage_from(problem),
             )
             errors = _problems(problem)
             logfire.warn(
@@ -398,20 +470,9 @@ def structured[Out: BaseModel](
         model = metadata.get("model_name") or models[0]
 
         if metadata.get("finish_reason") == "length":
-            # The reply was cut off, so there is nothing to validate and nothing a retry would
-            # fix: the same budget would cut off the same way. Say what actually happened.
-            _record(
-                session,
-                task=task,
-                tier=spec.tier,
-                model=model,
-                started=started,
-                attempt=attempt,
-                ok=False,
-                code=TRUNCATED,
-                usage=usage,
-            )
-            logfire.warn("{task} was cut off at {tokens} tokens", task=task, tokens=spec.max_tokens + _HEADROOM[spec.reasoning])
+            # Cut off, reported in the reply rather than raised. Same handling.
+            if cut_off(model=model, usage=usage, reported=_reported_cost(metadata), started=started, attempt=attempt):
+                continue
             raise _fail(TRUNCATED)
 
         parsed = result.get("parsed") if isinstance(result, dict) else result
@@ -423,7 +484,17 @@ def structured[Out: BaseModel](
             except ValidationError as exc:
                 problem = exc
             else:
-                _record(session, task=task, tier=spec.tier, model=model, started=started, attempt=attempt, ok=True, usage=usage)
+                _record(
+                    session,
+                    task=task,
+                    tier=spec.tier,
+                    model=model,
+                    started=started,
+                    attempt=attempt,
+                    ok=True,
+                    usage=usage,
+                    reported_cost=_reported_cost(metadata),
+                )
                 return out
 
         # §8.5 step 1: one retry carrying the problems, then give up.
@@ -437,6 +508,7 @@ def structured[Out: BaseModel](
             ok=False,
             code=BAD_OUTPUT,
             usage=usage,
+            reported_cost=_reported_cost(metadata),
         )
         errors = _problems(problem)
         logfire.warn(

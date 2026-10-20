@@ -20,7 +20,10 @@ from .jobs import JobKeyword, Location, RemoteMode, Salary, SubScore
 from .profile import Recency, Seniority
 
 Score = Annotated[float, check(lambda v: 0 <= v <= 10, "range", "Scores run from 0 to 10")]
-Reason = Annotated[str, check(lambda v: len(v) <= 200, "max", "Keep the reason under 200 characters")]
+# A provider's strict mode ignores `maxLength`, so this limit has to be in the prompt as well —
+# `llm.prompts` imports it from here so the two cannot drift.
+REASON_LIMIT = 200
+Reason = Annotated[str, check(lambda v: len(v) <= REASON_LIMIT, "max", f"Keep the reason under {REASON_LIMIT} characters")]
 Term = Annotated[str, required("This can't be empty")]
 
 

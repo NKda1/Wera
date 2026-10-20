@@ -2,7 +2,7 @@
 
 The Firecrawl SDK builds its own HTTP client, so these tests replace the client itself and
 inspect the calls. That is the right level anyway: what matters is the arguments WERA sends —
-which domains, which exclusions, how many — and the caps that stop a run.
+which domains, how many results, how recent — and the caps that stop a run.
 """
 
 from dataclasses import dataclass
@@ -119,8 +119,10 @@ class TestLinkedInIsNeverFetched:
         )
         outcome = board.search(profile(), SITES, board.SearchCaps(), known_urls=set())
 
-        assert all("linkedin.com" in (call["exclude_domains"] or []) for call in client.searches)
-        # A LinkedIn result that slips through the exclusion is dropped locally too.
+        # The allow-list *is* the exclusion: Firecrawl refuses a request carrying both lists, so
+        # SRCH-03 is enforced by never naming a denied domain and by dropping denied results.
+        assert all("linkedin.com" not in call["include_domains"] for call in client.searches)
+        # A LinkedIn result that comes back anyway is dropped locally too.
         assert [h.url for h in outcome.hits] == ["https://www.gradcracker.com/jobs/7"]
         assert not any("linkedin" in u for u in client.scrapes)
 
@@ -140,6 +142,48 @@ class TestSearchArguments:
         assert call["tbs"] == "qdr:d"
         assert call["limit"] == board.LIMIT_PER_QUERY <= 10
         assert set(call["include_domains"]) == {"gradcracker.com", "brightnetwork.co.uk"}
+
+    def test_the_request_never_carries_both_domain_lists(self, fake):
+        """Firecrawl rejects a request with an include list *and* an exclude list. Sending both
+        failed every query of every board search, and said only "ValidationError"."""
+        client = fake(FakeClient())
+        board.search(profile(), SITES, board.SearchCaps(), set())
+        assert all(call["include_domains"] and not call.get("exclude_domains") for call in client.searches)
+
+
+class TestErrorsSayWhatWentWrong:
+    """A swallowed message is how a dead channel looks healthy."""
+
+    def rejecting(self, message: str):
+        class Rejected(FakeClient):
+            def search(self, query, **kwargs):
+                raise type("ValidationError", (Exception,), {})(message)
+
+        return Rejected()
+
+    def test_a_rejected_request_records_why_not_just_its_class(self, fake, monkeypatch):
+        monkeypatch.setattr(board.time, "sleep", lambda _s: None)
+        fake(
+            self.rejecting(
+                "1 validation error for SearchRequest\n  include_domains and exclude_domains cannot both\n  be specified"
+            )
+        )
+
+        outcome = board.search(profile(), SITES, board.SearchCaps(), set())
+
+        assert outcome.errors
+        # Collapsed onto one line, so a multi-line SDK error stays readable in a run's errors.
+        assert "cannot both be specified" in outcome.errors[0]
+        assert "\n" not in outcome.errors[0]
+
+    def test_a_message_that_echoes_a_key_is_redacted(self, fake, monkeypatch):
+        """SEC-05: the message is the provider's, and it quotes the request back."""
+        monkeypatch.setattr(board.time, "sleep", lambda _s: None)
+        key = "fc-" + "9" * 40
+        fake(self.rejecting(f"rejected request with Authorization: Bearer {key}"))
+
+        outcome = board.search(profile(), SITES, board.SearchCaps(), set())
+        assert outcome.errors and key not in outcome.errors[0]
 
 
 class TestKnownUrls:

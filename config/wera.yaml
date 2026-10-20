@@ -1,4 +1,5 @@
-# WERA behaviour (SPEC §9.2). Secrets never go here; they live in services/agent/.env.local.
+# WERA behaviour (SPEC §9.2). Secrets never go here; they live in the repo root's .env.local,
+# which is git-ignored and read by the agent at startup.
 
 # Model id per tier (ARCHITECTURE §3.3). Pin dated ids; re-run the golden set before switching.
 # A person can change these in Settings; everything below is file-only.
@@ -34,7 +35,11 @@ tasks:
   email.extract: { tier: fast, max_tokens: 1500, reasoning: "off" }
   keywords.extract: { tier: fast, max_tokens: 600, reasoning: "off" }
   match.verdict: { tier: fast, max_tokens: 300, reasoning: "off" }
-  fit.score: { tier: scoring, max_tokens: 1200, reasoning: low }
+  # Measured on qwen3.8-27b against real 6–10k-char postings: a reply takes 1,200–1,500 tokens
+  # including its thinking, but how long it thinks swings call to call, and 1,200 + headroom cut
+  # off seven of eight jobs. 2,400 clears the observed range, and a cut-off reply retries once
+  # with double the room (gateway.TRUNCATION_RETRY_FACTOR). Only generated tokens are billed.
+  fit.score: { tier: scoring, max_tokens: 2400, reasoning: low }
   cv.tailor: { tier: writing, max_tokens: 3000, reasoning: "on" }
   letter.write: { tier: writing, max_tokens: 1500, reasoning: "on" }
   guard.repair: { tier: writing, max_tokens: 1500, reasoning: low }
@@ -48,6 +53,14 @@ weights:
   experience: 0.20
   eligibility: 0.15
   freshness: 0.10
+
+# SRCH-06: what one intake run may spend before it stops as partial.
+max_queries: 20
+max_pages: 30
+max_credits_per_run: 100
+
+# MATCH-05: how many jobs a day reach the scoring tier.
+max_scored_per_day: 40
 
 ats_threshold: 0.75
 weekly_budget_usd: 5

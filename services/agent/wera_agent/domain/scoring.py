@@ -29,7 +29,13 @@ def freshness_score(posted_at: str | None, now_ms: int) -> float:
     """§8.2: 10 if posted ≤ 2 days ago, 7 if ≤ 7, 4 if ≤ 14, else 1. Unknown dates score as stale."""
     if not posted_at:
         return 1
-    days = (now_ms - parse_ms(posted_at)) / DAY_MS
+    try:
+        days = (now_ms - parse_ms(posted_at)) / DAY_MS
+    except (ValueError, TypeError):
+        # Sources normalise their dates (`normalise.parse_posted`), so reaching here means a row
+        # written before that or by something new. One unreadable date scores as stale; it does
+        # not raise and take the rest of the run's scoring with it.
+        return 1
     if days <= 2:
         return 10
     if days <= 7:

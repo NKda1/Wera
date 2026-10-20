@@ -14,7 +14,7 @@ import hashlib
 import re
 from typing import Any
 
-from ..clock import iso
+from ..clock import iso, parse_ms
 from ..domain import dedupe
 from ..domain.text import is_linkedin_url
 from ..schemas.jobs import Ats, Job, JobSource, Location, Salary
@@ -41,8 +41,12 @@ CURRENCIES = {"£": "GBP", "€": "EUR", "$": "USD", "chf": "CHF"}
 # One number pattern, used for both ends of a range: digits with any thousands separators and an
 # optional "k". `_amount` works out what the separators meant.
 _NUMBER = r"\d[\d,.]*\s?k?"
+# Every dash a job ad uses between the two ends of a range: hyphen, en dash, em dash and the
+# real minus sign. Greenhouse writes "$200,000—$265,000" with an em dash and no spaces, and
+# missing it turns a range into a single number — which reads as the whole story.
+_RANGE = r"(?:[-–—−]+|to)"
 MONEY = re.compile(
-    rf"(?P<sym>[£€$]|chf)\s?(?P<low>{_NUMBER})(?:\s*(?:-|–|to)\s*(?:[£€$]|chf)?\s?(?P<high>{_NUMBER}))?",
+    rf"(?P<sym>[£€$]|chf)\s?(?P<low>{_NUMBER})(?:\s*{_RANGE}\s*(?:[£€$]|chf)?\s?(?P<high>{_NUMBER}))?",
     re.I,
 )
 PERIOD = (
@@ -101,11 +105,58 @@ def detect_language(text: str | None) -> str:
     return best if scores.get(best, 0) >= 3 else "en"
 
 
+_RELATIVE = re.compile(r"(\d+)\+?\s*(minute|min|hour|hr|day|week|month)s?\s*ago", re.I)
+_RELATIVE_UNITS = {
+    "minute": 60_000,
+    "min": 60_000,
+    "hour": 3_600_000,
+    "hr": 3_600_000,
+    "day": 86_400_000,
+    "week": 604_800_000,
+    "month": 2_592_000_000,
+}
+_TODAY = ("just posted", "posted today", "today", "just now", "new")
+
+
+def parse_posted(raw: str | None, now: int) -> str | None:
+    """A posted date WERA can do arithmetic on, or nothing.
+
+    Job boards write "2 Days Ago", not a timestamp. Stored as-is, the first attempt to score the
+    job's freshness raises and takes the whole run with it — so anything that isn't a date WERA
+    can read becomes no date at all, which the scoring already handles.
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    try:
+        parse_ms(text)
+    except (ValueError, TypeError):
+        pass
+    else:
+        return text
+
+    found = _RELATIVE.search(text)
+    if found:
+        unit = _RELATIVE_UNITS[found.group(2).lower()]
+        return iso(now - int(found.group(1)) * unit)
+    lowered = text.lower()
+    if any(word == lowered or lowered.startswith(word) for word in _TODAY):
+        return iso(now)
+    if "yesterday" in lowered:
+        return iso(now - _RELATIVE_UNITS["day"])
+    return None
+
+
 def infer_seniority(title: str, description: str | None = None) -> str | None:
-    """The level the ad is pitched at, from its own words."""
+    """The level the ad is pitched at, from its own words.
+
+    Whole words only. As a substring, "intern" is inside "internal", "international" and
+    "internet", so an engineering role whose description mentioned internal teams was being
+    filed as an internship — and the hard filters act on this field.
+    """
     haystack = f" {title.lower()} {(description or '')[:400].lower()} "
     for level, words in SENIORITY:
-        if any(w in haystack for w in words):
+        if any(re.search(rf"\b{re.escape(w.strip())}\b", haystack) for w in words):
             return level
     return None
 
@@ -155,7 +206,8 @@ def _job(
         linkedin_url=linkedin_url,
         sources=[source],
         language=detect_language(description),
-        posted_at=posted_at,
+        # Every builder funnels through here, so every posted date is one WERA can read.
+        posted_at=parse_posted(posted_at, now),
         first_seen=iso(now),
         last_seen=iso(now),
         status="new",
@@ -198,6 +250,28 @@ def from_scrape(card: dict[str, Any], *, url: str, site: str, markdown: str | No
         ats=None,
         source=JobSource(channel="board_search", detail=site, seen_at=iso(now)),
         posted_at=card.get("postedAt"),
+        now=now,
+    )
+
+
+def from_pasted(text: str, *, title: str, company: str, location_raw: str | None, now: int) -> Job:
+    """ATS-04's paste: the description is the one thing WERA certainly has.
+
+    Nothing is invented around it — a paste with no location is "Not stated", because a job the
+    person pasted from a site WERA can't read shouldn't acquire a city it never mentioned.
+    """
+    where = location_raw or ""
+    return _job(
+        title=title,
+        company=company,
+        location=Location(city=where.split(",")[0].strip() or None, raw=where or "Not stated"),
+        remote=infer_remote(where, text[:400]),
+        description=text,
+        status="full" if len(text) > 200 else "partial",
+        apply_url=None,
+        ats=None,
+        source=JobSource(channel="manual", detail="pasted-text", seen_at=iso(now)),
+        posted_at=None,
         now=now,
     )
 

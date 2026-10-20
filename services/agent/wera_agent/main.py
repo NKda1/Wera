@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from . import errors, tasks
+from .api import scheduler
 from .api.routes import router
 from .clock import now_ms
 from .db.session import transaction
@@ -40,7 +41,10 @@ async def lifespan(_app: FastAPI):
     resumed = await resume_unfinished()
     if resumed:
         logfire.info("Resumed {count} unfinished application thread(s) after restart", count=resumed)
+    # SCH-01: boards in the morning, the inbox through the day. Off in demo mode.
+    scheduler.start()
     yield
+    scheduler.stop()
     await tasks.adrain(timeout=30)
 
 

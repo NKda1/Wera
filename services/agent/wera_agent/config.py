@@ -75,6 +75,10 @@ class WeraConfig(BaseModel):
     prices: dict[str, Price]
     tasks: dict[str, Task]
     weights: Weights
+    max_queries: int = 20
+    max_pages: int = 30
+    max_credits_per_run: int = 100
+    max_scored_per_day: int = 40
     ats_threshold: float = 0.75
     weekly_budget_usd: float = 5
     cv_pages: int = 1

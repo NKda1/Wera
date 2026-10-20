@@ -5,7 +5,8 @@ The store owns the database state machine and is what the HTTP routes talk to. D
 is the application graph's job (graphs/application.py): its nodes call the helpers under "what
 the application graph's nodes call" below, so each transition has one implementation.
 
-Demo intake runs still advance with time; real intake replaces them in a later milestone.
+Demo intake runs advance with time (`_finish_run`); a real install runs the intake graph
+instead, and that graph records its own figures.
 """
 
 import re
@@ -34,6 +35,7 @@ from ..db.models import (
     MasterCvRow,
     ProfileRow,
 )
+from ..domain import dedupe
 from ..domain.applications import ALLOWED
 from ..domain.profile_diff import profile_diff
 from ..domain.scoring import build_fit_report, js_round
@@ -57,7 +59,7 @@ from ..schemas.api import (
 )
 from ..schemas.applications import Application, ApplicationJob, ApplicationListItem, ApplicationWithJob, DraftProgress
 from ..schemas.cv import Contact, CvLine, MasterCV
-from ..schemas.jobs import FitEvidence, FitWeights, Job, ScoredJob, SubScore
+from ..schemas.jobs import Ats, FitEvidence, FitWeights, Job, ScoredJob, SubScore
 from ..schemas.llm_outputs import ProfileProposal
 from ..schemas.pack import AnswerItem, AtsReport, Cited, CoverLetter, CvItem, CvSection, Pack, TailoredCV
 from ..schemas.profile import SearchProfile
@@ -218,6 +220,13 @@ class Store:
                 save_job(self.s, job)
         # Drafting is no longer time-based: the application graph moves an application to
         # ready_for_review when its nodes have actually finished (see graphs/application.py).
+        #
+        # Intake runs are only simulated in demo mode. A real run is finished by the intake
+        # graph when its channels have actually answered, so advancing it on a timer here would
+        # overwrite real results with demo seeds.
+        if not get_settings().wera_demo_mode:
+            self.s.flush()
+            return
         for run in self.s.scalars(select(IntakeRunRow).where(IntakeRunRow.status == "running")).all():
             elapsed = now - parse_ms(run.started_at)
             run.progress = min(1, elapsed / run.duration_ms)
@@ -261,6 +270,28 @@ class Store:
             run.queries = stats["watchlist"]["companies"]
             run.results = run.new_jobs = 0
             stats = {**stats, "watchlist": {**stats["watchlist"], "checkedAt": iso(now)}}
+        set_kv(self.s, "stats", stats)
+
+    def set_last_run_jobs(self, job_ids: list[str]) -> None:
+        """What the shortlist marks as new since the last run."""
+        set_kv(self.s, "lastRunJobIds", job_ids)
+
+    def record_channel_stats(self, channel: str, *, queries: int, results: int, new_jobs: int, emails: int = 0) -> None:
+        """The channel strip's figures after a real run.
+
+        Demo mode has `_finish_run` for this; a real run has to write them itself, or the
+        shortlist would keep showing the state of a run that happened days ago.
+        """
+        stats = get_kv(self.s, "stats")
+        at = iso(self.now)
+        if channel == "board_search":
+            stats = {**stats, "board": {"queries": queries, "results": results, "ranAt": at}}
+        elif channel == "email_alert":
+            stats = {**stats, "inbox": {**stats["inbox"], "emails": emails, "jobs": results, "checkedAt": at}}
+            data = self._settings()
+            self._save_settings({**data, "inbox": {**data["inbox"], "lastCheckedAt": at}})
+        else:
+            stats = {**stats, "watchlist": {**stats["watchlist"], "newSinceYesterday": new_jobs, "checkedAt": at}}
         set_kv(self.s, "stats", stats)
 
     # ---- reads ----
@@ -324,23 +355,28 @@ class Store:
         board, inbox, watch = stats["board"], stats["inbox"], stats["watchlist"]
         p = self._profile()
         board_sites = ", ".join(s.name for s in sites() if s.domain in p.sites)
+        # A channel that has never run says so, rather than reporting a confident "0 results".
         channels = [
             ChannelSummary(
                 channel="board_search",
                 detail=f"Firecrawl · {board_sites}",
-                stats=f"{board['queries']} queries · {board['results']} results · ran {_hhmm(board['ranAt'])}",
+                stats=f"{board['queries']} queries · {board['results']} results · ran {_hhmm(board['ranAt'])}"
+                if board["ranAt"]
+                else "not run yet",
                 enabled=p.channels.board_search,
             ),
             ChannelSummary(
                 channel="email_alert",
                 detail="Read-only · LinkedIn, Indeed and board alerts",
-                stats=f"{inbox['emails']} emails · {inbox['jobs']} jobs · checked {self._minutes_ago(inbox['checkedAt'])}",
+                stats=f"{inbox['emails']} emails · {inbox['jobs']} jobs · checked {self._minutes_ago(inbox['checkedAt'])}"
+                if inbox["checkedAt"]
+                else "not checked yet",
                 enabled=p.channels.inbox,
             ),
             ChannelSummary(
                 channel="watchlist",
                 detail=f"{watch['companies']} companies · Greenhouse, Lever, Ashby",
-                stats=f"{watch['newSinceYesterday']} new since yesterday",
+                stats=f"{watch['newSinceYesterday']} new since yesterday" if watch["checkedAt"] else "not checked yet",
                 enabled=p.channels.watchlist,
             ),
         ]
@@ -438,6 +474,44 @@ class Store:
     # ---- Manual import (ATS-04) ----
 
     def import_job(self, *, url: str | None = None, text: str | None = None) -> ScoredJob:
+        """ATS-04. A real install fetches the posting it was given; the demo makes one up,
+        because a demo that reached out to a job board would not be a demo (DEMO-02)."""
+        if not get_settings().wera_demo_mode:
+            return self._import_live(url=url, text=text)
+        return self._import_demo(url=url, text=text)
+
+    def _import_live(self, *, url: str | None, text: str | None) -> ScoredJob:
+        """The real thing: fetch or take the posting, then score it like any other job.
+
+        An imported job is scored straight away — the person asked for this one by name, so the
+        model call is the point of the click rather than a cost they didn't choose. Scoring that
+        fails takes the import with it: a job on the list with no fit would never be scored
+        later (a run only scores what that run found), so a clear failure beats a job that sits
+        there unranked for good.
+        """
+        from ..llm.gateway import MESSAGES
+        from ..nodes import fit
+        from ..sources import manual
+
+        job = manual.imported(url=url, text=text, now=self.now)
+        existing = self.s.scalars(select(JobRow).where(JobRow.dedupe_key == job.dedupe_key)).first()
+        if existing is not None:
+            raise ApiError(409, "ALREADY_KNOWN", f"WERA already has this job: {existing.title} at {existing.company}.")
+
+        save_job(self.s, job, None, [], created_at=iso(self.now))
+        evidence, _, code = fit.evidence_for(self.s, job, self.cv(), model=self._settings()["models"]["scoring"], now=self.now)
+        if evidence is None:
+            raise ApiError(
+                424,
+                code or "SCORE_FAILED",
+                f"WERA read the job but couldn't score it, so nothing was added. "
+                f"{MESSAGES.get(code or '', 'Try again in a moment.')}",
+            )
+        set_kv(self.s, "lastRunJobIds", [job.id])
+        self.s.flush()
+        return self.scored(job)
+
+    def _import_demo(self, *, url: str | None = None, text: str | None = None) -> ScoredJob:
         cv = self.cv()
         job_id = f"job-import-{self._next_id()}"
 
@@ -613,6 +687,78 @@ class Store:
             return
         app.status, app.draft_step = "changes_requested", None
         app.notes = f"{message} ({code})"
+        self.s.flush()
+
+    # ---- what the intake graph's steps call ----
+
+    def weights(self) -> FitWeights:
+        return self._weights()
+
+    def known_apply_urls(self) -> set[str]:
+        """Every apply URL WERA already has, so a search doesn't scrape them again (SRCH-05)."""
+        urls: set[str] = set()
+        for row in self.s.scalars(select(JobRow)).all():
+            url = (row.data or {}).get("applyUrl")
+            if url:
+                urls.add(url)
+        return urls
+
+    def watchlist_ats_by_job(self) -> dict[str, Ats]:
+        """Job id → ATS identity, for the jobs that came from a watched board (ATS-03)."""
+        out: dict[str, Ats] = {}
+        for row in self.s.scalars(select(JobRow).where(JobRow.status.not_in(("closed", "archived")))).all():
+            ats = (row.data or {}).get("ats")
+            if ats:
+                out[row.id] = Ats.model_validate(ats)
+        return out
+
+    def close_jobs(self, job_ids: list[str]) -> int:
+        """ATS-03: the vacancy is gone, so the job is closed — not deleted. An application
+        already in flight keeps its job."""
+        closed = 0
+        for job_id in job_ids:
+            row = self.s.get(JobRow, job_id)
+            if row is None or row.status in ("in_application", "closed", "archived"):
+                continue
+            job = self._job(row)
+            job.status = "closed"
+            save_job(self.s, job)
+            closed += 1
+        self.s.flush()
+        return closed
+
+    def upsert_jobs(self, jobs: list[Job]) -> tuple[list[Job], set[str]]:
+        """Saves a run's jobs. Returns `(as stored, the ids that are new)`.
+
+        A job WERA already had keeps its own id, status and decisions — a second sighting is a
+        new source and a fresher `lastSeen`, not a new job (SCH-02). The stored jobs come back
+        because a merged sighting takes the id it already had, and anything downstream (a fit
+        report, for one) has to point at that id and not at the one this run invented.
+        """
+        new_ids: set[str] = set()
+        stored: list[Job] = []
+        by_key = {row.dedupe_key: row for row in self.s.scalars(select(JobRow)).all() if row.dedupe_key}
+        for job in jobs:
+            existing = self.s.get(JobRow, job.id) or by_key.get(job.dedupe_key)
+            if existing is None:
+                save_job(self.s, job, questions=[])
+                new_ids.add(job.id)
+                stored.append(job)
+                continue
+            merged = dedupe.merge_sources(self._job(existing), job)
+            merged.last_seen = iso(self.now)
+            save_job(self.s, merged)
+            stored.append(merged)
+        self.s.flush()
+        return stored, new_ids
+
+    def inbox_last_uid(self) -> int | None:
+        """MAIL-09: the highest UID already processed."""
+        value = get_kv(self.s, "inboxLastUid")
+        return int(value) if isinstance(value, int | float) else None
+
+    def set_inbox_last_uid(self, uid: int) -> None:
+        set_kv(self.s, "inboxLastUid", int(uid))
         self.s.flush()
 
     def job_questions(self, job_id: str) -> list[str]:
@@ -877,7 +1023,19 @@ class Store:
             demo=get_settings().wera_demo_mode,
         )
 
-    def start_runs(self, channels: list[str]) -> RunIds:
+    def start_runs(self, channels: list[str], *, scheduled: bool = False) -> dict[str, str]:
+        """Creates one `intake_runs` row per channel and returns channel → run id (SRCH-08).
+
+        A scheduled run doesn't refuse when the budget is spent the way a person's click does;
+        it records the refusal on its own row instead, so tomorrow's run still happens.
+        """
+        return self._start_runs(channels, scheduled=scheduled)
+
+    def start_runs_for_api(self, channels: list[str]) -> RunIds:
+        """What the route returns: just the ids."""
+        return RunIds(run_ids=list(self._start_runs(channels, scheduled=False).values()))
+
+    def _start_runs(self, channels: list[str], *, scheduled: bool) -> dict[str, str]:
         self.settle()
         if self.s.scalar(select(func.count()).select_from(IntakeRunRow).where(IntakeRunRow.status == "running")):
             raise ApiError(409, "RUN_ACTIVE", "A search is already running. Wait for it to finish or cancel it.")
@@ -887,8 +1045,9 @@ class Store:
         ]
         if not enabled:
             raise ApiError(422, "NO_CHANNELS", "Turn on at least one channel in your search profile.")
-        self._assert_budget()
-        ids = []
+        if not scheduled:
+            self._assert_budget()
+        ids: dict[str, str] = {}
         for channel in enabled:
             run = IntakeRunRow(
                 id=f"run-{self._next_id()}",
@@ -905,9 +1064,9 @@ class Store:
                 settled=False,
             )
             self.s.add(run)
-            ids.append(run.id)
+            ids[channel] = run.id
         self.s.flush()
-        return RunIds(run_ids=ids)
+        return ids
 
     def get_run(self, run_id: str) -> IntakeRun:
         self.settle()

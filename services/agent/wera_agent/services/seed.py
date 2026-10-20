@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..clock import iso
-from ..config import wera
+from ..config import companies, wera
 from ..db.models import ContactRow, MasterCvRow, ProfileRow, SettingsRow
 from ..schemas.cv import MasterCV
 from ..settings import get_settings
@@ -53,13 +53,16 @@ def seed(session: Session, now: int) -> None:
                 "inbox": {
                     "label": settings.alerts_imap_user or "[your-alerts-mailbox]",
                     "folder": settings.alerts_folder,
-                    "lastCheckedAt": iso(now - 10 * MIN),
-                    "emailsThisWeek": 23,
+                    "lastCheckedAt": iso(now - 10 * MIN) if settings.wera_demo_mode else None,
+                    "emailsThisWeek": 23 if settings.wera_demo_mode else 0,
                     "senders": ["LinkedIn job alerts", "Indeed", "Bright Network", "Gradcracker"],
                 },
             },
         )
     )
+    # The channel strip on the shortlist reads these. A real database starts at zero with no
+    # timestamps — "not run yet" — and the first run fills them in; the demo starts mid-week so
+    # the screens have something to show.
     st.set_kv(
         session,
         "stats",
@@ -67,6 +70,12 @@ def seed(session: Session, now: int) -> None:
             "board": {"queries": 20, "results": 126, "ranAt": iso(ran_ms)},
             "inbox": {"emails": 23, "jobs": 71, "checkedAt": iso(now - 10 * MIN)},
             "watchlist": {"companies": 32, "newSinceYesterday": 17, "checkedAt": iso(ran_ms)},
+        }
+        if settings.wera_demo_mode
+        else {
+            "board": {"queries": 0, "results": 0, "ranAt": None},
+            "inbox": {"emails": 0, "jobs": 0, "checkedAt": None},
+            "watchlist": {"companies": len(companies()), "newSinceYesterday": 0, "checkedAt": None},
         },
     )
     st.set_kv(session, "firstRunDelivered", False)
@@ -75,7 +84,11 @@ def seed(session: Session, now: int) -> None:
     session.flush()
 
     jobs = fixture("jobs.json")
-    for s in [*jobs["shortlist"], *jobs["hidden"]]:
+    # Demo jobs are demo-mode only. A fictional vacancy on a real shortlist is indistinguishable
+    # from a real one — it carries a fit score, an apply URL and a company that don't exist — so
+    # a real database starts with an empty list and fills it on the first run. The CV and profile
+    # above are different: they are a starting point the person edits, not a claimed finding.
+    for s in [*jobs["shortlist"], *jobs["hidden"]] if settings.wera_demo_mode else []:
         st.save_job(session, *seed_to_job(s, now), created_at=iso(now))
 
     store = st.Store(session, now)

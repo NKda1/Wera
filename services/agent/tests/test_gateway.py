@@ -44,8 +44,20 @@ GOOD = {
 INVENTED = {**GOOD, "skills": ["Kubernetes"]}
 
 
-def reply(payload: dict, *, model: str = FAST, tokens: tuple[int, int] = (1000, 500)) -> httpx.Response:
-    """An OpenAI-compatible completion whose content is the JSON the schema asked for."""
+def reply(
+    payload: dict, *, model: str = FAST, tokens: tuple[int, int] = (1000, 500), cost: float | None = None
+) -> httpx.Response:
+    """An OpenAI-compatible completion whose content is the JSON the schema asked for.
+
+    `cost` is what OpenRouter puts on every real reply; omit it for a provider that doesn't.
+    """
+    usage: dict[str, object] = {
+        "prompt_tokens": tokens[0],
+        "completion_tokens": tokens[1],
+        "total_tokens": sum(tokens),
+    }
+    if cost is not None:
+        usage["cost"] = cost
     return httpx.Response(
         200,
         json={
@@ -55,7 +67,7 @@ def reply(payload: dict, *, model: str = FAST, tokens: tuple[int, int] = (1000, 
             "created": 0,
             "system_fingerprint": "fp-test",
             "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": json.dumps(payload)}}],
-            "usage": {"prompt_tokens": tokens[0], "completion_tokens": tokens[1], "total_tokens": sum(tokens)},
+            "usage": usage,
         },
     )
 
@@ -212,17 +224,64 @@ class TestBadOutput:
 
 
 class TestTruncation:
+    """A budget too small for the model's thinking cuts the answer off. How long a model thinks
+    varies per call — measured on qwen3.8-27b, a ceiling that cut off seven of eight real jobs
+    scored all eight when doubled — so the retry buys room rather than carrying feedback."""
+
     @respx.mock
-    def test_a_cut_off_reply_says_so_and_is_not_retried(self, store, live):
-        """A budget too small for the model's thinking cuts the answer off. Retrying would cut
-        it off the same way, so WERA names the cause instead of calling it a bad shape."""
-        route = respx.post(COMPLETIONS).mock(return_value=truncated())
+    def test_a_cut_off_reply_is_retried_with_more_room(self, store, live):
+        route = respx.post(COMPLETIONS).mock(side_effect=[truncated(), reply(GOOD)])
+        out = generate(store)
+
+        assert out.titles  # the second attempt's answer is used
+        assert route.call_count == 2
+        first, second = (json.loads(c.request.content) for c in respx.calls)
+        # `ChatOpenAI` sends the ceiling as `max_completion_tokens`.
+        assert second["max_completion_tokens"] == first["max_completion_tokens"] * gateway.TRUNCATION_RETRY_FACTOR
+        # Nothing was wrong with the shape, so the retry must not scold the model about one.
+        assert "did not fit the required shape" not in json.dumps(second["messages"])
+
+    @respx.mock
+    def test_cut_off_twice_gives_up_and_names_the_cause(self, store, live):
+        route = respx.post(COMPLETIONS).mock(side_effect=[truncated(), truncated()])
         with pytest.raises(ApiError) as caught:
             generate(store)
         assert caught.value.code == "LLM_TRUNCATED"
         assert "token budget" in caught.value.message
-        assert route.call_count == 1  # not retried
+        assert route.call_count == 2
         assert calls(store)[-1].code == "LLM_TRUNCATED"
+
+    @respx.mock
+    def test_a_cut_off_reply_is_not_recorded_as_free(self, store, live):
+        """It was generated and billed in full. Recorded as free, it made the spend figure — and
+        so the weekly cap (COST-01) — read an order of magnitude low on a real run."""
+        respx.post(COMPLETIONS).mock(side_effect=[truncated(), truncated()])
+        with pytest.raises(ApiError):
+            generate(store)
+
+        cut_off = [c for c in calls(store) if c.code == "LLM_TRUNCATED"]
+        assert len(cut_off) == 2
+        for row in cut_off:
+            assert (row.input_tokens, row.output_tokens) == (800, 2700)
+            assert row.cost_usd > 0
+
+
+class TestWhatACallCost:
+    @respx.mock
+    def test_the_providers_own_figure_is_preferred_over_the_price_table(self, store, live):
+        """The table is a copy of a published price and goes stale silently; measured against a
+        real OpenRouter reply it read about 12% low."""
+        respx.post(COMPLETIONS).mock(return_value=reply(GOOD, tokens=(1000, 500), cost=0.004_2))
+        generate(store)
+        (row,) = calls(store)
+        assert row.cost_usd == pytest.approx(0.0042)
+
+    @respx.mock
+    def test_the_table_still_prices_a_provider_that_sends_no_cost(self, store, live):
+        respx.post(COMPLETIONS).mock(return_value=reply(GOOD, tokens=(1000, 500)))
+        generate(store)
+        (row,) = calls(store)
+        assert row.cost_usd > 0  # from config/wera.yaml's prices
 
 
 class TestFallbacks:

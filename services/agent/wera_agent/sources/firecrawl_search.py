@@ -17,6 +17,7 @@ import logfire
 
 from ..config import Site
 from ..http import DENY, host_of
+from ..logging import redact
 from ..schemas.profile import SearchProfile
 
 # SRCH-02: how "posted within" maps to a search-time filter.
@@ -34,6 +35,22 @@ class SearchCaps:
     max_queries: int = 20
     max_pages: int = 30
     max_credits: int = 100
+
+
+# SRCH-05: the shape asked of a scraped page. Shared with the manual import (ATS-04), which
+# scrapes a single page the same way.
+CARD_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "company": {"type": "string"},
+        "location": {"type": "string"},
+        "remote": {"type": "string"},
+        "postedAt": {"type": "string"},
+        "description": {"type": "string"},
+    },
+    "required": ["title", "company"],
+}
 
 
 @dataclass
@@ -94,8 +111,12 @@ def _retrying(call: Any, what: str, errors: list[str]) -> Any | None:
             name = type(exc).__name__
             retryable = "RateLimit" in name or "InternalServer" in name or "Timeout" in name
             if not retryable or attempt == MAX_TRIES - 1:
-                logfire.warn("Firecrawl {what} failed: {error}", what=what, error=name)
-                errors.append(f"{what}: {name}")
+                # The class name alone hid a rejected request behind a bare "ValidationError"
+                # for a whole channel. The message says what was wrong with it; it is redacted
+                # and truncated because it echoes the request back.
+                detail = redact(" ".join(str(exc).split()))[:200] or name
+                logfire.warn("Firecrawl {what} failed: {error}", what=what, error=detail)
+                errors.append(f"{what}: {detail}")
                 return None
             time.sleep(BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS) - 1)])
     return None
@@ -146,11 +167,16 @@ def search(profile: SearchProfile, sites: list[Site], caps: SearchCaps, known_ur
             break
 
         result = _retrying(
+            # SRCH-03 is not enforced here: Firecrawl refuses a request carrying both an
+            # include list and an exclude list, and sending both failed *every* query. An
+            # allow-list is the stronger of the two anyway — nothing outside it can come back —
+            # and the deny list is still applied by `enabled_domains` (which never puts a
+            # denied domain in this list), `_hits_from` (which drops a denied host from the
+            # results) and `scrape_card` (which refuses to fetch one).
             lambda q=query: client.search(
                 q,
                 sources=["web"],
                 include_domains=domains,
-                exclude_domains=list(DENY),  # SRCH-03
                 limit=LIMIT_PER_QUERY,
                 tbs=tbs,
             ),

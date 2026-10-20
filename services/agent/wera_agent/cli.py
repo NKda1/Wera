@@ -14,6 +14,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("migrate", help="apply database migrations")
     schemas = sub.add_parser("schemas", help="export the Pydantic contracts to packages/schemas/json")
     schemas.add_argument("--check", action="store_true", help="fail if the committed files are stale")
+    supabase = sub.add_parser("supabase", help="export the Postgres schema to supabase/schema.sql")
+    supabase.add_argument("--check", action="store_true", help="fail if the committed file is stale")
     args = parser.parse_args(argv)
 
     if args.cmd == "serve":
@@ -38,6 +40,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         for p in write():
             print(f"wrote {p}")
+        return 0
+    if args.cmd == "supabase":
+        from .supabase_export import stale, write
+
+        if args.check:
+            if stale():
+                print("supabase/schema.sql is stale. Run `uv run wera supabase`.", file=sys.stderr)
+                return 1
+            print("Supabase schema is up to date.")
+            return 0
+        print(f"wrote {write()}")
         return 0
     return 2
 

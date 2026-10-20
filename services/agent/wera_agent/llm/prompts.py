@@ -11,13 +11,17 @@ Two rules hold everywhere:
   injection can do is produce output that fails validation.
 
 The schema is attached by `gateway.structured()` through `with_structured_output()`, so these
-templates never describe the JSON shape; keeping it in one place stops the two drifting.
+templates never describe the JSON shape; keeping it in one place stops the two drifting. The one
+exception is a limit the provider's strict mode will not enforce — a `maxLength` is ignored — so
+`REASON_LIMIT` is stated in the prompt and imported from the schema rather than retyped.
 
 """
 
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
+
+from ..schemas.llm_outputs import REASON_LIMIT
 
 OPEN = "<<<UNTRUSTED DATA"
 CLOSE = "UNTRUSTED DATA>>>"
@@ -121,7 +125,8 @@ MATCH_VERDICT = ChatPromptTemplate.from_messages(
             "`possible` or `weak`. Quote the phrase from the post that decided it, word for word.\n\n"
             f"{_HONESTY}\n\n"
             "Be honest about a weak match — a wasted application costs the applicant more than a "
-            "blunt verdict does.\n\n" + _DATA_RULE,
+            "blunt verdict does.\n\n"
+            f"Keep `reason` under {REASON_LIMIT} characters: one or two sentences, no preamble.\n\n" + _DATA_RULE,
         ),
         ("human", "CV:\n{cv}\n\n{job}"),
     ]
@@ -139,6 +144,10 @@ FIT_SCORE = ChatPromptTemplate.from_messages(
             "For each axis quote the phrase from the post you scored against and list the CV bullet "
             "ids that back your score. Do not return an overall total: WERA computes it from these "
             "four with the applicant's own weights.\n\n"
+            # The schema caps `reason` at 200 characters and a provider's strict mode cannot
+            # enforce a maxLength, so the limit has to be said here. Left unsaid, every single
+            # call overran it, failed validation and was retried — paying twice for every job.
+            f"Keep `reason` under {REASON_LIMIT} characters: one or two sentences, no preamble.\n\n"
             f"{_HONESTY}\n\n" + _DATA_RULE,
         ),
         ("human", "CV:\n{cv}\n\n{job}"),

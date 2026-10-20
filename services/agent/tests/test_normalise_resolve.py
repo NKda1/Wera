@@ -2,6 +2,7 @@
 
 import pytest
 
+from wera_agent.clock import parse_ms
 from wera_agent.schemas.jobs import Ats, Location
 from wera_agent.sources import normalise, resolve
 from wera_agent.sources.ats_feeds import FeedJob
@@ -19,6 +20,10 @@ class TestSalary:
             ("€55.000 per year", ("EUR", 55000, None, "year")),
             ("€48.500 - €55.000 annually", ("EUR", 48500, 55000, "year")),
             ("$120,000-$150,000", ("USD", 120000, 150000, "year")),
+            # Greenhouse's own formatting, taken from a live Anthropic posting: an em dash, no
+            # spaces. Missed, the range became "from $200,000" with no top end.
+            ("$200,000—$265,000 USD", ("USD", 200000, 265000, "year")),
+            ("£42,000 – £48,000", ("GBP", 42000, 48000, "year")),
             ("£350 per day", ("GBP", 350, None, "day")),
             ("£18.50 an hour", ("GBP", 18.5, None, "hour")),
         ],
@@ -36,6 +41,63 @@ class TestSalary:
     def test_a_reversed_range_is_put_the_right_way_round(self):
         salary = normalise.parse_salary("£35,000 - £30,000")
         assert salary and (salary.min, salary.max) == (30000, 35000)
+
+
+class TestPostedDate:
+    """Boards write "2 Days Ago", not a timestamp. Stored as-is, the first attempt to score the
+    job's freshness raised and took the whole run with it."""
+
+    NOW = 1_792_000_000_000
+
+    @pytest.mark.parametrize(
+        ("raw", "days_ago"),
+        [("2 Days Ago", 2), ("Posted 3 weeks ago", 21), ("30+ days ago", 30), ("5 hours ago", 0), ("yesterday", 1)],
+    )
+    def test_a_relative_date_becomes_a_real_one(self, raw, days_ago):
+        out = normalise.parse_posted(raw, self.NOW)
+        assert out is not None
+        assert round((self.NOW - parse_ms(out)) / 86_400_000) == days_ago
+
+    def test_an_iso_date_is_left_alone(self):
+        assert normalise.parse_posted("2026-10-16T09:00:00Z", self.NOW) == "2026-10-16T09:00:00Z"
+
+    @pytest.mark.parametrize("raw", ["Apply now", "", None, "Rolling deadline"])
+    def test_something_unreadable_becomes_no_date_rather_than_a_crash(self, raw):
+        assert normalise.parse_posted(raw, self.NOW) is None
+
+    def test_a_scraped_card_never_stores_a_date_scoring_cannot_read(self):
+        from wera_agent.domain.scoring import freshness_score
+
+        job = normalise.from_scrape(
+            {"title": "AI Engineer", "company": "MVF", "postedAt": "2 Days Ago"},
+            url="https://builtinlondon.uk/job/ai-engineer/1",
+            site="builtinlondon.uk",
+            markdown="Build and operate production AI agents. " * 10,
+            now=self.NOW,
+        )
+        assert job is not None
+        assert freshness_score(job.posted_at, self.NOW) == 10  # two days old, not "unknown"
+
+
+class TestSeniority:
+    @pytest.mark.parametrize(
+        ("title", "description"),
+        [
+            ("AI Engineer", "Work with internal teams across international markets."),
+            ("Backend Engineer", "Internet-scale systems."),
+            ("Platform Engineer", "You will internalise our conventions."),
+        ],
+    )
+    def test_intern_is_not_found_inside_another_word(self, title, description):
+        """ "intern" sits inside "internal", "international" and "internet", and the hard filters
+        act on this field — so an engineering job was being filed as an internship."""
+        assert normalise.infer_seniority(title, description) != "intern"
+
+    @pytest.mark.parametrize("title", ["Engineering Intern", "Industrial year placement"])
+    def test_a_level_the_ad_really_states_is_still_found(self, title):
+        """Word boundaries must not cost the matches that matter; `TestInference` covers the
+        rest of the levels."""
+        assert normalise.infer_seniority(title) == "intern"
 
 
 class TestInference:
