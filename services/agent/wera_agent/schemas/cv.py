@@ -29,7 +29,12 @@ class Role(Model):
     title: Annotated[str, required("Add a title")]
     org: Annotated[str, required("Add an organisation")]
     location: Opt[str] = None
-    start: YearMonth
+    # Empty is allowed here and refused on save (`Store.put_cv`). A CV writes dates every way
+    # there is, and an uploaded one that couldn't be read for a single "Summer 2024" would fail
+    # the whole import — so a date WERA can't read arrives blank for the person to fill in, and
+    # cannot be saved that way. The same split as the rest of CV-03: a proposal is permissive,
+    # what gets stored is not.
+    start: YearMonth | Literal[""]
     end: YearMonth | Literal["present"]
     bullets: list[Bullet]
 

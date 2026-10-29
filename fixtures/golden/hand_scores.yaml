@@ -1,0 +1,178 @@
+# The hand-score template for the golden set (fixtures/golden/jobs.json).
+#
+# This is the reference WERA's scoring tier is measured against. `uv run wera eval` scores every
+# ad with a model and reports two numbers:
+#
+#   * **Agreement** — the share of scored ads whose computed fit total lands within ±1.5 of the
+#     `total` below. SPEC §12.2 wants ≥80% before a model is trusted.
+#   * **Keyword recall** — the share of the `keywords` below that `keywords.extract` found.
+#
+# ## How to fill this in
+#
+# Read each ad in fixtures/golden/jobs.json against fixtures/demo/cv.json (Jordan Ellery, CS
+# graduate 2026, London) and put a number 0–10 in `total`. Score the *fit*, the same thing
+# SPEC §8.2 computes: how well this person matches this job, not how much they'd enjoy it.
+#
+#   9–10  you would apply today; the ad reads as though it were written for this CV
+#   7–8   a good match worth an application, with one or two gaps
+#   5–6   plausible, but the CV is a stretch or the role is adjacent
+#   3–4   wrong seniority, wrong location, or the overlap is incidental
+#   0–2   a different job in a different field
+#
+# An ad with no description (gold-16, gold-17) is **rough-only**: SPEC §8.2 caps its computed
+# total at 6.5, because a title match is not a fit. Score what the title alone justifies and
+# remember the cap — a hand score above 6.5 there can never be agreed with.
+#
+# `total: ~` means not yet scored. The eval skips those for agreement and says how many it
+# skipped, so a half-filled file still produces a usable report.
+#
+# `keywords` is pre-filled with the terms each ad names explicitly — a starting point, not a
+# judgement. Edit it: take out anything you would not expect a scorer to pick up, and add
+# anything the ad clearly asks for in other words. Only terms listed here count towards recall.
+#
+# Re-score this file whenever fixtures/demo/cv.json changes. A hand score is a judgement about
+# one CV against one ad; change the CV and the number stops meaning anything.
+
+scores:
+  # 01 · AI Platform Engineer, Graduate — Aurelis Labs · London, hybrid · graduate
+  #      Python/FastAPI guardrails, Presidio, LangGraph, PostgreSQL, visa sponsorship.
+  gold-01-aurelis-ai-platform:
+    total: 9
+    keywords: [Python, FastAPI, PostgreSQL, LangGraph, Presidio, LLM guardrails, Prompt engineering, REST APIs, SQL, TypeScript]
+    note: "8-9"
+
+  # 02 · Graduate Machine Learning Engineer, Evaluation — Metrikon · London, remote · graduate
+  #      Python graders, Pydantic, LLM-as-judge, LangChain/LangGraph, Next.js dashboard.
+  gold-02-metrikon-llm-eval:
+    total: 9
+    keywords: [Python, Pydantic, LangChain, LangGraph, TypeScript, PostgreSQL, REST APIs, Prompt engineering, evaluation]
+    note: "8-9"
+
+  # 03 · Junior Backend Engineer (Python) — Northgate Health · London, hybrid · junior
+  #      FastAPI + PostgreSQL, REST APIs, migrations, Docker. 1–2 years asked for.
+  gold-03-northgate-backend:
+    total: 9
+    keywords: [Python, FastAPI, PostgreSQL, REST APIs, SQL, Docker]
+    note: "8-9"
+
+  # 04 · Graduate Software Engineer, Full-stack — Fieldline · London, hybrid · graduate
+  #      Next.js/TypeScript first, PostgreSQL, Stripe billing, some Python.
+  gold-04-fieldline-fullstack:
+    total: 9
+    keywords: [TypeScript, Next.js, React, PostgreSQL, Stripe, Python]
+    note: "8-9"
+
+  # 05 · Junior AI Engineer — Vantor Systems · Manchester, hybrid (3 days on site) · junior
+  #      Strong skill overlap, but explicitly not London and not remote.
+  gold-05-vantor-junior-ai:
+    total: 9
+    keywords: [Python, FastAPI, Pydantic, Prompt engineering]
+    note: "8-9"
+
+  # 06 · Graduate Data Engineer — Brightmoor Retail Group · London, hybrid · graduate
+  #      dbt, Airflow, Snowflake, heavy SQL, some Python. Adjacent field.
+  gold-06-brightmoor-data-eng:
+    total: 9
+    keywords: [SQL, Python]
+    note: "8-9"
+
+  # 07 · Junior Platform Engineer — Caldera Cloud · London, remote · junior
+  #      Kubernetes, Terraform, AWS, Go. Asks for a year of production Kubernetes.
+  gold-07-caldera-platform:
+    total: 8
+    keywords: [Python]
+    note: "7-8"
+
+  # 08 · Graduate .NET Developer — Halbury · London, onsite 5 days · graduate
+  #      C#/.NET and SQL Server. The CV has C# / .NET but nothing else matches.
+  gold-08-halbury-dotnet:
+    total: 6
+    keywords: [C# / .NET, SQL]
+    note: "6-7"
+
+  # 09 · Senior Machine Learning Engineer — Orcadia AI · London, hybrid · senior IC
+  #      7+ years, distributed PyTorch training, mentoring. Right field, wrong level.
+  gold-09-orcadia-senior-mle:
+    total: 0
+    keywords: []
+    note: "0-2"
+
+  # 10 · Staff Backend Engineer, Payments — Pellport · Austin, remote (US only) · staff
+  #      10+ years, Go/Java, US work authorisation required. Not eligible.
+  gold-10-pellport-staff-backend:
+    total: 0
+    keywords: []
+    note: "0-2"
+
+  # 11 · Graduate Civil Engineer — Stanwick · Birmingham, onsite · graduate
+  #      Accredited civil engineering degree and a driving licence. Different profession.
+  gold-11-stanwick-civil:
+    total: 0
+    keywords: []
+    note: "0-2"
+
+  # 12 · Sales Development Representative — Lumehouse · London, hybrid
+  #      Outbound sales. Not an engineering role at all.
+  gold-12-lumehouse-sdr:
+    total: 0
+    keywords: []
+    note: "0-2"
+
+  # 13 · Data Scientist, Causal Inference — Oakmere · London, hybrid
+  #      MSc/PhD statistics, R, causal inference. Some Python and SQL overlap only.
+  gold-13-oakmere-data-scientist:
+    total: 4
+    keywords: [Python, SQL]
+    note: "4-5"
+
+  # 14 · Graduate Software Engineer, Payments — Quillpay · London, hybrid · graduate
+  #      TypeScript and Python, Stripe, PostgreSQL, Next.js, REST API design.
+  gold-14-quillpay-graduate:
+    total: 8
+    keywords: [TypeScript, Python, Stripe, PostgreSQL, Next.js, REST APIs]
+    note: "8-9"
+
+  # 15 · Junior DevOps Engineer — Tessara Media · London, hybrid · junior
+  #      AWS, GitHub Actions, Docker, Datadog, Python/Bash scripting.
+  gold-15-tessara-devops:
+    total: 6
+    keywords: [Python, Docker, AWS]
+    note: "6-7"
+
+  # 16 · AI Engineer, Graduate Scheme 2026 — Rookhaven · London, hybrid · graduate
+  #      NO DESCRIPTION — rough-only, computed total capped at 6.5 (SPEC §8.2).
+  gold-16-rookhaven-ai-scheme:
+    total: 6
+    keywords: []
+    note: "6-7"
+
+  # 17 · Senior Frontend Engineer, Design Systems — Delmarq · Berlin, onsite · senior
+  #      NO DESCRIPTION — rough-only, capped at 6.5. Wrong level, wrong city, wrong discipline.
+  gold-17-delmarq-senior-frontend:
+    total: 0
+    keywords: []
+    note: "0-2 too senior"
+
+  # 18 · Graduate AI Engineer — Helvex AG · Zurich, onsite · graduate
+  #      Excellent skill match (Python, FastAPI, PII redaction, PostgreSQL), but requires Swiss
+  #      or EU/EFTA status, B2 German, and no relocation support. An eligibility test.
+  gold-18-helvex-zurich-ai:
+    total: 4
+    keywords: [Python, FastAPI, PostgreSQL, LLM guardrails]
+    note: "4-5 Language Barrier"
+
+  # 19 · Research Engineer, LLM Safety — Arbor Institute · London, hybrid
+  #      Python evaluation harnesses, LangGraph agents, FastAPI, PostgreSQL, guardrails,
+  #      open source. No PhD required and early-career explicitly welcome.
+  gold-19-arbor-research-engineer:
+    total: 8
+    keywords: [Python, FastAPI, PostgreSQL, LangGraph, LLM guardrails, Prompt engineering, evaluation]
+    note: "8-10"
+
+  # 20 · Junior QA Automation Engineer — Brennig Software · Bristol, remote · junior
+  #      Playwright and TypeScript, REST API testing, CI. Adjacent, and 15 days old.
+  gold-20-brennig-qa:
+    total: 8
+    keywords: [TypeScript, REST APIs]
+    note: "8-10"
+

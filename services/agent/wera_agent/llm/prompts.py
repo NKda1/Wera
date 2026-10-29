@@ -104,6 +104,36 @@ PROFILE_GENERATE = ChatPromptTemplate.from_messages(
     ]
 )
 
+CV_PARSE = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You read a CV out of a file and return it as structured data. This is transcription, "
+            "not rewriting: keep the applicant's own wording for every bullet, and keep their "
+            "bullets separate rather than merging them.\n\n"
+            "Rules:\n"
+            "- Copy only what the document says. Never add a skill, employer, date, qualification "
+            "or achievement that isn't in it, and never improve a bullet's wording.\n"
+            "- Dates as YYYY-MM. A role that is still going has end `present`. If a date really "
+            "isn't in the document, leave it empty rather than guessing — a blank is corrected in "
+            "one click and a wrong date is not.\n"
+            "- `experience` is paid or formal roles. `projects` is personal, academic and "
+            "open-source work. Put each entry in one of the two, never both.\n"
+            "- `skills` is the named technologies, languages and tools the CV lists. Use common "
+            'spellings (PostgreSQL, not Postgres). Skip generic filler like "team player".\n'
+            "- `languages` is spoken languages with their stated level, not programming languages.\n"
+            "- `location` is the city and country the applicant is based in, as the CV gives it "
+            '("London, United Kingdom"). This one is wanted: it is what WERA searches on.\n'
+            "- Leave out the email address, phone number and street address entirely — house "
+            "number, street, postcode. WERA stores those separately and they are never part of a "
+            "CV here (CV-06). This does not cover the city: keep that in `location`.\n\n"
+            "If a section isn't in the document, return it empty. An incomplete CV is fine; an "
+            "invented one is not. The person reviews everything you return before it is saved.\n\n" + _DATA_RULE,
+        ),
+        ("human", "{document}"),
+    ]
+)
+
 KEYWORDS_EXTRACT = ChatPromptTemplate.from_messages(
     [
         (
@@ -139,8 +169,24 @@ FIT_SCORE = ChatPromptTemplate.from_messages(
             "Score this applicant against this job on four axes, each 0–10:\n"
             "- `core`: the skills the post treats as essential\n"
             "- `adjacent`: nearby skills that transfer\n"
-            "- `experience`: depth and relevance of what they have done\n"
+            "- `experience`: how well what they have done matches what *this post* asks for\n"
             "- `eligibility`: location, work pattern and seniority fit\n\n"
+            # The rubric below exists because of a measured failure, not a hunch. On the golden
+            # set, every posting titled "Graduate" agreed with the hand scores and every posting
+            # titled "Junior" came back 2.2 to 5.7 points low — the model was reading
+            # `experience` as career length and marking a graduate down for being a graduate,
+            # against roles written for exactly that person. Agreement was 40% against the 80%
+            # SPEC §12.2 wants.
+            "Score `experience` against the post's own bar, not an absolute one. **Graduate, "
+            'Junior, Entry level, Intern, Trainee, Associate, Assistant and "0–2 years" all '
+            "describe the same tier**: an applicant who meets that bar scores high here even "
+            "though their total experience is short, because the post is not asking for more. "
+            "Someone with one internship and strong projects is a *strong* candidate for a "
+            "junior role, not a weak one.\n\n"
+            "Seniority belongs in `eligibility` and only there. If the post wants years the "
+            "applicant hasn't got, say so in `eligibility` and score it down there — do not also "
+            "mark `experience` down for the same thing, which charges the same mismatch twice "
+            "and buries roles the applicant should be seeing.\n\n"
             "For each axis quote the phrase from the post you scored against and list the CV bullet "
             "ids that back your score. Do not return an overall total: WERA computes it from these "
             "four with the applicant's own weights.\n\n"
@@ -209,20 +255,55 @@ CV_TAILOR = ChatPromptTemplate.from_messages(
     ]
 )
 
+_LETTER_VOICE = (
+    "Write the way a competent person writes to another person they respect but don't know.\n\n"
+    "Concretely:\n"
+    "- First person, active voice, contractions where they fall naturally (I've, don't, it's).\n"
+    "- Vary your sentence length. A short one after two long ones is what makes prose sound spoken.\n"
+    "- Say 'I built', not 'I was responsible for the delivery of'. Verbs, not nominalisations.\n"
+    "- One idea per sentence, and no sentence that exists only to introduce the next one.\n"
+    "- Never open by announcing that you are applying; they know. Open with the thing you'd lead "
+    "with if you had thirty seconds and their attention.\n"
+    "- No adjectives about yourself. Let the facts carry it: 'I cut the retry rate from 12% to 3%' "
+    "beats 'I am a highly effective engineer'.\n"
+    "- No summarising paragraph at the end that repeats the letter. Close with what you want to "
+    "happen next, in one or two sentences.\n\n"
+    "What this must not read like: a status report, a performance review, a press release, or a "
+    "template with the company's name dropped into it. If a sentence would survive unchanged in a "
+    "letter to a different company, it is doing no work — cut it or make it specific."
+)
+
 LETTER_WRITE = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "Write a cover letter of 3 or 4 paragraphs, 250–350 words: why this job, what in the "
-            "applicant's record fits it, and a close. Cite the CV line ids behind each paragraph.\n\n"
+            "Write a cover letter of 3 or 4 paragraphs, 250–350 words. Cite the CV line ids behind "
+            "each paragraph.\n\n"
+            "Cover these, in this order:\n"
+            "1. Why this role — the specific work in the post that the applicant has actually done.\n"
+            "2. What in their record fits it, with the evidence, not the adjective.\n"
+            "3. **Why this company in particular**: something the post says about how the company "
+            "works — how it builds, how it treats people, how it's structured, its stated policy on "
+            "remote or hybrid working, learning, sponsorship, open source, the problem it has chosen "
+            "— and why that suits this applicant. Ground it in `companyQuote` and, where the post "
+            "gives you a second such fact, in `policyQuote`. This is the paragraph most letters "
+            "skip, and the one that shows the applicant read the post rather than the job title.\n"
+            "4. A close.\n\n"
+            "You may merge 3 into another paragraph if the letter reads better at three paragraphs, "
+            "but the company point itself is not optional.\n\n"
+            f"{_LETTER_VOICE}\n\n"
             f"{_HONESTY}\n\n"
-            "Quote one fact about the company word for word from the post, in `companyQuote`, and use "
-            "it in the letter — it shows the letter was written for this job. Plain and specific: no "
-            "flattery, no 'I am passionate about', no claim the CV doesn't carry.\n\n" + _DATA_RULE,
+            "Two rules on the company half, because it is where letters invent things. Quote the "
+            "company facts **word for word from the post** — `companyQuote` for the first and "
+            "`policyQuote` for the policy or working-practice one if the post states one, else an "
+            "empty string. Say nothing about the company that the post does not say: no guesses about "
+            "its culture, funding, reputation or plans, and no praise of it. Why it suits *this* "
+            "applicant must come from their CV or from what they told you they want.\n\n" + _DATA_RULE,
         ),
         (
             "human",
-            "CV:\n{cv}\n\n{job}\n\nThe tailored CV this letter goes with:\n{tailored}\n\nWhat the applicant asked for: {note}",
+            "CV:\n{cv}\n\n{job}\n\nThe tailored CV this letter goes with:\n{tailored}\n\n"
+            "What the applicant is looking for: {wants}\n\nWhat the applicant asked for: {note}",
         ),
     ]
 )
@@ -257,6 +338,7 @@ GUARD_REPAIR = ChatPromptTemplate.from_messages(
 
 TEMPLATES: dict[str, ChatPromptTemplate] = {
     "profile.generate": PROFILE_GENERATE,
+    "cv.parse": CV_PARSE,
     "cv.tailor": CV_TAILOR,
     "letter.write": LETTER_WRITE,
     "answers.draft": ANSWERS_DRAFT,

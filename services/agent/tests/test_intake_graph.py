@@ -215,18 +215,49 @@ class TestPartialRuns:
         assert (row.queries, row.credits_used) == (20, 100)
 
 
+class TestWhatTheCacheSaved:
+    def test_the_saving_reaches_the_run_the_screen_reads(self, client, runs, channels):
+        """SRCH-10: `credits_saved` is what makes "0 credits" legible — without it a fully
+        cached run is indistinguishable on the Jobs screen from one that did nothing."""
+        ids = runs(["board_search"])
+        channels(
+            from_board_search=lambda *a, **k: intake.ChannelOutcome(
+                channel="board_search", jobs=[job()], queries=20, credits_used=0, credits_saved=140
+            )
+        )
+        summary = intake.run(["board_search"], ids)
+        row = row_for(ids["board_search"])
+        assert (row.credits_used, row.credits_saved) == (0, 140)
+        assert summary["credits_saved"] == 140
+
+    def test_a_run_that_paid_full_price_saved_nothing(self, client, runs, channels):
+        ids = runs(["board_search"])
+        channels(
+            from_board_search=lambda *a, **k: intake.ChannelOutcome(
+                channel="board_search", jobs=[job()], queries=20, credits_used=140
+            )
+        )
+        intake.run(["board_search"], ids)
+        assert row_for(ids["board_search"]).credits_saved == 0
+
+
 class TestAccountLevelFailures:
     """A rejected key or spent credit is a fact about the account, not about the job in front of
     it. Scoring stops at the first one instead of proving it forty more times."""
 
     def many(self, count: int) -> list[Job]:
-        """Distinct titles and companies, or de-duplication quite rightly collapses them."""
+        """Distinct titles and companies, or de-duplication quite rightly collapses them.
+
+        On-target titles on purpose: these tests are about what happens *at* the scoring step,
+        and the title filter (MATCH-01) now hides anything the profile didn't ask for long
+        before a model is reached.
+        """
         return [
             job(
                 id=f"job-{n}",
                 dedupe_key=f"url:https://x.example/{n}",
                 apply_url=f"https://x.example/{n}",
-                title=f"Graduate Engineer {n}",
+                title=f"ML Engineer, Team {n}",
                 company=f"Company {n}",
             )
             for n in range(count)
@@ -378,3 +409,87 @@ class TestWatchlistClosing:
         assert summary["closed"] == 0
         with transaction() as session:
             assert session.get(JobRow, "job-gone").status == "new"
+
+
+class TestProgress:
+    """UX-01: what the Jobs screen can actually show while a run is working.
+
+    `progress` existed before this but only ever moved in demo mode, where `settle()` animates
+    it against a made-up `duration_ms`. A real run left it at 0 until the graph wrote 1 at the
+    end — so the bar sat still for the seven minutes that scoring forty jobs takes, and the
+    only thing that changed on screen was a sentence that had stopped being true.
+    """
+
+    def test_progress_is_readable_while_the_run_is_still_working(self, client, runs, channels):
+        """The point of committing each heartbeat: a reader outside the run can see it.
+
+        If scoring held one transaction, this would read 0 until the whole run was over — which
+        is precisely the bug, and it is invisible unless the read happens from somewhere else.
+        """
+        seen: list[tuple[str, float, int, int]] = []
+        ids = runs(["board_search"])
+
+        real = intake.fit.evidence_for
+
+        def watched(session, job_, cv, **kw):
+            with transaction() as other:
+                row = other.get(IntakeRunRow, ids["board_search"])
+                seen.append((row.phase, row.progress, row.done, row.total))
+            return real(session, job_, cv, **kw)
+
+        intake.fit.evidence_for = watched
+        try:
+            channels(
+                from_board_search=lambda *a, **k: intake.ChannelOutcome(
+                    channel="board_search", jobs=[job(id="job-a"), job(id="job-b", dedupe_key="url:https://x.example/2")]
+                )
+            )
+            intake.run(["board_search"], ids)
+        finally:
+            intake.fit.evidence_for = real
+
+        assert seen, "scoring should report before each job, not only at the end"
+        assert all(phase == "scoring" for phase, *_ in seen)
+        assert [done for _, _, done, _ in seen] == list(range(len(seen)))
+        assert all(total == len(seen) for *_, total in seen)
+        assert seen[0][1] >= intake.SEARCH_SHARE  # searching is behind us by the time scoring starts
+
+    def test_progress_only_rises(self, client, runs, channels):
+        seen: list[float] = []
+        ids = runs(["board_search"])
+        real = intake.fit.evidence_for
+
+        def watched(session, job_, cv, **kw):
+            with transaction() as other:
+                seen.append(other.get(IntakeRunRow, ids["board_search"]).progress)
+            return real(session, job_, cv, **kw)
+
+        intake.fit.evidence_for = watched
+        try:
+            channels(
+                from_board_search=lambda *a, **k: intake.ChannelOutcome(
+                    channel="board_search", jobs=[job(id="job-a"), job(id="job-b", dedupe_key="url:https://x.example/2")]
+                )
+            )
+            intake.run(["board_search"], ids)
+        finally:
+            intake.fit.evidence_for = real
+        assert seen == sorted(seen)
+
+    def test_a_finished_run_says_done(self, client, runs, channels):
+        ids = runs(["board_search"])
+        channels(from_board_search=lambda *a, **k: intake.ChannelOutcome(channel="board_search", jobs=[job()]))
+        intake.run(["board_search"], ids)
+        row = row_for(ids["board_search"])
+        assert (row.phase, row.progress) == ("done", 1)
+
+    def test_a_heartbeat_never_takes_the_run_down(self, client, runs, channels, monkeypatch):
+        """Telling someone how far along we are is not load-bearing. If the write fails — a
+        locked database, a cancelled run — the scoring it describes must still finish."""
+
+        def explode(*a, **k):
+            raise RuntimeError("no database for you")
+
+        monkeypatch.setattr(intake, "transaction", explode, raising=False)
+        # `judge` needs real transactions, so only the reporter is broken here.
+        intake.report({"board_search": "run-missing"}, phase="scoring", progress=0.5, done=1, total=2)

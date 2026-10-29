@@ -93,3 +93,39 @@ class NullRedactor:
 
     def restore(self, text: str, mapping: Mapping) -> str:
         return text
+
+
+# ---------------------------------------------------------------------------
+# Uploaded documents (CV-03)
+
+_DOC_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b")
+# A phone-shaped run. `/` is deliberately not a separator here: CVs write dates as 01/09/2021
+# and a phone number almost never uses one, so excluding it keeps dates intact. The digit count
+# is checked afterwards rather than in the pattern, because "2021 - 2023" matches any shape a
+# phone number has and is only distinguishable by having too few digits to be one.
+_DOC_PHONE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
+_PHONE_DIGITS = range(9, 16)
+
+
+def scrub_contacts(text: str) -> str:
+    """Strips contact-shaped text out of a document before a model sees it (PRIV-01, CV-03).
+
+    `ContactRedactor` is the wrong instrument for an uploaded CV, in both directions. It masks
+    the contact details WERA *already holds* — but an uploaded CV is the document replacing
+    them, so it misses the new email and phone entirely, while matching the old values against
+    unrelated text. A stored address of "London" turned "London, United Kingdom" into
+    "[[ADDRESS]], United Kingdom" and the parsed CV came back with no location at all, which
+    then feeds the search profile and every location filter after it.
+
+    Patterns are the right instrument here, because the question is "is this an email" and not
+    "is this *their* email". Email and phone are high-precision; a street address is not, and
+    detecting one needs the Phase 3 gateway (regex + spaCy + Presidio behind `LLM_PROXY_URL`).
+    Until then a street address written in an uploaded CV does reach the model, which is why
+    the provider is pinned to `data_collection: deny` — and nothing stores it either way,
+    because `ParsedCv` has no field for one.
+    """
+
+    def phone(match: re.Match[str]) -> str:
+        return PHONE if len(_digits(match.group(0))) in _PHONE_DIGITS else match.group(0)
+
+    return _DOC_PHONE.sub(phone, _DOC_EMAIL.sub(EMAIL, text))

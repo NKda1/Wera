@@ -47,6 +47,11 @@ class TailoredCV(Model):
 
 class CompanyFact(Model):
     quote: str
+    # LTR-06: what the post says about how the company works, quoted verbatim. Empty when it says
+    # nothing of the kind. Kept beside `quote` rather than merged into it because the review
+    # screen checks both against the post, and because they answer different questions: one is
+    # "they wrote this letter for us", the other is "they know why they want to work here".
+    policy_quote: str = ""
 
 
 class CoverLetter(Model):

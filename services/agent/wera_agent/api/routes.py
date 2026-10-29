@@ -15,6 +15,7 @@ from ..schemas.api import (
     ApplicationList,
     ApplicationPatchIn,
     CvImportIn,
+    CvParseIn,
     CvVersion,
     DecisionIn,
     DocumentPatchIn,
@@ -27,6 +28,7 @@ from ..schemas.api import (
     RunIn,
     ShortlistMeta,
     SiteOption,
+    SiteReviewIn,
     TestResult,
 )
 from ..schemas.applications import ApplicationWithJob
@@ -44,7 +46,10 @@ from ..tasks import spawn
 router = APIRouter()
 
 CHANNELS = ["board_search", "email_alert", "watchlist"]
-STATUSES = ["new", "shortlisted", "in_application", "snoozed", "rejected", "hidden", "closed", "archived"]
+# What `GET /jobs` can rank. `hidden` is deliberately absent: MATCH-01 hides a job before any
+# model call, so it has no fit report and no place in a list sorted by score. Hidden jobs are
+# served by `GET /jobs/meta`, with their reason, which is what the Jobs screen reads.
+STATUSES = ["new", "shortlisted", "in_application", "snoozed", "rejected", "closed", "archived"]
 
 
 def store() -> Iterator[Store]:
@@ -80,6 +85,17 @@ def list_sites(s: S) -> list[SiteOption]:
     return s.sites()
 
 
+@router.post("/sites/{domain}/review")
+def review_site(s: S, domain: str, body: SiteReviewIn) -> list[SiteOption]:
+    """SRCH-04/12: record that a person decided about a board WERA proposed.
+
+    A `POST .../review` rather than a `PATCH` on the site, following `POST /jobs/{id}/decision`:
+    this is a decision with a meaning attached — "I have read this site's terms and robots.txt" —
+    not a generic config edit that happens to be reachable over HTTP.
+    """
+    return s.review_site(domain, approve=body.action == "approve")
+
+
 # ---- jobs and Gate 1 ----
 
 
@@ -93,6 +109,8 @@ def list_jobs(
     location: str | None = None,
     remote: str | None = None,
 ) -> JobList:
+    if status_ == "hidden":
+        raise ApiError(400, "VALIDATION", "Hidden jobs have no score to rank. Read them from /jobs/meta instead.")
     st = status_ if status_ in STATUSES else "new"
     return JobList(
         items=s.list_jobs(
@@ -246,6 +264,14 @@ def import_cv(s: S, body: CvImportIn) -> MasterCV:
     if not body.yaml.strip():
         raise ApiError(422, "VALIDATION", "Paste or choose a YAML file.")
     return s.import_cv_yaml(body.yaml)
+
+
+@router.post("/cv/parse")
+def parse_cv(s: S, body: CvParseIn) -> MasterCV:
+    """CV-03: a CV read out of an uploaded PDF or DOCX. Returns a proposal only (CV-03)."""
+    if not body.text.strip():
+        raise ApiError(422, "VALIDATION", "Choose a file, or paste your CV's text.")
+    return s.parse_cv_text(body.text)
 
 
 @router.get("/cv/contact")

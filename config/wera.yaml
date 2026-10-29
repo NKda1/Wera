@@ -31,6 +31,17 @@ prices:
 # SPEC §9.3, one row per task. No task has tools.
 tasks:
   profile.generate: { tier: fast, max_tokens: 800, reasoning: "off" }
+  # Reading an uploaded CV into structure (CV-03). The writing tier, not the fast one: this is
+  # the foundation every later search and every tailored line is built on, so a dropped role or
+  # a mangled date is expensive in a way a cheaper model isn't worth.
+  #
+  # `reasoning: off`, like every other extraction task here. This had `low`, and it made the
+  # task fail outright: extraction echoes most of the document back, so the answer is already
+  # near the ceiling before a single thinking token, and at the time the truncation retry scaled
+  # only the ceiling — so thinking that overflowed once overflowed again at double the room.
+  # The retry scales both now, but the setting stands on its own merits: there is nothing here
+  # to reason about, because which line is a date is read, not deduced.
+  cv.parse: { tier: writing, max_tokens: 6000, reasoning: "off" }
   job.normalise: { tier: fast, max_tokens: 1200, reasoning: "off" }
   email.extract: { tier: fast, max_tokens: 1500, reasoning: "off" }
   keywords.extract: { tier: fast, max_tokens: 600, reasoning: "off" }
@@ -40,10 +51,16 @@ tasks:
   # off seven of eight jobs. 2,400 clears the observed range, and a cut-off reply retries once
   # with double the room (gateway.TRUNCATION_RETRY_FACTOR). Only generated tokens are billed.
   fit.score: { tier: scoring, max_tokens: 2400, reasoning: low }
-  cv.tailor: { tier: writing, max_tokens: 3000, reasoning: "on" }
-  letter.write: { tier: writing, max_tokens: 1500, reasoning: "on" }
-  guard.repair: { tier: writing, max_tokens: 1500, reasoning: low }
-  answers.draft: { tier: writing, max_tokens: 2000, reasoning: "on" }
+  # The writing tier, resized from `wera eval --packs`. Every one of these was cut off at its
+  # ceiling plus the old `reasoning` allowance — cv.tailor at 4,200, letter.write at 2,700 — so
+  # the thinking was eating the answer it was supposed to be preparing. The allowance itself is
+  # now 3,000 for `on` and 1,200 for `low` (gateway._HEADROOM), and the truncation retry scales
+  # it too, so these ceilings are for the reply alone. Only generated tokens are billed; what a
+  # bigger ceiling raises is what the provider reserves against the balance for the one call.
+  cv.tailor: { tier: writing, max_tokens: 4500, reasoning: "on" }
+  letter.write: { tier: writing, max_tokens: 2500, reasoning: "on" }
+  guard.repair: { tier: writing, max_tokens: 2500, reasoning: low }
+  answers.draft: { tier: writing, max_tokens: 3000, reasoning: "on" }
   outreach.draft: { tier: fast, max_tokens: 400, reasoning: "off" }
 
 # §8.2 fit weights. Normalised in code, so they needn't sum to 1.
@@ -54,13 +71,93 @@ weights:
   eligibility: 0.15
   freshness: 0.10
 
-# SRCH-06: what one intake run may spend before it stops as partial.
+# SRCH-06: what one intake run may spend before it stops as partial. Credits are Firecrawl's
+# own unit, counted at its published rates: 2 per search, 5 per JSON-format page scrape.
+#
+# 150 is sized for one run a day on Firecrawl's Hobby plan (5,000 credits a month, about 160 a
+# day): 20 queries costs 40, which leaves 22 new pages. `max_pages: 30` would need 150 credits
+# on its own, so on a heavy first run the credit cap is what stops it — which is the right way
+# round, because credits are what the invoice is in. Raise this with the plan, not with hope.
 max_queries: 20
 max_pages: 30
-max_credits_per_run: 100
+max_credits_per_run: 150
+
+# SRCH-10: a short-term cache in front of Firecrawl, so a run doesn't pay for the last one's
+# answers again. `known_urls` (SRCH-05) already stops a job being re-scraped; this covers the two
+# things it can't — the searches themselves, which are paid for before their results are
+# filtered, and the pages that were scraped and *didn't* turn into a job. The second of those was
+# a permanent leak: a page WERA can't read a title off never becomes a job, so it never enters
+# `known_urls`, and it was re-scraped at 5 credits on every run for ever.
+#
+# The caps above are per run and the cache doesn't touch them: a cached answer costs no credits,
+# so it isn't counted against a budget that exists to bound the invoice. What it changes is how
+# far 150 credits gets — a run that would have spent 40 on searches it already had now spends
+# them on 8 more pages instead. It also means a credit-capped run makes progress: the queries it
+# already paid for come back free next time, so the budget goes to the ones it never reached.
+#
+# The two windows are different on purpose. A stale *search* hides jobs that exist, so it is
+# short. A stale *card* can only describe a job that has closed — never corrupt a live one, since
+# a URL that became a job is filtered out before the cache is consulted — so it is longer, and it
+# is the half that costs 5 credits rather than 2.
+#
+# Set `enabled: false` for a cold run. Expired entries are dropped at the start of every run.
+crawl_cache:
+  enabled: true
+  search_minutes: 360 # 6h
+  card_minutes: 2880 # 48h
+  unreadable_minutes: 2880 # 48h
+  max_entries: 500
+  max_payload_bytes: 200000
+
+# ATS-05: how many searches one board-discovery pass may run, one per watch title. Its own
+# budget rather than a share of the run's, because discovery happens weekly and the daily cap
+# above is sized for a daily run — taking it out of there would mean the week's discovery
+# quietly ate a morning's board search. 8 searches is 16 credits, about a tenth of a run.
+discovery_max_queries: 8
 
 # MATCH-05: how many jobs a day reach the scoring tier.
 max_scored_per_day: 40
+
+# LTR-04: phrases that make a cover letter read like a form. A hit triggers one rewrite, and the
+# phrase is quoted back so the model knows which words to lose rather than guessing at "be less
+# formal". Matched case-insensitively as substrings, so "I am writing to express" catches its
+# longer forms too.
+#
+# These are the register, not the content. A letter can be perfectly honest and perfectly cited
+# and still read like a committee wrote it, which is the one thing a cover letter cannot afford.
+letter_banned_phrases:
+  - I am writing to express
+  - I am writing to apply
+  - I would like to express my interest
+  - I am passionate about
+  - I am excited about the opportunity
+  - perfect fit
+  - ideal candidate
+  - wealth of experience
+  - proven track record
+  - results-driven
+  - team player
+  - think outside the box
+  - hit the ground running
+  - dynamic environment
+  - leverage my skills
+  - in today's fast-paced
+  - it is with great
+  - I believe I would be
+  - thank you for considering my application
+  - look forward to hearing from you at your earliest convenience
+
+# SRCH-13 / ATS-06 / NORM-07: the daily lifecycle sweep, which asks whether the jobs WERA already
+# found still exist. It spends **no Firecrawl credits** — employers' own public feeds and plain
+# HTTP only — so these caps are about not hammering a board at 07:00, not about money.
+#
+# A job is closed only on positive evidence: a 404/410, a redirect that has lost the job's
+# identity, or absence from a feed that answered. A board that blocks a bot, times out or
+# rate-limits leaves the job flagged and still ranked, because inconclusive is not withdrawal.
+lifecycle:
+  max_boards_per_sweep: 40 # employers, not jobs: one fetch covers every job on a board
+  max_http_checks: 150
+  archive_after_days: 30 # NORM-07, measured on max(lastSeen, lastConfirmedAt)
 
 ats_threshold: 0.75
 weekly_budget_usd: 5

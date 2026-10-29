@@ -8,21 +8,101 @@
 #   https://job-boards.greenhouse.io/<token>      https://jobs.lever.co/<token>
 #   https://jobs.ashbyhq.com/<token>
 #
-# The entries below are the demo set. Replace them with the employers you actually want to watch.
+# WERA MAINTAINS THIS LIST (ATS-05). Every `discover_every_days`, it searches the ATS vendors
+# for boards hiring for `watch_titles` and rewrites the entries below, keeping the newest and
+# dropping boards that stopped answering. Entries it found carry `discovered_on`.
+#
+# Your own entries are safe. An entry with no `discovered_on`, or one marked `pinned: true`, is
+# never removed or reordered by discovery — add companies by hand whenever you like.
+#
+# `watch_titles` empty means "use the target titles from my search profile", which is usually
+# what you want: then changing your CV changes what WERA watches.
+#
+# To add a company by hand, append an entry with no `discovered_on`:
+#
+#   - name: Monzo
+#     vendor: greenhouse      # greenhouse · lever · ashby
+#     token: monzo
+#
+# Set `enabled: false` to keep an entry on file without fetching it, and `pinned: true` on a
+# discovered entry to stop it being dropped when discovery moves on.
+
+watch_titles: []
+max_companies: 60
+discover_every_days: 7
 companies:
-  - name: Fernhill AI
-    vendor: greenhouse
-    token: fernhillai
-    enabled: true
-  - name: Northwind Labs
-    vendor: greenhouse
-    token: northwindlabs
-    enabled: true
-  - name: Saltmarsh Analytics
-    vendor: lever
-    token: saltmarsh
-    enabled: true
-  - name: Veridian Health
-    vendor: ashby
-    token: veridianhealth
-    enabled: true
+- name: Palantir
+  vendor: lever
+  token: palantir
+  discovered_on: '2026-10-21'
+  matched: AI Engineer
+- name: Airwallex
+  vendor: ashby
+  token: airwallex
+  discovered_on: '2026-10-21'
+  matched: AI Engineer
+- name: Trm Labs
+  vendor: ashby
+  token: trm-labs
+  discovered_on: '2026-10-21'
+  matched: AI Engineer
+- name: Teneo
+  vendor: greenhouse
+  token: teneo
+  discovered_on: '2026-10-21'
+  matched: AI Engineer
+- name: Pinterest
+  vendor: greenhouse
+  token: pinterest
+  discovered_on: '2026-10-21'
+  matched: Graduate Software Engineer
+- name: Figma
+  vendor: greenhouse
+  token: figma
+  discovered_on: '2026-10-21'
+  matched: Graduate Software Engineer
+- name: Databricks
+  vendor: greenhouse
+  token: databricks
+  discovered_on: '2026-10-21'
+  matched: Graduate Software Engineer
+- name: Optiver
+  vendor: greenhouse
+  token: optiverus
+  discovered_on: '2026-10-21'
+  matched: Graduate Software Engineer
+- name: CoreWeave Europe
+  vendor: greenhouse
+  token: coreweaveu
+  discovered_on: '2026-10-21'
+  matched: Graduate Software Engineer
+- name: Cloudflare
+  vendor: greenhouse
+  token: cloudflare
+  discovered_on: '2026-10-21'
+  matched: Graduate Software Engineer
+- name: Duolingo
+  vendor: greenhouse
+  token: duolingo
+  discovered_on: '2026-10-21'
+  matched: Graduate Software Engineer
+- name: Airapps
+  vendor: ashby
+  token: airapps
+  discovered_on: '2026-10-21'
+  matched: ML Engineer
+- name: SumUp
+  vendor: greenhouse
+  token: sumup
+  discovered_on: '2026-10-21'
+  matched: ML Engineer
+- name: Mimica
+  vendor: ashby
+  token: mimica
+  discovered_on: '2026-10-21'
+  matched: Backend Engineer (Python)
+- name: Elevenlabs
+  vendor: ashby
+  token: elevenlabs
+  discovered_on: '2026-10-21'
+  matched: Backend Engineer (Python)

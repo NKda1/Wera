@@ -18,7 +18,12 @@ class TierModels(Model):
 class InboxSettings(Model):
     label: str
     folder: str
-    last_checked_at: str
+    # Null until the inbox has actually been checked, which on a real install is until the
+    # first scheduled run. It was typed as a plain string because only demo mode — which seeds
+    # a timestamp — had ever been loaded; outside demo mode the seed writes null and the whole
+    # Settings page answered 500. Required-and-nullable rather than `Opt`: the Settings screen
+    # always reports the inbox's state, and "never checked" is that state, not a missing field.
+    last_checked_at: str | None
     emails_this_week: int
     senders: list[str]
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { Download, Lock, Plus, Trash2, Upload } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import YAML from "yaml";
@@ -47,6 +48,7 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState(false);
+  const [profileStale, setProfileStale] = useState(false);
 
   const cvDirty = JSON.stringify(cv) !== JSON.stringify(saved);
   const contactDirty = JSON.stringify(contact) !== JSON.stringify(savedContact);
@@ -79,6 +81,10 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
         setSavedContact(c);
       }
       setImported(false);
+      // PRF-04: a new CV is how someone changes the kind of job they're looking for, but the
+      // search profile is what the intake run actually uses. Saying so here is the difference
+      // between "I uploaded my CV" and "WERA is now looking for the right thing".
+      setProfileStale(cvDirty);
       toast({ tone: "ok", message: cvDirty ? `Saved as version ${saved.version + 1}.` : "Contact details saved." });
       router.refresh();
     } catch (e) {
@@ -124,8 +130,21 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
 
       {imported ? (
         <p className="mt-5 rounded-control bg-mint-100 px-4 py-3 text-[14px] text-forest-900" role="status">
-          Imported. Nothing is saved yet: check every section, then save it as version {saved.version + 1}.
+          Imported. Nothing is saved yet: check every section — especially dates — then save it as version {saved.version + 1}.
         </p>
+      ) : null}
+
+      {profileStale ? (
+        <div className="mt-5 rounded-control border border-amber-100 bg-amber-50 px-4 py-3 text-[14px] text-amber-700" role="status">
+          <p className="font-semibold">Your search profile still comes from the old CV</p>
+          <p className="mt-1">
+            Searches use the profile, not the CV directly, so nothing has changed about what WERA looks for yet.{" "}
+            <Link href="/jobs" className="font-semibold underline underline-offset-2">
+              Regenerate it from this CV
+            </Link>{" "}
+            — you see what would change and choose what to keep.
+          </p>
+        </div>
       ) : null}
 
       {untagged.length || cv.skills.length === 0 ? (
@@ -414,17 +433,38 @@ function AddButton({ onClick, children }: { onClick: () => void; children: React
   );
 }
 
+const ACCEPT = ".pdf,.docx,.yaml,.yml,.txt,.md";
+
+/** Whether pasted text is a WERA export rather than a CV to read. Shape, not syntax: a CV
+ *  pasted as prose can parse as YAML (one long scalar) without being one. */
+function looksLikeWeraYaml(text: string): boolean {
+  try {
+    const doc = YAML.parse(text);
+    return !!doc && typeof doc === "object" && "person" in doc && "version" in doc;
+  } catch {
+    return false;
+  }
+}
+
 function ImportCvDialog({ onClose, onImported }: { onClose: () => void; onImported: (cv: MasterCV) => void }) {
   const [text, setText] = useState("");
+  const [chosen, setChosen] = useState<File>();
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const file = useRef<HTMLInputElement>(null);
 
-  const submit = async () => {
+  // WERA's own YAML is parsed directly; a PDF, DOCX or pasted CV is read by `cv_extract` in
+  // code and only reaches a model when that declines (CV-09), which this can't know in advance
+  // — hence "if it can't follow the layout" rather than a promise either way. Pasted YAML is
+  // recognised rather than sent anywhere, so exporting and re-importing stays lossless.
+  const pastedYaml = !chosen && text.trim() ? looksLikeWeraYaml(text) : false;
+  const needsModel = chosen ? !/\.ya?ml$/i.test(chosen.name) : !!text.trim() && !pastedYaml;
+
+  const run = async (go: () => Promise<MasterCV>) => {
     setBusy(true);
     setError(undefined);
     try {
-      onImported(await api.importCv(text));
+      onImported(await go());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't read that file.");
     } finally {
@@ -432,19 +472,21 @@ function ImportCvDialog({ onClose, onImported }: { onClose: () => void; onImport
     }
   };
 
+  const submit = () => run(() => (chosen ? api.uploadCv(chosen) : pastedYaml ? api.importCv(text) : api.parseCv(text)));
+
   return (
     <Dialog
       open
       onClose={onClose}
       title="Import a master CV"
-      description="Load a WERA YAML file. You review it before anything is saved; ids in the file are kept as they are."
+      description="Upload your CV as a PDF or DOCX, or load a WERA YAML file. You review everything before it is saved."
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={submit} busy={busy} disabled={!text.trim()}>
-            Load for review
+          <Button onClick={submit} busy={busy} disabled={!chosen && !text.trim()}>
+            {busy && needsModel ? "Reading your CV…" : "Load for review"}
           </Button>
         </>
       }
@@ -452,24 +494,59 @@ function ImportCvDialog({ onClose, onImported }: { onClose: () => void; onImport
       <input
         ref={file}
         type="file"
-        accept=".yaml,.yml,application/yaml,text/yaml"
+        accept={ACCEPT}
         className="sr-only"
-        aria-label="Choose a YAML file"
-        onChange={async (e) => {
+        aria-label="Choose a CV file"
+        onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f) setText(await f.text());
+          if (!f) return;
+          setChosen(f);
+          setText("");
+          setError(undefined);
         }}
       />
-      <Button variant="secondary" onClick={() => file.current?.click()}>
-        <Upload className="size-4" aria-hidden="true" />
-        Choose a .yaml file
-      </Button>
-      <div className="mt-4">
-        <Label htmlFor="cv-yaml">Or paste YAML</Label>
-        <Textarea id="cv-yaml" rows={8} className="font-mono text-[13px]" value={text} onChange={(e) => setText(e.target.value)} invalid={!!error} spellCheck={false} />
-        <FieldError>{error}</FieldError>
-        <Help>Importing from a PDF or pasted text needs the model to structure it, so it&apos;s available once live mode is on.</Help>
+      <div className="flex flex-wrap items-center gap-3">
+        <Button variant="secondary" onClick={() => file.current?.click()}>
+          <Upload className="size-4" aria-hidden="true" />
+          Choose a file
+        </Button>
+        {chosen ? (
+          <span className="text-[14px] text-ink-2">
+            {chosen.name}{" "}
+            <button type="button" className="font-semibold text-forest-700 underline underline-offset-2" onClick={() => setChosen(undefined)}>
+              remove
+            </button>
+          </span>
+        ) : (
+          <span className="text-[14px] text-ink-2">PDF, DOCX, or a WERA .yaml file</span>
+        )}
       </div>
+
+      {chosen ? null : (
+        <div className="mt-4">
+          <Label htmlFor="cv-text">Or paste your CV</Label>
+          <Textarea
+            id="cv-text"
+            rows={8}
+            className="font-mono text-[13px]"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            invalid={!!error}
+            spellCheck={false}
+            placeholder="Paste the text of your CV, or WERA YAML."
+          />
+          <Help>Pasting is the way through when a PDF is a scan and has no text in it.</Help>
+        </div>
+      )}
+
+      <FieldError>{error}</FieldError>
+
+      {needsModel ? (
+        <Help>
+          WERA reads your roles, dates and skills from the document itself, which is instant and costs nothing. If it can&rsquo;t follow the
+          layout it asks a model instead — a few seconds, and well under a penny. Either way you review everything before it is saved.
+        </Help>
+      ) : null}
     </Dialog>
   );
 }

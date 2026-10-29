@@ -3,18 +3,22 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { api, ApiRequestError } from "@/lib/api";
-import type { ChannelSummary, ProfileProposalResult, Recency, SearchProfile, Seniority } from "@/lib/types";
+import type { ChannelSummary, ProfileProposalResult, Recency, SearchProfile, Seniority, SiteOption } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card, CardHeader, SectionLabel } from "@/lib/ui/Card";
 import { Chip, ChipList } from "@/lib/ui/Chip";
 import { ChipInput } from "@/lib/ui/ChipInput";
+import { boardsFor, countriesByRegion, countryName, regionName, servesCountries } from "@/lib/regions";
 import { cn } from "@/lib/ui/cn";
 import { Dialog } from "@/lib/ui/Dialog";
 import { Checkbox, FieldError, Label, Select } from "@/lib/ui/Field";
 import { useToast } from "@/lib/ui/Toast";
 import { RegenerateDialog } from "./RegenerateDialog";
 
-export type SiteOption = { domain: string; name: string; reviewed: boolean };
+// `SiteOption` comes from the generated contracts (SCH-03). It used to be re-declared here by
+// hand, which is why the UI couldn't see `countries` or `region` the moment the agent grew them
+// — a hand-written copy of a generated type drifts silently and typechecks the whole way.
+export type { SiteOption };
 
 const CHANNEL_TITLES = { board_search: "Board search", email_alert: "Alert inbox", watchlist: "ATS watchlist" } as const;
 
@@ -130,7 +134,114 @@ const SENIORITY: { id: Seniority; label: string }[] = [
   { id: "junior", label: "Junior" },
   { id: "entry", label: "Entry level" },
   { id: "mid", label: "Mid level" },
+  // The three above `mid` are what make this setting do anything: the filter hides titles
+  // carrying "Senior", "Lead" or "Principal", and until these existed there was no way to say
+  // you'd take one.
+  { id: "senior", label: "Senior" },
+  { id: "lead", label: "Lead / Staff" },
+  { id: "principal", label: "Principal" },
 ];
+
+/**
+ * SRCH-12: boards WERA found and is asking about. SRCH-04 is why this exists rather than
+ * discovery just enabling them.
+ *
+ * The button says "I've reviewed the terms" and not "Enable", and that wording is the feature.
+ * `terms_reviewed_on` records that a person read a third party's terms of service and robots.txt
+ * (SPEC §11.3). A button labelled "Enable" would reduce that to someone clicking past a dialog —
+ * so the real postings and the links to the site and its robots.txt are put in front of them
+ * first, and the assertion is spelled out.
+ */
+function ProposedBoards({ sites }: { sites: SiteOption[] }) {
+  const router = useRouter();
+  const toast = useToast();
+  const [busy, setBusy] = useState<string>();
+  const proposed = sites.filter((s) => s.proposed);
+
+  if (!proposed.length) return null;
+
+  const decide = async (domain: string, action: "approve" | "decline") => {
+    setBusy(domain);
+    try {
+      await api.reviewSite(domain, action);
+      toast({
+        tone: "ok",
+        message: action === "approve" ? `${domain} will be searched from your next search.` : `${domain} won't be suggested again.`,
+      });
+      router.refresh();
+    } catch (err) {
+      toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't save that." });
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
+  return (
+    <fieldset className="sm:col-span-2">
+      <legend className="mb-1.5 text-[14px] font-semibold">
+        Boards WERA found
+        <span className="ml-2 font-normal text-ink-2">{proposed.length} waiting</span>
+      </legend>
+      <p className="mb-3 text-small text-ink-2">
+        These came up while searching for your titles. WERA won&apos;t search any of them until you&apos;ve read their terms — that
+        decision is yours, not WERA&apos;s.
+      </p>
+      <ul className="grid gap-3">
+        {proposed.map((s) => (
+          <li key={s.domain} className="rounded-[12px] border border-line p-3.5">
+            <p className="text-[14px] font-bold">{s.domain}</p>
+            <p className="mt-0.5 text-small text-ink-2">
+              Found searching for {s.matched ?? "your titles"}
+              {s.robotsOk === false ? " · robots.txt disallows crawling" : s.robotsOk === null ? " · robots.txt couldn't be read" : ""}
+            </p>
+            {s.examples.length ? (
+              <ul className="mt-2 grid gap-0.5">
+                {s.examples.map((url) => (
+                  <li key={url}>
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="text-small text-forest-700 underline underline-offset-2 hover:text-forest-900"
+                    >
+                      {url.replace(/^https?:\/\//, "").slice(0, 70)}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <p className="mt-2 flex flex-wrap gap-x-3 text-small">
+              <a
+                href={`https://${s.domain}/robots.txt`}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-ink-2 underline underline-offset-2 hover:text-ink"
+              >
+                robots.txt
+              </a>
+              <a
+                href={`https://${s.domain}`}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-ink-2 underline underline-offset-2 hover:text-ink"
+              >
+                Open the site
+              </a>
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button busy={busy === s.domain} onClick={() => decide(s.domain, "approve")}>
+                I&apos;ve reviewed the terms — search it
+              </Button>
+              <Button variant="secondary" disabled={busy === s.domain} onClick={() => decide(s.domain, "decline")}>
+                Not this one
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </fieldset>
+  );
+}
 
 function ProfileDialog({ profile, sites, onClose }: { profile: SearchProfile; sites: SiteOption[]; onClose: () => void }) {
   const router = useRouter();
@@ -156,7 +267,11 @@ function ProfileDialog({ profile, sites, onClose }: { profile: SearchProfile; si
     }
   };
 
-  const queries = draft.channels.boardSearch ? draft.titles.length * draft.locations.length : 0;
+  // SRCH-11: the grid is title × board, not title × location. Counted the same way the agent
+  // counts it, so the footer and the search dialog can't promise different numbers.
+  const boards = boardsFor(sites, draft.countries, draft.sites);
+  const queries = draft.channels.boardSearch ? draft.titles.length * boards.length : 0;
+  const regions = countriesByRegion(sites);
 
   return (
     <Dialog
@@ -168,7 +283,8 @@ function ProfileDialog({ profile, sites, onClose }: { profile: SearchProfile; si
       footer={
         <>
           <span className="mr-auto self-center text-small text-ink-2">
-            {queries} board {queries === 1 ? "query" : "queries"} per search ({draft.titles.length} titles × {draft.locations.length} locations)
+            {queries} board {queries === 1 ? "query" : "queries"} per search ({draft.titles.length} {draft.titles.length === 1 ? "title" : "titles"} ×{" "}
+            {boards.length} {boards.length === 1 ? "board" : "boards"})
           </span>
           <Button variant="secondary" onClick={onClose}>
             Cancel
@@ -182,7 +298,15 @@ function ProfileDialog({ profile, sites, onClose }: { profile: SearchProfile; si
       <div className="grid gap-5 sm:grid-cols-2">
         <ChipInput label="Target titles" value={draft.titles} onChange={(v) => set("titles", v)} max={8} error={errors.titles} placeholder="Add a title" />
         <ChipInput label="Top skills" value={draft.skills} onChange={(v) => set("skills", v)} max={15} error={errors.skills} placeholder="Add a skill" />
-        <ChipInput label="Locations" value={draft.locations} onChange={(v) => set("locations", v)} max={8} error={errors.locations} placeholder="Add a city" />
+        <ChipInput
+          label="Cities (optional)"
+          value={draft.locations}
+          onChange={(v) => set("locations", v)}
+          max={8}
+          error={errors.locations}
+          hint="Leave empty to search the whole of each country you picked."
+          placeholder="Add a city"
+        />
         <ChipInput
           label="Excluding"
           value={draft.exclude}
@@ -225,20 +349,85 @@ function ProfileDialog({ profile, sites, onClose }: { profile: SearchProfile; si
           </div>
         </div>
 
-        <fieldset>
-          <legend className="mb-1.5 text-[14px] font-semibold">Boards to search</legend>
-          {sites.map((s) => (
-            <Checkbox
-              key={s.domain}
-              label={s.name}
-              description={s.reviewed ? s.domain : `${s.domain} · terms not reviewed yet, so it can't be enabled`}
-              disabled={!s.reviewed}
-              checked={draft.sites.includes(s.domain)}
-              onChange={(e) => set("sites", e.target.checked ? [...draft.sites, s.domain] : draft.sites.filter((x) => x !== s.domain))}
-            />
-          ))}
-          <p className="mt-1 text-small text-ink-2">linkedin.com is always excluded.</p>
+        <fieldset className="sm:col-span-2">
+          <legend className="mb-1.5 text-[14px] font-semibold">Where you want to work</legend>
+          <p className="mb-2 text-small text-ink-2">
+            Most boards only carry jobs in one country, so this decides which of them are worth searching. Pick nothing to search every board you have
+            enabled.
+          </p>
+          {regions.map(({ region, codes }) => {
+            const all = codes.every((c) => draft.countries.includes(c));
+            return (
+              <div key={region} className="mb-3">
+                {/* The region itself is selectable, not just a heading. Country checkboxes under a
+                    label is not a way to "set your region" — you can reach the same state, but only
+                    by knowing which countries the region contains, which is the thing the heading
+                    was supposed to save you. */}
+                <Checkbox
+                  label={regionName(region)}
+                  description={`All ${codes.length} ${codes.length === 1 ? "country" : "countries"} WERA has boards for`}
+                  checked={all}
+                  onChange={() =>
+                    set("countries", all ? draft.countries.filter((c) => !codes.includes(c)) : [...new Set([...draft.countries, ...codes])])
+                  }
+                />
+                <div className="mt-1 ml-6 grid grid-cols-2 gap-x-3">
+                  {codes.map((code) => (
+                    <Checkbox
+                      key={code}
+                      label={countryName(code)}
+                      checked={draft.countries.includes(code)}
+                      onChange={(e) => set("countries", e.target.checked ? [...draft.countries, code] : draft.countries.filter((c) => c !== code))}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {draft.countries.length ? (
+            <p className="text-small text-ink-2">
+              {boards.length} of {sites.filter((s) => s.reviewed).length} reviewed boards cover{" "}
+              {draft.countries.length === 1 ? "that country" : "those countries"}.
+            </p>
+          ) : null}
+          {errors.countries ? <p className="text-small text-berry-700">{errors.countries}</p> : null}
         </fieldset>
+
+        <fieldset className="sm:col-span-2">
+          <legend className="mb-1.5 text-[14px] font-semibold">Boards to search</legend>
+          {/* Proposed boards are offered below, not here: a disabled checkbox is the right
+              affordance for a board nobody has looked at, but it is the wrong one for a board
+              WERA is actively asking about. Declined boards disappear entirely. */}
+          {sites
+            .filter((s) => !s.proposed && !s.declined)
+            .map((s) => {
+              const servesChoice = servesCountries(s, draft.countries);
+              const where = s.countries.length ? s.countries.map(countryName).join(", ") : "Anywhere";
+              return (
+                <Checkbox
+                  key={s.domain}
+                  label={s.name}
+                  description={
+                    !s.reviewed
+                      ? `${s.domain} · terms not reviewed yet, so it can't be enabled`
+                      : servesChoice
+                        ? `${s.domain} · ${where}`
+                        : `${s.domain} · ${where} — skipped, none of your countries`
+                  }
+                  disabled={!s.reviewed}
+                  checked={draft.sites.includes(s.domain)}
+                  onChange={(e) =>
+                    set("sites", e.target.checked ? [...draft.sites, s.domain] : draft.sites.filter((x) => x !== s.domain))
+                  }
+                />
+              );
+            })}
+          <p className="mt-1 text-small text-ink-2">
+            Each enabled board gets its own query, so no single board can crowd out the others. linkedin.com is always excluded.
+          </p>
+        </fieldset>
+
+        <ProposedBoards sites={sites} />
 
         <fieldset>
           <legend className="mb-1.5 text-[14px] font-semibold">Channels</legend>

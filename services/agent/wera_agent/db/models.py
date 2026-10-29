@@ -129,10 +129,20 @@ class IntakeRunRow(Base):
     started_at: Mapped[str] = mapped_column(Iso)
     finished_at: Mapped[str | None] = mapped_column(Iso)
     progress: Mapped[float] = mapped_column(Float, default=0)
+    # Which part of the run is happening, and where it is within that part. Scoring is where
+    # almost all of a real run's time goes — 40 jobs at ~11s each — and until these existed the
+    # screen had nothing to show for it but a sentence that never changed.
+    phase: Mapped[str] = mapped_column(String(16), default="searching")
+    done: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
     queries: Mapped[int] = mapped_column(Integer, default=0)
     results: Mapped[int] = mapped_column(Integer, default=0)
     new_jobs: Mapped[int] = mapped_column(Integer, default=0)
     credits_used: Mapped[int] = mapped_column(Integer, default=0)
+    # SRCH-10: what the crawl cache answered for free, in the same units as `credits_used`. Kept
+    # beside it rather than folded into it because the two are different facts — one is what the
+    # invoice will say, the other is what it would have said.
+    credits_saved: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[list[Any]]
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)  # demo runs progress over time
     settled: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -166,3 +176,23 @@ class KvRow(Base):
     __tablename__ = "kv"
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[Any] = mapped_column(Json)
+
+
+class CrawlCacheRow(Base):
+    """SRCH-10: what the last crawl paid Firecrawl for, kept for a day or two.
+
+    Not a store. Every row has an expiry and nothing here is a source of truth — a job that
+    matters is in `jobs`, and losing this table costs credits rather than data. It gets its own
+    table rather than a `kv` key because the payloads are whole job descriptions and the
+    lookups are per URL: one JSON blob would mean reading and rewriting every cached page to
+    read one of them.
+    """
+
+    __tablename__ = "crawl_cache"
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)  # sha256 of the request
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # "search" | "card"
+    # Always an object, never a bare null: a page WERA read but found no job on is cached as
+    # `{"card": null}`, and that has to be distinguishable from a key that isn't here at all.
+    payload: Mapped[dict[str, Any]]
+    stored_at: Mapped[str] = mapped_column(Iso)
+    expires_at: Mapped[str] = mapped_column(Iso, index=True)

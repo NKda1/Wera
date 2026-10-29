@@ -1,19 +1,89 @@
-# Boards searched by Firecrawl (SPEC §9.2, SRCH-04). A site can be enabled in the search
-# profile only after its terms and robots.txt were reviewed: set terms_reviewed_on.
-# linkedin.com is always excluded and can't be listed here.
+# Boards searched by Firecrawl (SPEC §9.2, SRCH-04). linkedin.com is always excluded and can't
+# be listed here.
+#
+# `terms_reviewed_on` IS THE GATE. A site with `null` there is loaded, shown in the UI and never
+# searched. Setting a date is a record that a person read that site's terms of service and its
+# robots.txt and decided WERA may search it (SPEC §11.3) — it is not a convenience flag, and
+# nothing in the code will set it for you.
+#
+# `countries` (ISO 3166-1 alpha-2) is what the search profile selects on (SRCH-11). Most boards
+# are national, so a search for work in Berlin should never spend credits asking a UK graduate
+# board. A site with no `countries` is treated as serving everywhere, because an untagged board
+# quietly vanishing from every search looks identical to a board that broke.
+#
+# WERA PROPOSES ENTRIES HERE (SRCH-12). Every `discover_every_days`, a board search also looks
+# for boards carrying your target titles and appends what it finds with `terms_reviewed_on: null`
+# and a `discovered_on` date, plus `examples` — the postings it matched on, so you have something
+# real to look at. Discovery is append-only: it never removes or reorders an entry.
+#
+# `declined_on` means you said no. That entry is never proposed again and never searched.
+#
+# To add a board by hand, append an entry with no `discovered_on` and fill in the review date
+# yourself once you have actually read the terms:
+#
+#   - domain: example-jobs.com
+#     name: Example Jobs
+#     terms_reviewed_on: 2026-01-31
+#     countries: [GB]
+#     region: europe
+
+max_sites: 12
+discover_every_days: 7
 sites:
-  - domain: brightnetwork.co.uk
-    name: Bright Network
-    terms_reviewed_on: 2026-10-10
-  - domain: gradcracker.com
-    name: Gradcracker
-    terms_reviewed_on: 2026-10-10
-  - domain: welcometothejungle.com
-    name: Welcome to the Jungle
-    terms_reviewed_on: 2026-10-11
-  - domain: builtinlondon.uk
-    name: Built In London
-    terms_reviewed_on: 2026-10-11
-  - domain: otta.com
-    name: Otta
-    terms_reviewed_on: null
+- domain: brightnetwork.co.uk
+  name: Bright Network
+  terms_reviewed_on: '2026-10-10'
+  countries:
+  - GB
+  region: europe
+- domain: gradcracker.com
+  name: Gradcracker
+  terms_reviewed_on: '2026-10-10'
+  countries:
+  - GB
+  region: europe
+- domain: welcometothejungle.com
+  name: Welcome to the Jungle
+  terms_reviewed_on: '2026-10-11'
+  countries:
+  - FR
+  - NL
+  - BE
+  - DE
+  - ES
+  - GB
+  - CZ
+  region: europe
+- domain: builtinlondon.uk
+  name: Built In London
+  terms_reviewed_on: '2026-10-11'
+  countries:
+  - GB
+  region: europe
+- domain: otta.com
+  name: Otta
+  terms_reviewed_on: null
+  countries:
+  - GB
+  - DE
+  - NL
+  - FR
+  - IE
+  - ES
+  - US
+  region: europe
+- domain: totaljobs.com
+  name: Total Jobs
+  terms_reviewed_on: '2026-10-11'
+  countries:
+  - GB
+  region: europe
+- domain: www.milkround.com
+  name: www.milkround.com
+  terms_reviewed_on: null
+  discovered_on: '2026-10-28'
+  matched: Graduate Software Engineer
+  robots_ok: true
+  examples:
+  - https://www.milkround.com/jobs/software-engineer
+  - https://www.milkround.com/jobs/junior-software-developer/in-london

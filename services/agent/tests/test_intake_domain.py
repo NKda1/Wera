@@ -90,6 +90,105 @@ class TestHardFilters:
     def test_remote_only_hides_an_onsite_job_in_the_right_city(self):
         assert filters.wrong_location(job(remote="onsite"), profile(remote="remote_only")) == "not remote"
 
+    def test_no_remote_hides_a_remote_job_even_in_a_wanted_city(self):
+        """The bug this closes: `no_remote` rejected nothing.
+
+        A remote job fell past both remote branches to the location check, and a posting whose
+        location reads "Remote (London)" contains "London" — so it was *kept* for someone who
+        had said they don't want remote work.
+        """
+        remote_in_london = job(location=Location(city=None, raw="Remote (London)"), remote="remote")
+        assert filters.wrong_location(remote_in_london, profile(remote="no_remote")) == "remote"
+        assert filters.hidden_reason(remote_in_london, profile(remote="no_remote"))
+        # And it is still kept for someone who doesn't mind.
+        assert filters.hidden_reason(remote_in_london, profile(remote="any")) is None
+
+
+class TestSeniorityActuallyGates:
+    """`profile.seniority` had no effect on filtering at all.
+
+    `too_senior` skipped any `ABOVE` word that appeared in `profile.seniority`, but `ABOVE` holds
+    "senior"/"staff"/"lead" and the field only allowed "intern"…"mid" — so the two sets could
+    never intersect and the skip was unreachable. Widening your search changed nothing.
+    """
+
+    def test_a_profile_that_asks_for_senior_is_shown_senior_roles(self):
+        assert filters.too_senior("Senior ML Engineer", profile(seniority=["mid", "senior"])) is None
+
+    def test_a_profile_that_does_not_still_hides_them(self):
+        assert filters.too_senior("Senior ML Engineer", profile(seniority=["graduate"])) == "senior"
+
+    def test_asking_for_lead_accepts_lead_and_staff_but_not_director(self):
+        asks = profile(seniority=["lead"])
+        assert filters.too_senior("Lead Engineer", asks) is None
+        assert filters.too_senior("Staff Engineer", asks) is None
+        assert filters.too_senior("Director of Engineering", asks) == "director"
+
+    def test_an_empty_level_list_keeps_the_early_career_default(self):
+        """No levels stated is a profile that hasn't been set up, not a request to see
+        Director roles."""
+        assert filters.too_senior("Principal Engineer", profile(seniority=[])) == "principal"
+
+
+class TestRecencyIsEnforced:
+    """`recency` was a Firecrawl `tbs` hint and nothing more — a suggestion about ranking, never
+    a rule about what to keep. A 30-day-old posting could come back from a 24-hour search, and
+    the watchlist and inbox never saw the setting at all."""
+
+    def old(self, days: float, **over) -> Job:
+        return job(posted_at=iso(NOW - int(days * DAY)), **over)
+
+    def test_a_posting_outside_the_window_is_hidden(self):
+        reason = filters.hidden_reason(self.old(20), profile(recency="7d"), NOW)
+        assert reason and "outside your 7d window" in reason
+
+    def test_a_posting_inside_the_window_is_kept(self):
+        assert filters.hidden_reason(self.old(3), profile(recency="7d"), NOW) is None
+
+    def test_a_job_with_no_date_is_never_hidden_for_its_age(self):
+        """MATCH-08: `postedAt` is often missing. Hiding a job for having no date would throw
+        away every posting from a board that doesn't publish one."""
+        assert filters.hidden_reason(job(posted_at=None), profile(recency="24h"), NOW) is None
+
+    def test_an_approximate_date_gets_a_day_of_slack(self):
+        """MATCH-08: "about 7 days ago" shouldn't be hidden from a 7-day search by someone
+        else's rounding."""
+        edge = self.old(7.5, posted_precision="approximate")
+        assert filters.hidden_reason(edge, profile(recency="7d"), NOW) is None
+        exact = self.old(7.5, posted_precision="exact")
+        assert filters.hidden_reason(exact, profile(recency="7d"), NOW) is not None
+
+
+class TestCountryTargeting:
+    """SRCH-11: `countries` is what "where" means when no city is named."""
+
+    def test_a_job_in_a_target_country_is_kept_without_naming_the_city(self):
+        berlin = job(location=Location(city="Berlin", country="Germany", raw="Berlin, Germany"), remote="onsite")
+        assert filters.wrong_location(berlin, profile(locations=[], countries=["DE"])) is None
+
+    def test_a_job_outside_every_target_country_is_hidden(self):
+        berlin = job(location=Location(city="Berlin", country="Germany", raw="Berlin, Germany"), remote="onsite")
+        assert filters.wrong_location(berlin, profile(locations=[], countries=["GB"])) == "Berlin"
+
+    def test_a_countrys_other_names_count(self):
+        """A posting says "London, UK", not "London, GB"."""
+        uk = job(location=Location(city="Leeds", country="UK", raw="Leeds, UK"), remote="onsite")
+        assert filters.wrong_location(uk, profile(locations=[], countries=["GB"])) is None
+
+    def test_a_two_letter_code_does_not_match_inside_another_word(self):
+        """Substring-matching "us" puts Austin in the United States, and "uk" puts Kyiv in the
+        UK. Country names are matched whole-word for exactly this reason."""
+        austin = job(location=Location(city="Austin", country=None, raw="Austin"), remote="onsite")
+        assert filters.wrong_location(austin, profile(locations=[], countries=["US"])) == "Austin"
+        kyiv = job(location=Location(city="Kyiv", country="Ukraine", raw="Kyiv, Ukraine"), remote="onsite")
+        assert filters.wrong_location(kyiv, profile(locations=[], countries=["GB"])) == "Kyiv"
+
+    def test_naming_neither_a_city_nor_a_country_hides_nothing_on_location(self):
+        anywhere = job(location=Location(city="Lima", country="Peru", raw="Lima, Peru"), remote="onsite")
+        assert filters.wrong_location(anywhere, profile(locations=[], countries=[])) is None
+
+
+class TestHardFiltersContinued:
     def test_filtered_jobs_are_hidden_with_a_reason_not_dropped(self):
         """MATCH-01: a filter is a guess, so the person can see what it hid."""
         kept, hidden = filters.apply([job(), job(id="job-2", title="Senior ML Engineer")], profile())

@@ -449,12 +449,17 @@
     },
     "CompanyFact": {
       "properties": {
+        "policyQuote": {
+          "default": "",
+          "type": "string"
+        },
         "quote": {
           "type": "string"
         }
       },
       "required": [
-        "quote"
+        "quote",
+        "policyQuote"
       ],
       "title": "CompanyFact",
       "type": "object"
@@ -607,7 +612,8 @@
       "enum": [
         "cv",
         "letter",
-        "ats"
+        "ats",
+        "answers"
       ],
       "type": "string"
     },
@@ -921,7 +927,14 @@
           "type": "string"
         },
         "lastCheckedAt": {
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "senders": {
           "items": {
@@ -953,7 +966,14 @@
         "channel": {
           "$ref": "#/$defs/IntakeChannel"
         },
+        "creditsSaved": {
+          "default": 0,
+          "type": "integer"
+        },
         "creditsUsed": {
+          "type": "integer"
+        },
+        "done": {
           "type": "integer"
         },
         "errors": {
@@ -970,6 +990,14 @@
         },
         "newJobs": {
           "type": "integer"
+        },
+        "phase": {
+          "enum": [
+            "searching",
+            "scoring",
+            "done"
+          ],
+          "type": "string"
         },
         "progress": {
           "type": "number"
@@ -993,6 +1021,9 @@
             "cancelled"
           ],
           "type": "string"
+        },
+        "total": {
+          "type": "integer"
         }
       },
       "required": [
@@ -1001,10 +1032,14 @@
         "status",
         "startedAt",
         "progress",
+        "phase",
+        "done",
+        "total",
         "queries",
         "results",
         "newJobs",
         "creditsUsed",
+        "creditsSaved",
         "errors"
       ],
       "title": "IntakeRun",
@@ -1017,6 +1052,9 @@
         },
         "ats": {
           "$ref": "#/$defs/Ats"
+        },
+        "closedAt": {
+          "type": "string"
         },
         "company": {
           "type": "string"
@@ -1054,6 +1092,12 @@
         "language": {
           "type": "string"
         },
+        "lastCheckedAt": {
+          "type": "string"
+        },
+        "lastConfirmedAt": {
+          "type": "string"
+        },
         "lastSeen": {
           "type": "string"
         },
@@ -1065,6 +1109,10 @@
         },
         "postedAt": {
           "type": "string"
+        },
+        "postedPrecision": {
+          "$ref": "#/$defs/PostedPrecision",
+          "default": "unknown"
         },
         "remote": {
           "anyOf": [
@@ -1114,6 +1162,7 @@
         "descriptionStatus",
         "sources",
         "language",
+        "postedPrecision",
         "firstSeen",
         "lastSeen",
         "status"
@@ -1254,6 +1303,15 @@
       ],
       "title": "ListDiff",
       "type": "object"
+    },
+    "Liveness": {
+      "enum": [
+        "open",
+        "unverified",
+        "unreachable",
+        "gone"
+      ],
+      "type": "string"
     },
     "Location": {
       "properties": {
@@ -1400,6 +1458,14 @@
       "title": "Person",
       "type": "object"
     },
+    "PostedPrecision": {
+      "enum": [
+        "exact",
+        "approximate",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "ProfileChannels": {
       "properties": {
         "boardSearch": {
@@ -1488,7 +1554,15 @@
           "type": "string"
         },
         "start": {
-          "$ref": "#/$defs/YearMonth"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/YearMonth"
+            },
+            {
+              "const": "",
+              "type": "string"
+            }
+          ]
         },
         "title": {
           "type": "string"
@@ -1588,6 +1662,9 @@
         "ats": {
           "$ref": "#/$defs/Ats"
         },
+        "closedAt": {
+          "type": "string"
+        },
         "company": {
           "type": "string"
         },
@@ -1627,17 +1704,30 @@
         "language": {
           "type": "string"
         },
+        "lastCheckedAt": {
+          "type": "string"
+        },
+        "lastConfirmedAt": {
+          "type": "string"
+        },
         "lastSeen": {
           "type": "string"
         },
         "linkedinUrl": {
           "type": "string"
         },
+        "liveness": {
+          "$ref": "#/$defs/Liveness"
+        },
         "location": {
           "$ref": "#/$defs/Location"
         },
         "postedAt": {
           "type": "string"
+        },
+        "postedPrecision": {
+          "$ref": "#/$defs/PostedPrecision",
+          "default": "unknown"
         },
         "remote": {
           "anyOf": [
@@ -1674,6 +1764,9 @@
         },
         "title": {
           "type": "string"
+        },
+        "urgency": {
+          "$ref": "#/$defs/Urgency"
         }
       },
       "required": [
@@ -1687,10 +1780,13 @@
         "descriptionStatus",
         "sources",
         "language",
+        "postedPrecision",
         "firstSeen",
         "lastSeen",
         "status",
-        "fit"
+        "fit",
+        "urgency",
+        "liveness"
       ],
       "title": "ScoredJob",
       "type": "object"
@@ -1699,6 +1795,13 @@
       "properties": {
         "channels": {
           "$ref": "#/$defs/ProfileChannels"
+        },
+        "countries": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "exclude": {
           "items": {
@@ -1758,6 +1861,7 @@
         "titles",
         "skills",
         "locations",
+        "countries",
         "remote",
         "seniority",
         "exclude",
@@ -1804,7 +1908,10 @@
         "graduate",
         "junior",
         "entry",
-        "mid"
+        "mid",
+        "senior",
+        "lead",
+        "principal"
       ],
       "type": "string"
     },
@@ -1923,6 +2030,9 @@
           },
           "type": "array"
         },
+        "awaitingScore": {
+          "type": "integer"
+        },
         "channels": {
           "items": {
             "$ref": "#/$defs/ChannelSummary"
@@ -1934,9 +2044,12 @@
         },
         "hidden": {
           "items": {
-            "$ref": "#/$defs/ScoredJob"
+            "$ref": "#/$defs/Job"
           },
           "type": "array"
+        },
+        "hiddenTotal": {
+          "type": "integer"
         },
         "newJobIds": {
           "items": {
@@ -1956,6 +2069,8 @@
         "channels",
         "newJobIds",
         "hidden",
+        "hiddenTotal",
+        "awaitingScore",
         "snoozed",
         "rejected",
         "activeRunIds"
@@ -1965,20 +2080,60 @@
     },
     "SiteOption": {
       "properties": {
+        "countries": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "declined": {
+          "default": false,
+          "type": "boolean"
+        },
+        "discoveredOn": {
+          "type": "string"
+        },
         "domain": {
+          "type": "string"
+        },
+        "examples": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "matched": {
           "type": "string"
         },
         "name": {
           "type": "string"
         },
+        "proposed": {
+          "default": false,
+          "type": "boolean"
+        },
+        "region": {
+          "default": "global",
+          "type": "string"
+        },
         "reviewed": {
+          "type": "boolean"
+        },
+        "robotsOk": {
           "type": "boolean"
         }
       },
       "required": [
         "domain",
         "name",
-        "reviewed"
+        "reviewed",
+        "countries",
+        "region",
+        "proposed",
+        "declined",
+        "examples"
       ],
       "title": "SiteOption",
       "type": "object"
@@ -2134,6 +2289,16 @@
       ],
       "title": "TierModels",
       "type": "object"
+    },
+    "Urgency": {
+      "enum": [
+        "today",
+        "this_week",
+        "two_weeks",
+        "older",
+        "unknown"
+      ],
+      "type": "string"
     },
     "Violation": {
       "properties": {

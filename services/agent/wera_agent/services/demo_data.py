@@ -17,7 +17,11 @@ def fixture(name: str) -> Any:
 
 
 def seed_to_job(s: dict[str, Any], now: int, status: str | None = None) -> tuple[Job, FitEvidence, list[str]]:
-    posted = now - s["postedDaysAgo"] * DAY
+    # A seed with no `postedDaysAgo` is a job whose source never said when it was posted —
+    # common on a LinkedIn alert card, and the one case the urgency groups must not guess at.
+    # `firstSeen` still needs a time, so it falls back to when the demo was seeded.
+    days = s.get("postedDaysAgo")
+    posted = now - (days if days is not None else 0) * DAY
     ats = s.get("ats")
     dedupe = (
         f"ats:{ats['vendor']}:{ats['boardToken']}:{ats['jobId']}"
@@ -40,7 +44,17 @@ def seed_to_job(s: dict[str, Any], now: int, status: str | None = None) -> tuple
             "linkedinUrl": s.get("linkedinUrl"),
             "sources": [{**src, "seenAt": iso(posted + (i + 1) * 3 * 60 * MIN)} for i, src in enumerate(s["sources"])],
             "language": "en",
-            "postedAt": iso(posted),
+            "postedAt": iso(posted) if days is not None else None,
+            # The same rule a real run applies (`normalise.from_feed`): only the employer's own
+            # board gives a real timestamp. The demo has to show that split or the urgency
+            # groups would look more certain than they are.
+            "postedPrecision": (
+                "unknown"
+                if days is None
+                else "exact"
+                if any(src["channel"] == "watchlist" for src in s["sources"])
+                else "approximate"
+            ),
             "firstSeen": iso(posted + 2 * 60 * MIN),
             "lastSeen": iso(now),
             "status": status or s.get("status") or "new",
@@ -48,7 +62,13 @@ def seed_to_job(s: dict[str, Any], now: int, status: str | None = None) -> tuple
             "seniority": s.get("seniority"),
         }
     )
-    return job, FitEvidence.model_validate(s["evidence"]), list(s.get("questions") or [])
+    # A hidden job gets no fit evidence, because a real run never produces any: MATCH-01
+    # filters it out before the first model call. The demo used to attach evidence to every
+    # job regardless, which made demo mode the one place where every job has a score — so the
+    # Jobs screen passed every test and then 500'd on the first real database, where 3,223
+    # hidden jobs had nothing to read.
+    evidence = None if job.status == "hidden" else FitEvidence.model_validate(s["evidence"])
+    return job, evidence, list(s.get("questions") or [])
 
 
 def first_run_seeds() -> list[dict[str, Any]]:

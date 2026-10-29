@@ -221,6 +221,23 @@
       "title": "SettingsPatch",
       "type": "object"
     },
+    "SiteReviewIn": {
+      "description": "SRCH-04: a recorded human decision about a board WERA proposed.\n\n`approve` means the person read the site's terms and robots.txt. Nothing in the code can\nassert that on their behalf, which is why this is an explicit action rather than a flag.",
+      "properties": {
+        "action": {
+          "enum": [
+            "approve",
+            "decline"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "SiteReviewIn",
+      "type": "object"
+    },
     "TierModels": {
       "properties": {
         "fast": {

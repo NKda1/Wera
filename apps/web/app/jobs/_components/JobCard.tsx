@@ -2,7 +2,7 @@
 
 import { ChevronDown, ExternalLink } from "lucide-react";
 import { useId, useState } from "react";
-import { formatAge, formatLocation, formatSalary, sourceLine, sourceName } from "@/lib/format";
+import { formatAge, formatLiveness, formatLocation, formatPostedAge, formatSalary, sourceLine, sourceName } from "@/lib/format";
 import type { ScoredJob } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -13,6 +13,13 @@ import { Menu } from "@/lib/ui/Menu";
 import { Pill } from "@/lib/ui/Pill";
 import { ScoreRing } from "@/lib/ui/ScoreRing";
 import { SubScoreBar } from "@/lib/ui/SubScoreBar";
+
+/** Where a posting date came from, which is what decides whether to trust it to the day. */
+const POSTED_SOURCE: Record<ScoredJob["postedPrecision"], string> = {
+  exact: "the employer's own job board, so it's exact",
+  approximate: "a board or alert that said how long ago, so it's right to about a day",
+  unknown: "not stated by the source, so this counts as stale",
+};
 
 const SUBSCORES = [
   ["core", "Core stack"],
@@ -41,7 +48,12 @@ export function JobCard({
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const { fit } = job;
-  const meta = [job.company, formatLocation(job), formatSalary(job.salary), formatAge(job.postedAt)].join(" · ");
+  // MATCH-10: appended rather than replacing anything, and empty for a confirmed job — if every
+  // live card carried a liveness note, the one job WERA couldn't confirm would be invisible.
+  const liveness = formatLiveness(job);
+  const meta = [job.company, formatLocation(job), formatSalary(job.salary), formatPostedAge(job), liveness]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <Card className={cn("animate-fade-in p-5 sm:p-6", isNew && "ring-2 ring-mint-200")} aria-labelledby={`${detailsId}-title`}>
@@ -152,7 +164,8 @@ export function JobCard({
                     </li>
                   ))}
                   <li className="text-ink-2">
-                    Freshness {fit.freshness}/10, from the posting date. Scored by <span className="font-mono">{fit.model}</span>.
+                    Freshness {fit.freshness}/10, from the posting date — {POSTED_SOURCE[job.postedPrecision]}. Scored by{" "}
+                    <span className="font-mono">{fit.model}</span>.
                   </li>
                 </ul>
               </div>

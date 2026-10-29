@@ -76,6 +76,82 @@ jobs:
         run: uv run pytest -q
       - name: Committed JSON Schemas match the Pydantic models (SCH-03)
         run: uv run wera schemas --check
+      - name: Committed Postgres schema matches the models
+        run: uv run wera supabase --check
+      # The golden set on the demo responders: no network, no key, no cost. It cannot say
+      # whether a model agrees with anyone — only a live run does that, before a model swap —
+      # but it proves all twenty ads still load, score and validate through the real scoring
+      # path, and it keeps the report as an artefact to compare against.
+      - name: Golden eval (demo responders)
+        run: uv run wera eval --strict --out "$GITHUB_WORKSPACE/data/eval/ci.md"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-eval
+          path: data/eval
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # SQLite is WERA's default and is what every other job uses, because it needs nothing
+  # installed. Postgres is what a real install runs on (ARCHITECTURE §4), and one schema serves
+  # both (db/models.py). This job is what makes that claim true rather than hopeful: the
+  # migrations are applied to an empty Postgres database and the whole suite is re-run against
+  # it. pgvector's image is used because Phase 3's vector pre-filter will need the extension,
+  # and finding out then that the image doesn't work is worse than finding out now.
+  agent-postgres:
+    name: Agent on Postgres (migrations, tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          # A throwaway database on the runner's loopback, reachable by nothing else. `trust`
+          # keeps a password — even a worthless one — out of this file entirely (SEC-01).
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: wera_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres@127.0.0.1:5432/wera_test
+      # Switches the suite's per-test database from a temporary SQLite file to this one
+      # (tests/conftest.py).
+      WERA_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/wera_test
+    defaults:
+      run:
+        working-directory: services/agent
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      # The `postgres` extra carries the driver and the Postgres checkpointer, so this also
+      # proves that a Postgres install's gates have something to persist into (REL-03).
+      - run: uv sync --frozen --extra postgres
+      - name: pgvector extension is available
+        run: |
+          uv run python - <<'PY'
+          import os
+          from wera_agent.db.session import make_engine
+
+          engine = make_engine(os.environ["DATABASE_URL"])
+          with engine.begin() as conn:
+              conn.exec_driver_sql("CREATE EXTENSION IF NOT EXISTS vector")
+              version = conn.exec_driver_sql(
+                  "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
+              ).scalar()
+          print(f"pgvector {version}")
+          PY
+      - name: Migrations apply to an empty database
+        run: uv run wera migrate
+      - name: Migrations are idempotent
+        run: uv run wera migrate
+      - name: Tests, on Postgres
+        run: uv run pytest -q
 
   e2e:
     name: End-to-end journeys (demo mode)

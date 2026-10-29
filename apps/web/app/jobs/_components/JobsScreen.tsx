@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { api, ApiRequestError, type Decision } from "@/lib/api";
-import { formatDate } from "@/lib/format";
+import { formatDate, URGENCY_GROUPS } from "@/lib/format";
 import type { IntakeChannel, IntakeRun, ScoredJob, SearchProfile, ShortlistMeta } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -21,6 +21,8 @@ import { RunPanel, SearchDialog } from "./SearchRun";
 
 type Meta = ShortlistMeta;
 type Filter = "london" | "graduate" | "alerts" | "score8" | "remote";
+/** "urgency" groups rather than re-sorting; see the `groups` memo below. */
+type Sort = "score" | "date" | "urgency";
 
 const FILTERS: { id: Filter; label: string; test: (j: ScoredJob) => boolean }[] = [
   { id: "london", label: "London", test: (j) => j.location.city === "London" },
@@ -50,7 +52,7 @@ export function JobsScreen({
   const router = useRouter();
   const toast = useToast();
   const [filters, setFilters] = useState<Filter[]>([]);
-  const [sort, setSort] = useState<"score" | "date">("score");
+  const [sort, setSort] = useState<Sort>("score");
   const [removed, setRemoved] = useState<Set<string>>(new Set());
   const [busyId, setBusyId] = useState<string>();
   const [rejecting, setRejecting] = useState<ScoredJob>();
@@ -68,6 +70,12 @@ export function JobsScreen({
     const list = live.filter((j) => filters.every((f) => FILTERS.find((x) => x.id === f)!.test(j)));
     return sort === "date" ? [...list].sort((a, b) => (b.postedAt ?? "").localeCompare(a.postedAt ?? "")) : list;
   }, [live, filters, sort]);
+  // "By urgency" groups rather than re-sorts: inside a group the best match still comes first,
+  // because once you've decided what to look at today you still want the best of it at the top.
+  const groups = useMemo(() => {
+    if (sort !== "urgency") return null;
+    return URGENCY_GROUPS.map((group) => ({ ...group, jobs: visible.filter((j) => j.urgency === group.id) })).filter((g) => g.jobs.length);
+  }, [visible, sort]);
   const top = [...visible].sort((a, b) => b.fit.total - a.fit.total).slice(0, 3);
 
   const hide = (id: string) => setRemoved((s) => new Set(s).add(id));
@@ -189,26 +197,51 @@ export function JobsScreen({
         </div>
         <label className="flex items-center gap-2 text-small text-ink-2">
           Sort
-          <Select value={sort} onChange={(e) => setSort(e.target.value as "score" | "date")} className="min-w-36 text-[14px]">
+          <Select value={sort} onChange={(e) => setSort(e.target.value as Sort)} className="min-w-36 text-[14px]">
             <option value="score">Best match</option>
             <option value="date">Newest</option>
+            <option value="urgency">By urgency</option>
           </Select>
         </label>
       </div>
 
       <section aria-label="Shortlisted jobs" className="mt-4 flex flex-col gap-4">
-        {visible.map((job) => (
-          <JobCard
-            key={job.id}
-            job={job}
-            rank={rankOf.get(job.id) ?? 0}
-            isNew={meta.newJobIds.includes(job.id)}
-            busy={busyId === job.id}
-            onApprove={() => decide(job, { action: "approve" })}
-            onSnooze={(days) => decide(job, { action: "snooze", days })}
-            onReject={() => setRejecting(job)}
-          />
-        ))}
+        {groups
+          ? groups.map((group) => (
+              <section key={group.id} aria-labelledby={`group-${group.id}`} className="flex flex-col gap-4">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-line pb-2">
+                  <h2 id={`group-${group.id}`} className="text-h2">
+                    {group.label}
+                  </h2>
+                  <span className="text-small font-semibold text-forest-700">{group.jobs.length}</span>
+                  <span className="text-small text-ink-2">{group.hint}</span>
+                </div>
+                {group.jobs.map((job) => (
+                  <JobCard
+                    key={job.id}
+                    job={job}
+                    rank={rankOf.get(job.id) ?? 0}
+                    isNew={meta.newJobIds.includes(job.id)}
+                    busy={busyId === job.id}
+                    onApprove={() => decide(job, { action: "approve" })}
+                    onSnooze={(days) => decide(job, { action: "snooze", days })}
+                    onReject={() => setRejecting(job)}
+                  />
+                ))}
+              </section>
+            ))
+          : visible.map((job) => (
+              <JobCard
+                key={job.id}
+                job={job}
+                rank={rankOf.get(job.id) ?? 0}
+                isNew={meta.newJobIds.includes(job.id)}
+                busy={busyId === job.id}
+                onApprove={() => decide(job, { action: "approve" })}
+                onSnooze={(days) => decide(job, { action: "snooze", days })}
+                onReject={() => setRejecting(job)}
+              />
+            ))}
         {visible.length === 0 ? (
           <Card className="px-6 py-10 text-center">
             <p className="text-h2">{live.length ? "No jobs match these filters" : "You're all caught up"}</p>
@@ -246,21 +279,29 @@ export function JobsScreen({
         <p>
           {meta.snoozed} snoozed · {meta.rejected} rejected ·{" "}
           <button type="button" onClick={() => setShowHidden((s) => !s)} aria-expanded={showHidden} className="font-semibold text-forest-700 underline underline-offset-2">
-            {meta.hidden.length} hidden by your profile
+            {meta.hiddenTotal} hidden by your profile
           </button>
         </p>
+        {/* MATCH-05 caps scoring per day, so a big first run leaves jobs queued. They are not on
+            the list above and saying so is better than letting them go missing. */}
+        {meta.awaitingScore > 0 ? (
+          <p>
+            {meta.awaitingScore} more {meta.awaitingScore === 1 ? "job is" : "jobs are"} waiting to be scored — they&rsquo;ll appear once
+            the next run reaches them.
+          </p>
+        ) : null}
         {showHidden ? (
           <ul className="space-y-2">
             {meta.hidden.map((j) => (
               <li key={j.id} className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-line bg-white px-4 py-2.5">
-                <span className="flex items-center gap-3">
-                  <ScoreRing score={j.fit.total} size="sm" />
-                  <span>
-                    <span className="block font-semibold text-ink">
-                      {j.title} · {j.company}
-                    </span>
-                    <span>{j.hiddenReason}. Filtered before any model call.</span>
+                {/* No score ring: these were filtered before any model call (MATCH-01), so
+                    there is no fit to show. The ring used to render `fit.total` next to the
+                    words "Filtered before any model call", which was a score nothing produced. */}
+                <span>
+                  <span className="block font-semibold text-ink">
+                    {j.title} · {j.company}
                   </span>
+                  <span>{j.hiddenReason}. Filtered before any model call.</span>
                 </span>
                 <Button
                   variant="secondary"

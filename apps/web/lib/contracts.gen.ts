@@ -12,13 +12,16 @@ export type ApplicationStatus =
   | "rejected"
   | "discarded"
   | "withdrawn";
-export type DraftStep = "cv" | "letter" | "ats";
+export type DraftStep = "cv" | "letter" | "ats" | "answers";
 export type Channel = "board_search" | "email_alert" | "watchlist" | "manual";
 export type IntakeChannel = "board_search" | "email_alert" | "watchlist";
 export type YearMonth = string;
-export type Seniority = "intern" | "graduate" | "junior" | "entry" | "mid";
+export type Seniority = "intern" | "graduate" | "junior" | "entry" | "mid" | "senior" | "lead" | "principal";
 export type JobStatus = "new" | "shortlisted" | "in_application" | "snoozed" | "rejected" | "hidden" | "closed" | "archived";
+export type Liveness = "open" | "unverified" | "unreachable" | "gone";
+export type Urgency = "today" | "this_week" | "two_weeks" | "older" | "unknown";
 export type SkillLevel = "familiar" | "proficient" | "expert";
+export type PostedPrecision = "exact" | "approximate" | "unknown";
 export type Recency = "24h" | "7d" | "30d";
 export type SecretStatus = "set" | "missing" | "invalid";
 
@@ -118,6 +121,7 @@ export interface CoverLetter {
   wordCount: number;
 }
 export interface CompanyFact {
+  policyQuote: string;
   quote: string;
 }
 export interface ApplicationJob {
@@ -275,21 +279,25 @@ export interface InboxSettings {
   emailsThisWeek: number;
   folder: string;
   label: string;
-  lastCheckedAt: string;
+  lastCheckedAt: string | null;
   senders: string[];
 }
 export interface IntakeRun {
   channel: IntakeChannel;
+  creditsSaved: number;
   creditsUsed: number;
+  done: number;
   errors: RunError[];
   finishedAt?: string;
   id: string;
   newJobs: number;
+  phase: "searching" | "scoring" | "done";
   progress: number;
   queries: number;
   results: number;
   startedAt: string;
   status: "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
+  total: number;
 }
 export interface RunError {
   code: string;
@@ -298,6 +306,7 @@ export interface RunError {
 export interface Job {
   applyUrl?: string;
   ats?: Ats;
+  closedAt?: string;
   company: string;
   dedupeKey: string;
   descriptionMd: string | null;
@@ -306,10 +315,13 @@ export interface Job {
   hiddenReason?: string;
   id: string;
   language: string;
+  lastCheckedAt?: string;
+  lastConfirmedAt?: string;
   lastSeen: string;
   linkedinUrl?: string;
   location: Location;
   postedAt?: string;
+  postedPrecision: "exact" | "approximate" | "unknown";
   remote: ("remote" | "hybrid" | "onsite") | null;
   salary?: Salary;
   seniority?: Seniority;
@@ -336,6 +348,7 @@ export interface JobList {
 export interface ScoredJob {
   applyUrl?: string;
   ats?: Ats;
+  closedAt?: string;
   company: string;
   dedupeKey: string;
   descriptionMd: string | null;
@@ -345,10 +358,14 @@ export interface ScoredJob {
   hiddenReason?: string;
   id: string;
   language: string;
+  lastCheckedAt?: string;
+  lastConfirmedAt?: string;
   lastSeen: string;
   linkedinUrl?: string;
+  liveness: Liveness;
   location: Location;
   postedAt?: string;
+  postedPrecision: "exact" | "approximate" | "unknown";
   remote: ("remote" | "hybrid" | "onsite") | null;
   salary?: Salary;
   seniority?: Seniority;
@@ -356,6 +373,7 @@ export interface ScoredJob {
   sources: JobSource[];
   status: JobStatus;
   title: string;
+  urgency: Urgency;
 }
 export interface Language {
   level: string;
@@ -389,7 +407,7 @@ export interface Role {
   id: string;
   location?: string;
   org: string;
-  start: YearMonth;
+  start: YearMonth | "";
   title: string;
 }
 export interface Person {
@@ -433,6 +451,7 @@ export interface ScalarDiff {
 }
 export interface SearchProfile {
   channels: ProfileChannels;
+  countries: string[];
   exclude: string[];
   generatedFromCvVersion: number;
   locations: string[];
@@ -484,17 +503,27 @@ export interface SettingsResponse {
 }
 export interface ShortlistMeta {
   activeRunIds: string[];
+  awaitingScore: number;
   channels: ChannelSummary[];
   found: FoundCounts;
-  hidden: ScoredJob[];
+  hidden: Job[];
+  hiddenTotal: number;
   newJobIds: string[];
   rejected: number;
   snoozed: number;
 }
 export interface SiteOption {
+  countries: string[];
+  declined: boolean;
+  discoveredOn?: string;
   domain: string;
+  examples: string[];
+  matched?: string;
   name: string;
+  proposed: boolean;
+  region: string;
   reviewed: boolean;
+  robotsOk?: boolean;
 }
 export interface TestResult {
   code?: string;

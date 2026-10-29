@@ -44,6 +44,29 @@ test("J2: search, filter and approve from the shortlist", async ({ page }) => {
   await expect(cards(page)).toHaveCount(12);
 });
 
+test("Urgency grouping files jobs by how old the posting is, and hedges where the date is a guess", async ({ page }) => {
+  await page.goto("/jobs");
+  const region = page.getByRole("region", { name: "Shortlisted jobs" });
+  const cardCount = await region.getByRole("heading", { level: 3 }).count();
+
+  // Default: one flat list, no group headers.
+  await expect(region.getByRole("heading", { level: 2 })).toHaveCount(0);
+
+  await page.getByLabel("Sort").selectOption("urgency");
+  const groups = region.getByRole("heading", { level: 2 });
+  await expect(groups.first()).toHaveText("Today and yesterday");
+  // Grouping is a view, not a filter: every job is still on the page, just under a header.
+  await expect(region.getByRole("heading", { level: 3 })).toHaveCount(cardCount);
+  // An empty bucket gets no header — "Over two weeks old (0)" is noise, not information.
+  for (let i = 0; i < (await groups.count()); i++) {
+    await expect(groups.nth(i)).not.toHaveText("No date given");
+  }
+
+  // Only the employer's own feed gives a real timestamp; a board or alert says "3 days ago",
+  // and the card has to say so rather than quietly rounding it into a claim.
+  await expect(page.getByText(/about \d+ days ago/).first()).toBeVisible();
+});
+
 test("J3: review the drafted pack, approve it and track it", async ({ page }) => {
   await page.goto("/review");
   const row = page.getByRole("link", { name: "ML Engineer, Graduate" });

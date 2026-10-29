@@ -49,7 +49,7 @@ const PACK: Pack = {
       { text: "I would welcome the chance to talk about the agent evaluation work you mention.", sourceIds: ["exp-fm-03"] },
     ],
     signoff: "Kind regards,\nJordan Ellery",
-    companyFact: { quote: "ships guardrails as product" },
+    companyFact: { quote: "ships guardrails as product", policyQuote: "We are remote-first across the EU." },
     wordCount: 268,
     guard: clean,
   },

@@ -1,11 +1,12 @@
 import json
+import os
 from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
 
 from wera_agent import clock, tasks
-from wera_agent.db.session import reset_caches, transaction
+from wera_agent.db.session import make_engine, reset_caches, transaction
 from wera_agent.main import create_app
 from wera_agent.paths import FIXTURES_DIR
 from wera_agent.schemas.cv import MasterCV
@@ -14,12 +15,37 @@ from wera_agent.settings import Settings, get_settings
 
 TOKEN = "test-agent-token"
 
+# Set by the `agent-postgres` CI job to run this whole suite on Postgres instead of SQLite.
+# SQLite is the default everywhere else, because it needs nothing installed and a developer
+# shouldn't have to run a database to run the tests. One schema covers both (`db/models.py`),
+# and this is what proves it: the same 290-odd assertions against the other dialect.
+POSTGRES_URL = os.environ.get("WERA_TEST_DATABASE_URL")
+
+
+def _wipe_postgres(url: str) -> None:
+    """A clean database per test, the way a fresh SQLite file is.
+
+    Dropping the schema takes the Alembic version table and LangGraph's checkpoint tables with
+    it, which matches SQLite, where the checkpoints live in their own throwaway file.
+    """
+    engine = make_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE")
+            conn.exec_driver_sql("CREATE SCHEMA public")
+    finally:
+        engine.dispose()
+
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch) -> Iterator[None]:
     """A fresh demo database per test, no .env.local, no keys, no tracing, and a frozen clock."""
     monkeypatch.setitem(Settings.model_config, "env_file", None)
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wera-test.db'}")
+    if POSTGRES_URL:
+        _wipe_postgres(POSTGRES_URL)
+        monkeypatch.setenv("DATABASE_URL", POSTGRES_URL)
+    else:
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'wera-test.db'}")
     monkeypatch.setenv("WERA_DEMO_MODE", "true")
     # DEMO-02: tests never send telemetry, even on a machine with a Logfire token.
     monkeypatch.setenv("LOGFIRE_ENABLED", "false")
@@ -40,6 +66,23 @@ def isolated(tmp_path, monkeypatch) -> Iterator[None]:
 def client() -> Iterator[TestClient]:
     with TestClient(create_app(), headers={"Authorization": f"Bearer {TOKEN}"}) as c:
         yield c
+
+
+@pytest.fixture
+def migrated() -> None:
+    """The schema, and nothing else — no seed, no app, no scheduler.
+
+    For code that opens its own transactions. The `store` fixture holds one open for the whole
+    test, which on SQLite makes a second writer wait out `busy_timeout` and then fail; the crawl
+    cache (SRCH-10) is exactly that shape, since it commits per read and write so a crashed run
+    keeps what it already paid for.
+
+    `isolated` has already pointed `DATABASE_URL` at a fresh file and cleared the engine cache,
+    so applying the migrations is all that's left.
+    """
+    from wera_agent.migrate import upgrade
+
+    upgrade()
 
 
 class Api:

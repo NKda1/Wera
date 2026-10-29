@@ -40,8 +40,14 @@ def _route_only(_request: Request, attributes: dict[str, Any]) -> dict[str, Any]
     return kept
 
 
-def configure(app: FastAPI) -> None:
-    """Called once per process from `create_app`, after `logging.configure()`."""
+def configure(app: FastAPI | None = None) -> None:
+    """Set up tracing for this process, and instrument `app` if there is one.
+
+    `app` is None for the CLI. It used to be required, which meant `wera eval`, `wera discover`
+    and `wera serve`'s own startup produced no spans at all — the only commands that make model
+    calls, and the only ones nobody could trace. A CLI run is a process like any other; the
+    difference is that it has no routes to instrument, not that it has nothing to say.
+    """
     global _configured
     s = get_settings()
     if not _configured:
@@ -62,5 +68,5 @@ def configure(app: FastAPI) -> None:
             handler = logfire.LogfireLoggingHandler()
             handler.addFilter(RedactingFilter())
             logging.getLogger().addHandler(handler)
-    if s.logfire_enabled:
+    if s.logfire_enabled and app is not None:
         logfire.instrument_fastapi(app, request_attributes_mapper=_route_only)

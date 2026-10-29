@@ -9,8 +9,13 @@ from typing import Any
 
 from ..schemas.profile import SearchProfile
 
-# Fields the model proposes. `sites` and `channels` are the person's own settings, and
-# `generatedFromCvVersion`/`updatedAt` are bookkeeping, so none of them are diffed.
+# Fields the model proposes. `sites`, `countries` and `channels` are the person's own settings —
+# carried through unchanged by `generate_profile`, so there is nothing to diff — and
+# `generatedFromCvVersion`/`updatedAt` are bookkeeping.
+#
+# Anything carried through MUST be carried explicitly in `generate_profile`. A field that is
+# neither proposed nor carried is silently reset to its default and the diff cannot show it,
+# because a diff of two equal-by-default values is empty. That is how `countries` was lost.
 FIELDS = ("titles", "skills", "locations", "seniority", "exclude")
 SCALARS = ("remote", "recency")
 

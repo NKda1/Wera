@@ -160,6 +160,11 @@ export function RunPanel({ runIds, onFinished }: { runIds: string[]; onFinished:
               <span className="text-ink-2">{runStatus(r)}</span>
             </div>
             <ProgressBar value={r.progress} label={`${NAMES[r.channel]} progress`} />
+            {r.status === "running" && r.phase === "scoring" && r.total > 0 ? (
+              <p className="mt-1 text-small text-ink-2">
+                Scoring {r.done} of {r.total}
+              </p>
+            ) : null}
           </li>
         ))}
       </ul>
@@ -171,10 +176,23 @@ function runStatus(r: IntakeRun): string {
   if (r.status === "cancelled") return "Cancelled";
   if (r.status === "failed") return r.errors[0]?.message ?? "Failed";
   if (r.status === "running") {
-    if (r.channel === "board_search") return `${r.queries} / 20 queries`;
+    // Scoring is shared across the channels and is where nearly all of a run's time goes, so
+    // once it starts every channel reports it rather than leaving two of the three on a
+    // sentence that stopped being true minutes ago.
+    if (r.phase === "scoring") return r.total ? `Scoring ${r.done} / ${r.total}` : "Scoring…";
+    // The query total comes from the run, not a constant: it used to be a hardcoded 20, which
+    // was both frozen at "0 / 20" for the whole search (nothing wrote `queries` until the run
+    // ended) and wrong as soon as the query grid stopped being 4 titles × 5 locations.
+    if (r.channel === "board_search") return r.total ? `${r.done} / ${r.total} queries` : "Searching boards…";
     return r.channel === "email_alert" ? "Reading alert emails…" : "Checking feeds…";
   }
   const found = r.newJobs ? `${r.newJobs} new ${r.newJobs === 1 ? "job" : "jobs"}` : "nothing new";
-  if (r.channel === "board_search") return `Done · ${found} · ${r.creditsUsed} credits`;
+  if (r.channel === "board_search") {
+    // SRCH-10: what the crawl cache answered for free. Shown rather than netted off, because
+    // "0 credits" on its own reads as a run that never happened — the "saved" clause is what
+    // says the searches were answered, just not paid for again.
+    const saved = r.creditsSaved ? ` · ${r.creditsSaved} saved` : "";
+    return `Done · ${found} · ${r.creditsUsed} credits${saved}`;
+  }
   return `Done · ${found}`;
 }

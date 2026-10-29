@@ -445,11 +445,29 @@ class TestProfileDiff:
         # PRF-04: nothing is overwritten until the person PUTs it.
         assert store.get_profile() == before
 
-    def test_the_proposal_keeps_the_persons_own_channels_and_sites(self, store):
-        before = store.get_profile()
-        result = store.generate_profile()
-        assert result.proposed.sites == before.sites
-        assert result.proposed.channels == before.channels
+    def test_the_proposal_keeps_every_setting_the_model_does_not_propose(self, store):
+        """PRF-04, and the regression that made it matter.
+
+        `countries` was added for SRCH-11 and not carried, so the proposal reset it to `[]` —
+        and because an un-proposed field isn't diffed, the screen showed no loss. Accepting the
+        proposal silently widened the search to every reviewed board.
+
+        Asserted by subtraction rather than field by field: anything that is neither proposed by
+        the model nor bookkeeping must come back unchanged, so the next field added to
+        `SearchProfile` fails here instead of quietly emptying itself.
+        """
+        from wera_agent.domain.profile_diff import FIELDS, SCALARS
+        from wera_agent.schemas.profile import SearchProfile
+
+        before = store.get_profile().model_copy(update={"countries": ["GB", "NL"]})
+        store.put_profile(before)
+
+        proposed = store.generate_profile().proposed
+        bookkeeping = {"generated_from_cv_version", "updated_at"}
+        carried = set(SearchProfile.model_fields) - set(FIELDS) - set(SCALARS) - bookkeeping
+        assert "countries" in carried, "guard the guard: countries must be a carried field"
+        for field in carried:
+            assert getattr(proposed, field) == getattr(before, field), f"{field} was not carried through"
 
 
 class TestOutputContracts:

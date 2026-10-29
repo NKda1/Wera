@@ -93,6 +93,69 @@ class ProfileProposal(Model):
         return v
 
 
+# ---- cv.parse (CV-03) ----
+#
+# Turning an uploaded PDF or DOCX into a master CV. Two things are deliberately absent, and
+# both are absent for the same reason — a model must not be able to break the citation guard:
+#
+# * **No ids.** Every bullet id is assigned in code (`domain.cv_build`), because ids are the
+#   whole basis of §8.5: a tailored line is trusted because it cites one. A model that invented
+#   its own could repeat one, and two different lines sharing an id makes "this claim came from
+#   your CV" unverifiable. `put_cv` rejects duplicates, so a model inventing them would simply
+#   fail the save — assigning them here means it cannot arise.
+# * **No version.** That is the store's, incremented on save (CV-03).
+#
+# The text being parsed is a file somebody uploaded, so the prompt wraps it as untrusted data
+# (SEC-08). The worst a CV carrying "ignore your instructions" can do is produce something that
+# fails validation here, and the person reviews every field before anything is saved.
+
+
+class ParsedRole(Model):
+    """One job or project as the CV states it."""
+
+    title: Annotated[str, required("Every role needs a title")]
+    org: Annotated[str, required("Every role needs an employer or project name")]
+    location: Opt[str] = None
+    # Not `YearMonth`: a CV writes dates every way there is ("Sept 2024", "09/2024", "2024").
+    # The model is asked for YYYY-MM and `cv_build.year_month` repairs what comes back, because
+    # rejecting the whole CV over one badly written date would be a poor trade.
+    start: str
+    end: str  # YYYY-MM, or "present"
+    bullets: list[str]
+
+
+class ParsedEducation(Model):
+    degree: Annotated[str, required("Every entry needs a degree")]
+    institution: Annotated[str, required("Every entry needs an institution")]
+    start: Opt[str] = None
+    end: Opt[str] = None
+
+
+class ParsedLink(Model):
+    label: str
+    url: str
+
+
+class ParsedLanguage(Model):
+    name: str
+    level: str
+
+
+class ParsedCv(Model):
+    """A CV as read out of an uploaded file. Reviewed by the person before anything is saved."""
+
+    name: Annotated[str, required("The CV must have a name on it")]
+    headline: Opt[str] = None
+    location: str
+    links: list[ParsedLink]
+    summary: Opt[str] = None
+    experience: list[ParsedRole]
+    projects: list[ParsedRole]
+    education: list[ParsedEducation]
+    skills: Annotated[list[Term], count(0, 40, "", "At most 40 skills")]
+    languages: list[ParsedLanguage]
+
+
 # ---- match.verdict and fit.score ----
 
 
@@ -171,7 +234,12 @@ class LetterOutput(Model):
     greeting: Annotated[str, required("Add a greeting")]
     paragraphs: Annotated[list[Cites], count(3, 4, "Write 3 or 4 paragraphs", "Write 3 or 4 paragraphs")]
     signoff: Annotated[str, required("Add a sign-off")]
-    company_quote: str  # LTR-03: one fact quoted word for word from the post
+    company_quote: str  # LTR-02: one fact quoted word for word from the post
+    # LTR-06: a second verbatim fact, about how the company works — its remote or hybrid policy,
+    # learning budget, sponsorship, how it's structured. Empty when the post states none, which
+    # is common and is not a failure: an invented policy is far worse than a missing paragraph.
+    # Verified by exact substring against the post, exactly like `company_quote`.
+    policy_quote: str = ""
 
 
 class AnswerDraft(Model):

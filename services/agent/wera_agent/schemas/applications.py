@@ -18,7 +18,10 @@ type ApplicationStatus = Literal[
     "discarded",
     "withdrawn",
 ]
-type DraftStep = Literal["cv", "letter", "ats"]
+# The four steps `graphs/application.py` actually runs. `answers` was missing here while the
+# graph marked it anyway, and `Store._draft` maps an unrecognised step back to the first one — so
+# the progress indicator jumped from "ATS check" to "Tailoring CV" on the last step of every pack.
+type DraftStep = Literal["cv", "letter", "ats", "answers"]
 
 
 class Application(Model):

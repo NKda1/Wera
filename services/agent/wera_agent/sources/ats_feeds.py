@@ -17,6 +17,7 @@ outage can never mark someone's jobs closed by mistake.
 
 import html
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -198,6 +199,55 @@ def fetch_all(companies: list[Company]) -> FeedResult:
             result.errors.append(error)
             continue
         result.answered.add(f"{company.vendor}:{company.token}")
+        result.jobs.extend(jobs)
+    return result
+
+
+def board_company(board: str) -> Company | None:
+    """`"greenhouse:acme"` → a provisional `Company` good enough to fetch its feed.
+
+    The same trick `ats_discovery.confirm` uses: a feed fetch only needs a vendor and a token,
+    and the employer's real name is irrelevant to asking whether a job id is still listed.
+    """
+    vendor, _, token = board.partition(":")
+    if vendor not in URLS or not token:
+        return None
+    return Company(name=token, vendor=vendor, token=token)  # type: ignore[arg-type]
+
+
+def fetch_boards(boards: Iterable[str], *, limit: int) -> FeedResult:
+    """ATS-06: any board a stored job names, whether or not anybody is watching it.
+
+    ATS-03 could only ever close a job whose employer was in `companies.yaml`, because
+    `fetch_all` is handed the watchlist. A job resolved to an employer's own board through an
+    email alert or a manual import was therefore uncloseable — WERA had the one identity that
+    makes closure free and never used it.
+
+    **One fetch per board, not per job.** Deduping the `vendor:token` set before fetching is the
+    whole optimisation: thirty jobs at one employer is one request, which is what makes a daily
+    sweep over a few hundred jobs free rather than rude. `limit` bounds a database with hundreds
+    of distinct employers, so the ordering the caller passes in decides who gets checked.
+
+    A board that errors is simply absent from `answered`, so `closed_tokens` closes nothing for
+    it — fail-safe by construction, including for the vanity tokens `resolve.ats_from_url`
+    sometimes produces.
+    """
+    result = FeedResult()
+    seen: set[str] = set()
+    for board in boards:
+        if len(seen) >= limit:
+            break
+        if board in seen:
+            continue
+        seen.add(board)
+        company = board_company(board)
+        if company is None:
+            continue
+        jobs, error = fetch_company(company)
+        if error:
+            result.errors.append(error)
+            continue
+        result.answered.add(board)
         result.jobs.extend(jobs)
     return result
 

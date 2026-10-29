@@ -17,6 +17,7 @@ the result with the same schema, so the demo exercises the real contract.
 """
 
 import time
+from functools import cache
 from json import JSONDecodeError
 from typing import Any
 
@@ -25,6 +26,7 @@ import openai
 from langchain_core.exceptions import OutputParserException
 from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import Runnable
+from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -97,14 +99,24 @@ _REASONING: dict[Effort, dict[str, Any]] = {
 # §9.3's token budgets are for the answer, but a model's thinking is charged against the same
 # max_tokens. Without an allowance the thinking eats the whole budget and the reply comes back
 # empty or cut off mid-sentence — which reads as a broken model rather than a budget that was
-# too small. Kept modest: a provider reserves credit for the whole `max_tokens` whether or not
-# it uses it, so generous headroom makes calls fail on cost rather than on content.
-_HEADROOM: dict[Effort, int] = {"off": 0, "low": 600, "on": 1200}
+# too small.
+#
+# These were 600/1200 and measurably too small. `wera eval --packs` caught `cv.tailor` cut off
+# at 4,200 tokens and `letter.write` at 2,700 — both their ceiling plus the old `on` allowance —
+# so the thinking was consuming more than the answer it was meant to be preparing. Only tokens
+# actually generated are billed; a larger allowance costs nothing unless it is used, and what it
+# does raise is what the provider reserves against the balance for that one call.
+_HEADROOM: dict[Effort, int] = {"off": 0, "low": 1200, "on": 3000}
 
 # What a cut-off reply's second attempt gets. How long a model thinks varies per call, so the
 # retry buys room instead of carrying feedback. Only the tokens actually generated are billed,
 # so the larger ceiling costs nothing unless it is used — it only raises what the provider
 # reserves against the balance for that one call.
+#
+# It scales the *allowance* as well as the ceiling. It used to scale only the ceiling, which
+# made the retry useless in the one case it exists for: when it is the thinking that overran,
+# doubling the room for the answer changes nothing, and the second attempt overran at exactly
+# the same point as the first. That is how `cv.parse` failed twice at 4,600 and then 8,600.
 TRUNCATION_RETRY_FACTOR = 2
 
 
@@ -129,7 +141,7 @@ def _fail(code: str) -> ApiError:
     return ApiError(status, code, MESSAGES[code])
 
 
-def make_chat(model: str, *, base_url: str, max_tokens: int, reasoning: Effort) -> BaseChatModel:
+def make_chat(model: str, *, base_url: str, max_tokens: int, reasoning: Effort, headroom: int | None = None) -> BaseChatModel:
     """One configured model, through `ChatOpenAI` (ARCHITECTURE §3.3).
 
     OpenRouter speaks the OpenAI protocol, so one client covers it, any other OpenAI-compatible
@@ -158,7 +170,7 @@ def make_chat(model: str, *, base_url: str, max_tokens: int, reasoning: Effort) 
         model=model,
         base_url=env.llm_proxy_url or base_url,
         api_key=key,
-        max_tokens=max_tokens + _HEADROOM[reasoning],
+        max_tokens=max_tokens + (_HEADROOM[reasoning] if headroom is None else headroom),
         temperature=0,  # the same job should score the same way twice
         timeout=cfg.llm_timeout_seconds,
         max_retries=cfg.llm_max_retries,
@@ -169,13 +181,13 @@ def make_chat(model: str, *, base_url: str, max_tokens: int, reasoning: Effort) 
 
 
 def _chain[Out: BaseModel](
-    models: list[str], Output: type[Out], *, base_url: str, max_tokens: int, reasoning: Effort
+    models: list[str], Output: type[Out], *, base_url: str, max_tokens: int, reasoning: Effort, headroom: int | None = None
 ) -> Runnable:
     """The tier's model with the configured fallbacks behind it. Each one is asked for the same
     schema, so a fallback answer is as usable as the first."""
 
     def one(model: str) -> Runnable:
-        chat = make_chat(model, base_url=base_url, max_tokens=max_tokens, reasoning=reasoning)
+        chat = make_chat(model, base_url=base_url, max_tokens=max_tokens, reasoning=reasoning, headroom=headroom)
         # strict=True sends the schema to the provider; `include_raw` keeps the token counts and
         # turns a parse failure into a value we can retry on instead of an exception.
         return chat.with_structured_output(Output, method="json_schema", strict=True, include_raw=True)
@@ -213,6 +225,60 @@ def _usage_from(exc: BaseException) -> dict[str, Any] | None:
     if prompt is None and completion_tokens is None:
         return None
     return {"input_tokens": prompt or 0, "output_tokens": completion_tokens or 0}
+
+
+@cache
+def _metrics() -> tuple[Any, Any, Any, Any]:
+    """The four figures worth charting, created on first use.
+
+    Built lazily because this module is imported long before `logfire.configure()` runs, and a
+    metric bound to a provider that doesn't exist yet reports to nowhere for the life of the
+    process.
+    """
+    return (
+        logfire.metric_counter("wera.llm.calls", unit="1", description="Model calls, by task and outcome"),
+        logfire.metric_counter("wera.llm.cost_usd", unit="USD", description="Spend, by task and model"),
+        logfire.metric_histogram("wera.llm.latency_ms", unit="ms", description="Call latency, by task and tier"),
+        logfire.metric_counter("wera.llm.tokens", unit="1", description="Tokens, by task and direction"),
+    )
+
+
+def _publish(row: dict[str, Any]) -> None:
+    """Send one call's figures to the trace and to the metrics pipeline (PRIV-03: no text).
+
+    Both, deliberately. The span attributes are the reliable half — traces export cleanly and
+    can be read per run, which is the breakdown that was missing: Logfire showed the HTTP
+    request and nothing of the calls inside it, so the only way to ask "where did the time go"
+    was SQL against `llm_calls`. The metrics are the half that charts without a query, and they
+    had nothing to carry until now, which is part of why nobody noticed the exporter failing.
+    """
+    tags = {"task": row["task"], "tier": row["tier"], "model": row["model"], "ok": row["ok"]}
+    try:
+        calls, cost, latency, tokens = _metrics()
+        calls.add(1, {**tags, "code": row["code"] or ""})
+        cost.add(row["cost_usd"], tags)
+        latency.record(row["latency_ms"], tags)
+        tokens.add(row["input_tokens"], {**tags, "direction": "input"})
+        tokens.add(row["output_tokens"], {**tags, "direction": "output"})
+    except Exception:  # noqa: BLE001 — never let accounting break the work it is accounting for
+        logfire.debug("Could not publish metrics for {task}", task=row["task"])
+
+    span = trace.get_current_span()
+    if span.is_recording():
+        # The last attempt wins on the shared keys; `attempts` is what says there was more
+        # than one, and the per-attempt detail stays in `llm_calls`.
+        span.set_attributes(
+            {
+                "llm.model": row["model"],
+                "llm.attempts": row["attempt"],
+                "llm.ok": row["ok"],
+                "llm.input_tokens": row["input_tokens"],
+                "llm.output_tokens": row["output_tokens"],
+                "llm.latency_ms": row["latency_ms"],
+            }
+        )
+        if row["code"]:
+            span.set_attribute("llm.code", row["code"])
 
 
 def _record(
@@ -258,6 +324,7 @@ def _record(
         "attempt": attempt,
         "called_at": iso(now_ms()),
     }
+    _publish(row)
     session.add(LlmCallRow(**row))
     session.flush()
     if not ok:
@@ -340,11 +407,48 @@ def structured[Out: BaseModel](
     *,
     context: dict[str, Any] | None = None,
     demo_input: Any = None,
+    redact: bool = True,
+) -> Out:
+    """One §9.3 task, as one span.
+
+    The span is the point. `instrument_fastapi` traced the request and `instrument_openai` was
+    never added, so a run that took seven minutes appeared in Logfire as a single flat span with
+    nothing inside it — the per-task breakdown existed only in the `llm_calls` table, reachable
+    by SQL and nowhere near the trace that would have explained it.
+
+    Retries live inside this span rather than beside it: one task is one unit of work to the
+    caller, however many attempts it took, and `llm.attempts` says when it took more than one.
+    """
+    with logfire.span("llm {task}", task=task, tier=wera().task(task).tier) as span:
+        try:
+            return _structured(session, task, Output, variables, context=context, demo_input=demo_input, redact=redact)
+        except ApiError as exc:
+            # The code is already on the span from `_publish` for a call that reached a model;
+            # this also catches the ones that never did, like a refused budget (COST-01).
+            span.set_attribute("llm.code", exc.code)
+            raise
+
+
+def _structured[Out: BaseModel](
+    session: Session,
+    task: str,
+    Output: type[Out],
+    variables: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+    demo_input: Any = None,
+    redact: bool = True,
 ) -> Out:
     """Runs one §9.3 task and returns a validated object, or raises `ApiError` with a §9.4 code.
 
     `context` is the Pydantic validation context — pass `{"cv": cv}` so the CV-aware checks run.
     `demo_input` is for the demo responders only: the real path never reads it.
+
+    `redact=False` turns off the *stored-contact* masking for one call, and is only correct when
+    the caller has already removed contact details itself. `cv.parse` is the one such case: its
+    input is the document that replaces the stored contact, so masking the old values against it
+    both misses the new ones and corrupts unrelated text (see `pii.scrub_contacts`). It is not a
+    way to opt out of PRIV-01 — it is a way to satisfy it with the right instrument.
     """
     cfg = wera()
     spec = cfg.task(task)
@@ -359,7 +463,7 @@ def structured[Out: BaseModel](
         logfire.warn("Weekly LLM budget at {percent}%", percent=round(spend.fraction * 100), task=task)
 
     # PRIV-01. Demo mode redacts too, so the demo path exercises the same code.
-    redactor = _redactor(session, bool(saved.get("redactContact", True)))
+    redactor = _redactor(session, redact and bool(saved.get("redactContact", True)))
     prompt_vars: dict[str, Any] = {}
     mapping: dict[str, str] = {}
     for key, value in variables.items():
@@ -384,7 +488,8 @@ def structured[Out: BaseModel](
 
     models = [saved["models"][spec.tier], *cfg.fallbacks.get(spec.tier, [])]
     ceiling = spec.max_tokens
-    chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=spec.reasoning)
+    headroom = _HEADROOM[spec.reasoning]
+    chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=spec.reasoning, headroom=headroom)
     messages = template(task).format_messages(**prompt_vars)
     errors: str | None = None
 
@@ -395,7 +500,7 @@ def structured[Out: BaseModel](
         thing, and which one arrives depends on the provider and the structured-output method,
         so they share this.
         """
-        nonlocal ceiling, chain, errors
+        nonlocal ceiling, headroom, chain, errors
         _record(
             session,
             task=task,
@@ -408,11 +513,14 @@ def structured[Out: BaseModel](
             usage=usage,
             reported_cost=reported,
         )
-        logfire.warn("{task} was cut off at {tokens} tokens", task=task, tokens=ceiling + _HEADROOM[spec.reasoning])
+        logfire.warn("{task} was cut off at {tokens} tokens", task=task, tokens=ceiling + headroom)
         if attempt > 1:
             return False
+        # Both, not just the ceiling: a reply cut off because the *thinking* ran long is not
+        # helped by more room for the answer.
         ceiling *= TRUNCATION_RETRY_FACTOR
-        chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=spec.reasoning)
+        headroom *= TRUNCATION_RETRY_FACTOR
+        chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=spec.reasoning, headroom=headroom)
         errors = None  # nothing was wrong with the shape; the reply never got as far as a shape
         return True
 

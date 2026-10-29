@@ -44,6 +44,9 @@ ABBREVIATIONS = {
     "grad": "graduate",
 }
 
+# How much a posted date is worth, for deciding which of two sightings' dates to keep.
+_PRECISION = {"unknown": 0, "approximate": 1, "exact": 2}
+
 # Query and fragment are tracking, not identity: the same job arrives with different utm tags.
 TRACKING = re.compile(r"^(utm_|gh_|ref|source|src|lever-|ashby_)", re.I)
 
@@ -119,7 +122,15 @@ def merge_sources(into: Job, other: Job) -> Job:
     into.ats = into.ats or other.ats
     into.linkedin_url = into.linkedin_url or other.linkedin_url  # MAIL-07: stored, never fetched
     into.salary = into.salary or other.salary
-    into.posted_at = into.posted_at or other.posted_at
+    # Not "first one wins": the same job arrives from an alert email saying "3 days ago" and
+    # from the employer's own feed with a real timestamp, and which order they arrive in is an
+    # accident of scheduling. The better-evidenced date should win either way, or a job's
+    # position in the urgency groups depends on which channel happened to see it first.
+    #
+    # No `or into.posted_at is None` here: a job with no date always has precision `unknown`,
+    # which is the lowest rank, so "I have no date and they do" is already this comparison.
+    if _PRECISION[other.posted_precision] > _PRECISION[into.posted_precision]:
+        into.posted_at, into.posted_precision = other.posted_at, other.posted_precision
     return into
 
 

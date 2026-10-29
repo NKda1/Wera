@@ -18,6 +18,7 @@ from .api import (
     RunIn,
     ShortlistMeta,
     SiteOption,
+    SiteReviewIn,
     TestResult,
 )
 from .applications import Application, ApplicationListItem, ApplicationWithJob
@@ -72,5 +73,6 @@ REQUESTS = [
     RegenerateIn,
     CvImportIn,
     RunIn,
+    SiteReviewIn,
     SettingsPatch,
 ]

@@ -14,6 +14,7 @@ import type {
   SearchProfile,
   Settings,
   SettingsResponse,
+  SiteOption,
 } from "./types";
 
 export class ApiRequestError extends Error {
@@ -47,6 +48,24 @@ async function call<T>(path: string, init?: { method?: string; body?: unknown })
   return data as T;
 }
 
+/** A file upload. `fetch` sets the multipart boundary itself, so no content-type is set here. */
+async function upload<T>(path: string, file: File): Promise<T> {
+  const form = new FormData();
+  form.append("file", file);
+  let res: Response;
+  try {
+    res = await fetch(path, { method: "POST", body: form, cache: "no-store" });
+  } catch {
+    throw new ApiRequestError(0, "NETWORK", "Can't reach the WERA server. Is it still running?");
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = data?.error;
+    throw new ApiRequestError(res.status, err?.code ?? "HTTP_" + res.status, err?.message ?? "Couldn't read that file.", err?.fields);
+  }
+  return data as T;
+}
+
 export type { Estimate };
 export type Decision = { action: "approve" | "snooze" | "reject" | "unhide"; days?: 1 | 3 | 7; reason?: string; force?: boolean };
 
@@ -63,6 +82,13 @@ export const api = {
   /** PRF-04: a proposal and its diff. Nothing is saved until putProfile. */
   generateProfile: () => call<ProfileProposalResult>("/api/profile/generate", { method: "POST", body: {} }),
 
+  /**
+   * SRCH-04/12: decide about a board WERA proposed. Returns the whole list, so the screen
+   * re-renders from the server's view rather than guessing at the new state.
+   */
+  reviewSite: (domain: string, action: "approve" | "decline") =>
+    call<SiteOption[]>(`/api/sites/${encodeURIComponent(domain)}/review`, { method: "POST", body: { action } }),
+
   listApplications: () => call<{ items: (ApplicationWithJob & { coverage?: number })[] }>("/api/applications"),
   getApplication: (id: string) => call<ApplicationWithJob>(`/api/applications/${id}`),
   patchApplication: (id: string, patch: { status?: ApplicationStatus; notes?: string; followUpAt?: string | null }) =>
@@ -76,6 +102,10 @@ export const api = {
   putCv: (cv: MasterCV) => call<{ version: number }>("/api/cv", { method: "PUT", body: cv }),
   putContact: (c: Contact) => call<Contact>("/api/cv/contact", { method: "PUT", body: c }),
   importCv: (yaml: string) => call<MasterCV>("/api/cv/import", { method: "POST", body: { yaml } }),
+  /** CV-03: a PDF, DOCX or YAML file. Returns a proposal; nothing is saved until putCv. */
+  uploadCv: (file: File) => upload<MasterCV>("/api/cv/upload", file),
+  /** CV text pasted in rather than uploaded — the way out when a PDF is a scan. */
+  parseCv: (text: string) => call<MasterCV>("/api/cv/parse", { method: "POST", body: { text } }),
 
   putSettings: (patch: Partial<Omit<Settings, "inbox">> & { inbox?: { senders: string[] } }) =>
     call<SettingsResponse>("/api/settings", { method: "PUT", body: patch }),

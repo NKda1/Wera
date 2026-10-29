@@ -76,8 +76,13 @@ class TestGate1:
     def test_filters_like_the_jobs_screen(self, api):
         assert len(api.ok("GET", "/jobs?minScore=8")["items"]) == 2
         assert all(j["remote"] == "remote" for j in api.ok("GET", "/jobs?remote=remote")["items"])
-        hidden = api.ok("GET", "/jobs?status=hidden")["items"]
+        # Hidden jobs come from the meta endpoint, which is where the screen reads them: they
+        # were filtered before any model call (MATCH-01), so they carry a reason and no score
+        # and cannot appear in a list ranked by one.
+        hidden = api.ok("GET", "/jobs/meta")["hidden"]
         assert {j["hiddenReason"] for j in hidden} >= {"Title contains an excluded term: Senior"}
+        assert all("fit" not in j for j in hidden)
+        assert api.code("GET", "/jobs?status=hidden") == "VALIDATION"
 
 
 class TestIntake:
@@ -105,10 +110,20 @@ class TestIntake:
         assert len(api.ok("GET", "/jobs")["items"]) == 14
         again = api.ok("POST", "/intake/run", {"channels": ["board_search"]})["runIds"]
         clock.advance(7000)
-        assert api.ok("GET", f"/intake/runs/{again[0]}")["newJobs"] == 0
+        repeat = api.ok("GET", f"/intake/runs/{again[0]}")
+        assert repeat["newJobs"] == 0
+        # SRCH-05 saves the scrapes and SRCH-10 saves the searches, so a repeat run inside the
+        # window is free. The demo is where most people will ever see that, so it shows it: the
+        # 40 credits this used to spend are reported as saved rather than spent.
+        assert (repeat["creditsUsed"], repeat["creditsSaved"]) == (0, 40)
+        # The first run paid full price, and says so.
+        assert board["creditsUsed"] > 0 and board["creditsSaved"] == 0
 
     def test_estimate_and_cancel(self, api):
-        assert api.ok("GET", "/intake/estimate?channels=board_search")["queries"] == 20
+        # SRCH-11: the grid is title × board, so the demo profile's 4 titles across its 4
+        # enabled boards is 16 — and the dialog counts it with the same function the run uses
+        # (COST-05), rather than re-deriving it from titles × locations and drifting.
+        assert api.ok("GET", "/intake/estimate?channels=board_search")["queries"] == 16
         run = api.ok("POST", "/intake/run", {"channels": ["watchlist"]})["runIds"][0]
         assert api.ok("POST", f"/intake/runs/{run}/cancel")["status"] == "cancelled"
 
@@ -194,3 +209,116 @@ def test_data_survives_a_restart(api):
         assert "job-kestrel-jaie" not in [j["id"] for j in jobs]
         para = again.get(f"/applications/{app['id']}").json()["pack"]["letter"]["paragraphs"][0]
         assert (para["text"], para["editedByUser"]) == ("My own opening.", True)
+
+
+class TestJobsWithNoFitReport:
+    """What the Jobs screen does with a job that has never been scored.
+
+    Not every stored job has a fit report, and two of the reasons are by design: a job hidden
+    by the profile filters was filtered before any model call (MATCH-01) and will never have
+    one, and a job past the day's scoring cap (MATCH-05) does not have one yet. A first real
+    run left 3,223 hidden and 22 unscored jobs, and the shortlist answered 500 for all of them,
+    because every read path assumed the row was there.
+    """
+
+    def unscored_job(self, store) -> str:
+        """Strips the fit report off a real job, leaving it `new` — a job past the day's cap."""
+        from wera_agent.db.models import FitReportRow
+
+        job_id = store.list_jobs("new")[0].id
+        store.s.delete(store.s.get(FitReportRow, job_id))
+        store.s.flush()
+        return job_id
+
+    def test_the_shortlist_skips_it_rather_than_failing(self, store):
+        job_id = self.unscored_job(store)
+        assert job_id not in [j.id for j in store.list_jobs("new")]
+
+    def test_it_is_counted_so_it_does_not_just_vanish(self, store):
+        before = store.awaiting_score()
+        self.unscored_job(store)
+        assert store.awaiting_score() == before + 1
+
+    def test_the_meta_endpoint_still_builds(self, store):
+        self.unscored_job(store)
+        meta = store.shortlist_meta()
+        assert meta.awaiting_score >= 1
+        assert meta.hidden_total >= 1
+
+    def test_asking_for_it_directly_says_why_rather_than_500ing(self, store):
+        from wera_agent.errors import ApiError
+
+        job_id = self.unscored_job(store)
+        try:
+            store.get_job(job_id)
+        except ApiError as exc:
+            assert exc.code == "NOT_SCORED"
+            assert exc.status == 409
+        else:
+            raise AssertionError("an unscored job should not come back as though it were scored")
+
+    def test_a_hidden_job_carries_a_reason_and_no_score(self, store):
+        """The demo fixture used to attach fit evidence to hidden jobs, which is the one thing
+        a real run can never produce — so this passed everywhere except in production."""
+        from wera_agent.db.models import FitReportRow
+
+        hidden = store.list_unscored("hidden", limit=50)
+        assert hidden, "the demo seed should still contain hidden jobs"
+        assert all(j.hidden_reason for j in hidden)
+        assert all(store.s.get(FitReportRow, j.id) is None for j in hidden)
+
+    def test_the_hidden_sample_is_capped(self, store):
+        assert len(store.list_unscored("hidden", limit=2)) <= 2
+
+
+class TestAPartiallyDraftedPack:
+    """A pack with some of its documents missing (REL, G2-02).
+
+    The graph writes one document per step, so a draft that fails partway leaves the steps it
+    finished behind and is parked as `changes_requested` with the reason. A dev-server restart
+    mid-draft leaves the same thing. A real run did exactly this — `cv.tailor` returned the
+    wrong shape twice after the ATS step sent it back for another pass — and the Review screen
+    answered 500 for *every* application because `_load_pack` indexed a key that wasn't there.
+    """
+
+    def drop(self, store, app_id: str, kind: str) -> None:
+        from sqlalchemy import select
+
+        from wera_agent.db.models import DocumentRow
+
+        for row in store.s.scalars(select(DocumentRow).where(DocumentRow.application_id == app_id, DocumentRow.kind == kind)):
+            store.s.delete(row)
+        store.s.flush()
+
+    def ready(self, store) -> str:
+        return next(a.id for a in store.list_applications() if a.status == "ready_for_review")
+
+    def test_a_missing_answers_document_is_an_empty_list_not_a_crash(self, store):
+        """A job with no application questions has no answers to draft, and a draft that failed
+        before the answers step has none either. Neither is a reason to hide a built pack."""
+        app_id = self.ready(store)
+        self.drop(store, app_id, "answers")
+        pack = store._load_pack(app_id)
+        assert pack is not None
+        assert pack.answers == []
+        assert pack.letter.paragraphs
+
+    def test_the_review_list_survives_a_partial_pack(self, store):
+        app_id = self.ready(store)
+        self.drop(store, app_id, "answers")
+        assert any(a.id == app_id for a in store.list_applications())
+
+    def test_a_pack_missing_its_cv_is_no_pack_at_all(self, store):
+        """Unlike answers, the CV is what a pack *is*. Better to say the draft didn't finish
+        than to show a pack with nothing in it."""
+        app_id = self.ready(store)
+        self.drop(store, app_id, "cv")
+        assert store._load_pack(app_id) is None
+        assert any(a.id == app_id for a in store.list_applications())
+
+    def test_an_application_with_no_documents_at_all_still_lists(self, store):
+        app_id = self.ready(store)
+        for kind in ("cv", "letter", "ats", "answers"):
+            self.drop(store, app_id, kind)
+        assert store._load_pack(app_id) is None
+        assert next(a.id for a in store.list_applications() if a.id == app_id) == app_id

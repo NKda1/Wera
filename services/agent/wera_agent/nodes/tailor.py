@@ -11,9 +11,11 @@ input here that an employer — or someone posting as one — controls.
 import logfire
 from sqlalchemy.orm import Session
 
+from ..config import wera
 from ..llm.demo import PackInput, words
 from ..llm.gateway import structured
 from ..llm.prompts import cv_text, untrusted
+from ..schemas.cv import MasterCV
 from ..schemas.llm_outputs import LetterOutput, TailorOutput
 from ..schemas.pack import Cited, CompanyFact, CoverLetter, CvItem, CvSection, TailoredCV
 from .guard import guard_and_repair
@@ -102,7 +104,16 @@ def _guard_cv(session: Session, doc: TailoredCV, inp: PackInput) -> TailoredCV:
     result, decisions = guard_and_repair(session, cv_locations(doc), inp.cv, [k.term for k in inp.evidence.keywords])
     if decisions:
         if "summary" in decisions:
-            doc.summary = decisions["summary"] or Cited(text="", source_ids=[])
+            # TAIL-07: the professional profile is not an optional line. Dropping it is the right
+            # answer for a bullet — a shorter CV beats an unsupported claim — but a CV with no
+            # profile at the top reads as unfinished, and a summary is the line most likely to
+            # fail a strict citation check in the first place, because summarising *is*
+            # paraphrasing across the whole document.
+            #
+            # So a rejected summary falls back to the applicant's own master summary rather than
+            # to nothing. That text is theirs, already in the CV, and cites itself — it cannot
+            # fail the guard, and it cannot claim anything they haven't already written down.
+            doc.summary = decisions["summary"] or master_summary(inp.cv)
         for si, section in enumerate(doc.sections):
             for ii, item in enumerate(section.items):
                 kept: list[Cited] = []
@@ -120,7 +131,22 @@ def _guard_cv(session: Session, doc: TailoredCV, inp: PackInput) -> TailoredCV:
         for section in doc.sections:
             section.items = [i for i in section.items if i.bullets]
     doc.guard = result
+    # Also covers the model simply not writing one. A tailored CV always carries a profile when
+    # the master has one to carry.
+    if not doc.summary.text.strip():
+        doc.summary = master_summary(inp.cv)
     return doc
+
+
+def master_summary(cv: MasterCV) -> Cited:
+    """The applicant's own professional profile, citing itself.
+
+    Empty only when the master CV genuinely has no summary — then there is nothing honest to
+    fall back to, and an absent profile is the truthful outcome rather than an invented one.
+    """
+    if cv.summary and cv.summary.text.strip():
+        return Cited(text=cv.summary.text, source_ids=[cv.summary.id])
+    return Cited(text="", source_ids=[])
 
 
 def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
@@ -146,24 +172,94 @@ def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
                 "cv": cv_text(cv),
                 "job": job_block(inp),
                 "tailored": tailored or "(no lines selected)",
+                "wants": _what_they_want(inp),
                 "note": _letter_note(inp.note, feedback),
             },
             context={"cv": cv},
             demo_input=inp,
         )
         candidate = _guard_letter(session, out, inp)
-        if len(candidate.paragraphs) >= MIN_PARAGRAPHS:
+        filler = banned_phrases(candidate)
+        if len(candidate.paragraphs) >= MIN_PARAGRAPHS and not filler:
             return candidate
-        if best is None or len(candidate.paragraphs) > len(best.paragraphs):
+        if best is None or _better(candidate, best):
             best = candidate
-        feedback = _dropped_feedback(candidate)
+        # One reason at a time would waste an attempt: a letter can be both too short and full of
+        # filler, and there are only two attempts.
+        feedback = " ".join(
+            p
+            for p in (
+                _dropped_feedback(candidate) if len(candidate.paragraphs) < MIN_PARAGRAPHS else None,
+                _filler_feedback(filler) if filler else None,
+            )
+            if p
+        )
         logfire.info(
-            "Letter for {job_id} came back with {kept} paragraph(s); asking again",
+            "Letter for {job_id} came back with {kept} paragraph(s) and {filler} filler phrase(s); asking again",
             job_id=inp.job.id,
             kept=len(candidate.paragraphs),
+            filler=len(filler),
         )
 
     return best  # type: ignore[return-value] — the loop always runs at least once
+
+
+def _better(candidate: CoverLetter, best: CoverLetter) -> bool:
+    """Which of two imperfect letters to keep.
+
+    Length first: a letter missing a paragraph is missing an argument, and no amount of good
+    phrasing replaces it. Filler only decides between letters of the same length.
+    """
+    if len(candidate.paragraphs) != len(best.paragraphs):
+        return len(candidate.paragraphs) > len(best.paragraphs)
+    return len(banned_phrases(candidate)) < len(banned_phrases(best))
+
+
+def banned_phrases(letter: CoverLetter) -> list[str]:
+    """LTR-04: the configured filler phrases this letter actually contains.
+
+    Checked after the guard rather than before, because the guard rewrites paragraphs and a
+    repair can introduce exactly the sort of hedging flannel this is looking for.
+    """
+    phrases = [p.strip() for p in wera().letter_banned_phrases if p.strip()]
+    if not phrases:
+        return []
+    text = " ".join([letter.greeting, *(p.text for p in letter.paragraphs), letter.signoff]).lower()
+    return [p for p in phrases if p.lower() in text]
+
+
+def _filler_feedback(hits: list[str]) -> str:
+    """Quote the phrases back. "Be less formal" is not actionable; "lose these words" is."""
+    listed = "; ".join(f'"{h}"' for h in hits[:6])
+    return (
+        f"Your last letter used {len(hits)} phrase(s) that make it read like a template: {listed}. "
+        "Write it again without them — say the specific thing those phrases were standing in for, "
+        "or cut the sentence."
+    )
+
+
+def _what_they_want(inp: PackInput) -> str:
+    """What the applicant is looking for, so the company paragraph has something true to connect to.
+
+    The letter has to say why *this* company suits *this* person, and the honest material for the
+    second half of that is the person's own stated preferences — not a guess at their values.
+    Without this the model has only the CV, which says what they have done and nothing about what
+    they want next.
+    """
+    profile = inp.profile
+    if profile is None:
+        return "not stated"
+    remote = {
+        "any": "open to remote, hybrid or on-site",
+        "remote_only": "remote only",
+        "no_remote": "on-site or hybrid, not remote",
+    }
+    parts = [
+        f"Working arrangement: {remote.get(profile.remote, profile.remote)}",
+        f"Levels: {', '.join(profile.seniority)}" if profile.seniority else "",
+        f"Places: {', '.join([*profile.locations, *profile.countries])}" if (profile.locations or profile.countries) else "",
+    ]
+    return "\n".join(p for p in parts if p) or "not stated"
 
 
 def _letter_note(note: str | None, feedback: str | None) -> str:
@@ -185,13 +281,17 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
     """One model reply, guarded and assembled."""
     cv = inp.cv
     paragraphs = [_cited(p) for p in out.paragraphs]
-    # LTR-03: only a quote that really is in the post counts as one.
-    quote = out.company_quote if out.company_quote and out.company_quote in (inp.job.description_md or "") else ""
+    # LTR-02/06: only a quote that really is in the post counts as one. Both are checked the same
+    # way, because the company half of a letter is where a model is most tempted to invent — it
+    # has no CV to be held to there, so the post is the only thing that can hold it.
+    post = inp.job.description_md or ""
+    quote = out.company_quote if out.company_quote and out.company_quote in post else ""
+    policy = out.policy_quote if out.policy_quote and out.policy_quote in post else ""
     # The guard checks what the letter claims about the applicant. Words quoted from the post —
     # the company fact, the role, the company name — are the employer's, not a claim about the
     # applicant, so they are taken out before checking. Otherwise a number inside a quoted
     # sentence reads as an uncited figure and a good paragraph gets dropped.
-    quoted = [quote, inp.evidence.job_quote, inp.job.title, inp.job.company]
+    quoted = [quote, policy, inp.evidence.job_quote, inp.job.title, inp.job.company]
     result, decisions = guard_and_repair(
         session,
         [(f"p{i}", Cited(text=_without(p.text, quoted), source_ids=p.source_ids)) for i, p in enumerate(paragraphs)],
@@ -207,7 +307,7 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
         greeting=out.greeting,
         paragraphs=paragraphs,
         signoff=out.signoff,
-        company_fact=CompanyFact(quote=quote),
+        company_fact=CompanyFact(quote=quote, policy_quote=policy),
         word_count=words(text),
         guard=result,
     )

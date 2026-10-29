@@ -17,7 +17,7 @@ from typing import Any
 from ..clock import iso, parse_ms
 from ..domain import dedupe
 from ..domain.text import is_linkedin_url
-from ..schemas.jobs import Ats, Job, JobSource, Location, Salary
+from ..schemas.jobs import Ats, Job, JobSource, Location, PostedPrecision, Salary
 from ..sources.ats_feeds import FeedJob
 
 # Enough to tell a European job ad from an English one without a language model.
@@ -125,26 +125,40 @@ def parse_posted(raw: str | None, now: int) -> str | None:
     job's freshness raises and takes the whole run with it — so anything that isn't a date WERA
     can read becomes no date at all, which the scoring already handles.
     """
+    return dated(raw, now)[0]
+
+
+def dated(raw: str | None, now: int) -> tuple[str | None, PostedPrecision]:
+    """The date, and how much it is worth.
+
+    A relative phrase resolved against "now" produces an ISO timestamp indistinguishable from a
+    real one, so the distinction has to be carried out of here or it is lost for good. It
+    matters most where the number is used to *group* rather than to weight: "2 days ago" read
+    on a page cached yesterday can land a job in the wrong bucket, and a header that says
+    "Posted today" should mean it.
+    """
     if not raw:
-        return None
+        return None, "unknown"
     text = raw.strip()
     try:
         parse_ms(text)
     except (ValueError, TypeError):
         pass
     else:
-        return text
+        # A real timestamp in the source. Whether it is *authoritative* depends on who said it,
+        # which is the caller's business — `from_feed` upgrades this to `exact`.
+        return text, "approximate"
 
     found = _RELATIVE.search(text)
     if found:
         unit = _RELATIVE_UNITS[found.group(2).lower()]
-        return iso(now - int(found.group(1)) * unit)
+        return iso(now - int(found.group(1)) * unit), "approximate"
     lowered = text.lower()
     if any(word == lowered or lowered.startswith(word) for word in _TODAY):
-        return iso(now)
+        return iso(now), "approximate"
     if "yesterday" in lowered:
-        return iso(now - _RELATIVE_UNITS["day"])
-    return None
+        return iso(now - _RELATIVE_UNITS["day"]), "approximate"
+    return None, "unknown"
 
 
 def infer_seniority(title: str, description: str | None = None) -> str | None:
@@ -189,8 +203,12 @@ def _job(
     posted_at: str | None,
     now: int,
     linkedin_url: str | None = None,
+    posted_precision: PostedPrecision | None = None,
 ) -> Job:
     key = dedupe.dedupe_key(ats=ats, apply_url=apply_url, company=company, title=title, city=location.city)
+    # Every builder funnels through here, so every posted date is one WERA can read — and every
+    # one carries where it came from. A caller that knows better (`from_feed`) says so.
+    when, precision = dated(posted_at, now)
     return Job(
         id=job_id(key),
         dedupe_key=key,
@@ -206,8 +224,8 @@ def _job(
         linkedin_url=linkedin_url,
         sources=[source],
         language=detect_language(description),
-        # Every builder funnels through here, so every posted date is one WERA can read.
-        posted_at=parse_posted(posted_at, now),
+        posted_at=when,
+        posted_precision="unknown" if when is None else (posted_precision or precision),
         first_seen=iso(now),
         last_seen=iso(now),
         status="new",
@@ -228,6 +246,9 @@ def from_feed(feed: FeedJob, now: int) -> Job:
         ats=feed.ats,
         source=JobSource(channel="watchlist", detail=feed.ats.board_token, seen_at=iso(now)),
         posted_at=feed.posted_at,
+        # ATS-01: the employer's own feed, giving its own timestamp. This is the only channel
+        # whose date is worth grouping on without a caveat.
+        posted_precision="exact",
         now=now,
     )
 

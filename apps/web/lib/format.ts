@@ -1,4 +1,4 @@
-import type { Channel, Job, Role } from "./types";
+import type { Channel, Job, Role, ScoredJob } from "./types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -22,7 +22,55 @@ export function formatAge(iso: string | undefined, now: Date = new Date()): stri
   return weeks === 1 ? "1 week ago" : `${weeks} weeks ago`;
 }
 
-export function formatAgo(iso: string | undefined, now: Date = new Date()): string {
+/**
+ * The age, hedged when the date was a hedge.
+ *
+ * Only an employer's own ATS feed gives a real timestamp. A board or an alert email says
+ * "3 days ago", which `normalise.parse_posted` turns into an ISO string indistinguishable
+ * from a real one — so the hedge has to be carried through from `postedPrecision` or the
+ * screen quietly overstates what WERA knows.
+ */
+export function formatPostedAge(job: Pick<Job, "postedAt" | "postedPrecision">, now: Date = new Date()): string {
+  const age = formatAge(job.postedAt, now);
+  if (!job.postedAt || job.postedPrecision !== "approximate") return age;
+  return age === "today" ? "posted today (approx.)" : `about ${age}`;
+}
+
+/**
+ * MATCH-10: what WERA knows about whether this posting is still open.
+ *
+ * Returns empty for `open` — a confirmed job needs no annotation, and labelling every live job
+ * would make the one unconfirmed job invisible. `unverified` is deliberately distinct from
+ * `unreachable`: WERA never asked versus WERA asked and couldn't tell, and claiming to have
+ * checked a job it never looked at would be a small lie told on every card.
+ */
+export function formatLiveness(
+  job: Pick<ScoredJob, "liveness" | "lastConfirmedAt" | "closedAt">,
+  now: Date = new Date(),
+): string {
+  if (job.liveness === "gone") {
+    const when = formatAge(job.closedAt, now);
+    return when === "date unknown" ? "no longer listed" : `no longer listed · closed ${when}`;
+  }
+  if (job.liveness === "unreachable") {
+    const when = formatAge(job.lastConfirmedAt, now);
+    return when === "date unknown" ? "couldn't confirm this is still open" : `last confirmed open ${when}`;
+  }
+  return "";
+}
+
+/** The urgency groups, in the order the Jobs screen shows them. Mirrors `domain.scoring.URGENCY`. */
+export const URGENCY_GROUPS = [
+  { id: "today", label: "Today and yesterday", hint: "Apply to these first — a graduate posting can close inside a week." },
+  { id: "this_week", label: "This week", hint: "Posted in the last 7 days." },
+  { id: "two_weeks", label: "Last two weeks", hint: "Still open, but the pile of applicants is deeper." },
+  { id: "older", label: "Over two weeks old", hint: "Worth checking the posting is still live before you spend time on it." },
+  // Deliberately its own group rather than folded into "older": filing a job under "over two
+  // weeks old" claims WERA knows when it was posted, and for these it doesn't.
+  { id: "unknown", label: "No date given", hint: "The source didn't say when this was posted, so it could be either." },
+] as const;
+
+export function formatAgo(iso: string | null | undefined, now: Date = new Date()): string {
   if (!iso) return "never";
   const mins = Math.round((now.getTime() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return "just now";

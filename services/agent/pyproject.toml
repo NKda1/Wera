@@ -29,7 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-postgres = ["psycopg[binary]==3.3.6"]
+# What a Postgres install needs on top of the defaults: the driver, and the checkpointer
+# `graphs/checkpointer.py` imports when DATABASE_URL isn't SQLite. Without the second one a
+# Postgres install starts, migrates, and then fails at the first gate — the one thing the whole
+# checkpointer exists to survive (REL-03).
+postgres = ["psycopg[binary]==3.3.6", "langgraph-checkpoint-postgres==3.2.0"]
 
 [project.scripts]
 wera = "wera_agent.cli:main"

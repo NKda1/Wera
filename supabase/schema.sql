@@ -19,6 +19,17 @@ CREATE TABLE IF NOT EXISTS contact (
 	PRIMARY KEY (id)
 );
 
+CREATE TABLE IF NOT EXISTS crawl_cache (
+	key VARCHAR(80) NOT NULL,
+	kind VARCHAR(16) NOT NULL,
+	payload JSONB NOT NULL,
+	stored_at VARCHAR(32) NOT NULL,
+	expires_at VARCHAR(32) NOT NULL,
+	PRIMARY KEY (key)
+);
+CREATE INDEX IF NOT EXISTS ix_crawl_cache_expires_at ON crawl_cache (expires_at);
+CREATE INDEX IF NOT EXISTS ix_crawl_cache_kind ON crawl_cache (kind);
+
 CREATE TABLE IF NOT EXISTS decisions (
 	id SERIAL NOT NULL,
 	job_id VARCHAR(64) NOT NULL,
@@ -37,10 +48,14 @@ CREATE TABLE IF NOT EXISTS intake_runs (
 	started_at VARCHAR(32) NOT NULL,
 	finished_at VARCHAR(32),
 	progress FLOAT NOT NULL,
+	phase VARCHAR(16) NOT NULL,
+	done INTEGER NOT NULL,
+	total INTEGER NOT NULL,
 	queries INTEGER NOT NULL,
 	results INTEGER NOT NULL,
 	new_jobs INTEGER NOT NULL,
 	credits_used INTEGER NOT NULL,
+	credits_saved INTEGER NOT NULL,
 	errors JSONB NOT NULL,
 	duration_ms INTEGER NOT NULL,
 	settled BOOLEAN NOT NULL,
@@ -181,6 +196,7 @@ create index if not exists job_embeddings_vector
 -- (ARCHITECTURE §5, phase 3), add `user_id uuid references auth.users` to each table and a
 -- policy per table -- do not relax this in the meantime.
 alter table contact enable row level security;
+alter table crawl_cache enable row level security;
 alter table decisions enable row level security;
 alter table intake_runs enable row level security;
 alter table jobs enable row level security;

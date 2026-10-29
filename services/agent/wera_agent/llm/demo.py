@@ -27,6 +27,8 @@ from ..schemas.pack import (
     Pack,
     TailoredCV,
 )
+from ..schemas.profile import SearchProfile
+from .prompts import CLOSE, OPEN
 
 
 @dataclass
@@ -39,6 +41,10 @@ class PackInput:
     note: str | None = None
     # The tailored CV, once a node has one: the letter and the answers are written against it.
     doc: TailoredCV | None = None
+    # LTR-06: what the applicant is looking for. The letter has to say why this *company* suits
+    # them, and the honest material for that half is their own stated preferences — the CV says
+    # what they have done, never what they want next. Optional so an older caller still works.
+    profile: SearchProfile | None = None
 
 
 def lc_first(s: str) -> str:
@@ -163,6 +169,70 @@ def company_fact(description: str | None, company: str) -> str:
     return m.group(0) if m else line
 
 
+#: Words that mark a sentence as being about how a company works rather than what it does.
+POLICY_WORDS = (
+    "remote",
+    "hybrid",
+    "four-day",
+    "flexible",
+    "sponsor",
+    "visa",
+    "relocation",
+    "learning budget",
+    "training budget",
+    "mentoring",
+    "open source",
+    "parental leave",
+    "equity",
+    "pension",
+)
+
+
+def policy_fact(description: str | None) -> str:
+    """LTR-06: one sentence from the post about how the company works, quoted verbatim.
+
+    Empty when the post says nothing of the kind, which is common. An absent paragraph is a far
+    better outcome than an invented policy — this is the half of a letter with no CV behind it,
+    so the post is the only thing holding it to the truth.
+    """
+    if not description:
+        return ""
+    for line in (ln.strip(" -*\t") for ln in description.split("\n")):
+        if not line or line.startswith("#"):
+            continue
+        lowered = line.lower()
+        if any(w in lowered for w in POLICY_WORDS):
+            match = re.match(r"^.*?[.!?](?=\s|$)", line)
+            found = match.group(0) if match else line
+            # Must be quotable verbatim, and short enough to read as a quote rather than a block.
+            if found and len(found) <= 200 and found in description:
+                return found
+    return ""
+
+
+def _matched_skills(inp: PackInput, limit: int = 4) -> list[str]:
+    """The master CV's own skill names that this job's keywords ask for.
+
+    The CV's spellings, not the job's: these go into a letter that the citation guard checks, and
+    `check_cited` accepts a term that appears in the applicant's skills list. Taking the job's
+    wording instead would be a claim about the applicant written in someone else's words.
+    """
+    out: list[str] = []
+    for skill in inp.cv.skills:
+        if any(text_has_term(skill_text(skill), k.term) for k in inp.evidence.keywords):
+            out.append(skill.name)
+        if len(out) == limit:
+            break
+    return out
+
+
+def _sentence_list(items: list[str]) -> str:
+    """ "a, b and c" — the way a person writes a list inside a sentence."""
+    if len(items) == 1:
+        return items[0]
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
 def _named_contact(description: str | None) -> str | None:
     m = re.search(r"hiring manager(?: is|:)\s+([A-Z][a-z]+ [A-Z][a-z]+)", description or "", re.I)
     return m.group(1) if m else None
@@ -172,7 +242,7 @@ def guard_letter(letter: CoverLetter, cv: MasterCV, evidence: FitEvidence, job: 
     """Claims about the user are checked; quotes and names from the job post are not (LTR-03)."""
 
     def strip(text: str) -> str:
-        for q in [letter.company_fact.quote, evidence.job_quote, job.title, job.company]:
+        for q in [letter.company_fact.quote, letter.company_fact.policy_quote, evidence.job_quote, job.title, job.company]:
             if q:
                 text = "".join(text.split(q))
         return text
@@ -190,11 +260,15 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
     fact = company_fact(job.description_md, job.company)
     paragraphs: list[Cited] = []
 
-    intro = [f"I'm applying for the {job.title} role at {job.company}."]
-    if fact:
-        intro.append(f"Your post describes the company in one line: “{fact}”")
+    # LTR-04: no announcing the application and no thanking them for reading. The real prompt
+    # bans both, and a demo that models what the product forbids teaches the wrong thing.
+    intro: list[str] = []
     if cv.summary:
-        intro.append(f"I'm a {no_stop(cv.summary.text)}, and that is the kind of work I want to keep doing.")
+        intro.append(f"I'm a {no_stop(cv.summary.text)}, and the {job.title} opening at {job.company} is the work I want next.")
+    else:
+        intro.append(f"The {job.title} opening at {job.company} is the work I want next.")
+    if fact:
+        intro.append(f"Your post puts it as “{fact}” — that's the part I'd want to be close to.")
     paragraphs.append(Cited(text=" ".join(intro), source_ids=[cv.summary.id] if cv.summary else []))
 
     items = [it for s in doc.sections for it in s.items]
@@ -207,21 +281,49 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
             parts.append(f"I also {lc_first(no_stop(second.text))}.")
         if idx == 0 and evidence.job_quote and job.description_md and evidence.job_quote in job.description_md:
             parts.append(f"That is close to what you describe as “{evidence.job_quote}”.")
-        paragraphs.append(Cited(text=" ".join(parts), source_ids=[sid for b in item.bullets[:2] for sid in b.source_ids]))
+        # A third bullet where the role has one. LTR-01 wants 250–350 words and the demo was
+        # landing at 201–226 — short because it used two bullets per role and stopped, not because
+        # there was nothing left to say. Length here comes from more of the applicant's record,
+        # never from filler; there is no honest way to pad a cover letter.
+        third = item.bullets[2] if len(item.bullets) > 2 else None
+        if third:
+            parts.append(f"Before that I {lc_first(no_stop(third.text))}.")
+        if idx == 1:
+            overlap = _matched_skills(inp)
+            if overlap:
+                # Safe past the citation guard: these are the master CV's own skill names, and
+                # `check_cited` accepts a term that appears in the applicant's skills list.
+                parts.append(f"The overlap with what you list is {_sentence_list(overlap)}.")
+        paragraphs.append(Cited(text=" ".join(parts), source_ids=[sid for b in item.bullets[:3] for sid in b.source_ids]))
 
-    closing = (
-        f"I'd welcome the chance to talk about how this experience could help {job.company}, and to hear more about the team. "
-        "Thank you for considering my application."
+    # LTR-06: why this company, grounded in what the post says about how it works and in what the
+    # applicant told WERA they want — never in a guess at their values. Folded into the closing
+    # paragraph rather than added as its own, because LTR-01 caps the letter at four.
+    policy = policy_fact(job.description_md)
+    fit: list[str] = [f"The post says “{policy}”, which is the arrangement I'd choose." if policy else ""]
+    fit = [f for f in fit if f]
+    if inp.profile and inp.profile.remote == "remote_only":
+        fit.append("I'm looking for remote work specifically, so that weighs more with me than it might with someone else.")
+    elif inp.profile and inp.profile.remote == "no_remote":
+        fit.append("I do my best work in a room with the team, so being on-site suits me.")
+    elif inp.profile and job.remote:
+        fit.append(f"I'm open to remote, hybrid or on-site, so the {job.remote} arrangement you describe works either way.")
+    # Where, from the profile the person set rather than a guess. This is the sentence a letter
+    # usually leaves out and a hiring team actually wants: that the applicant is already looking
+    # in this city, not willing to be persuaded about it.
+    if inp.profile and job.location.city and any(job.location.city.lower() == p.strip().lower() for p in inp.profile.locations):
+        fit.append(f"{job.location.city} is one of the places I'm searching, so there's nothing to negotiate there.")
+    closing = " ".join(
+        [*fit, f"I'd like to talk about where this would fit at {job.company}. I can make any afternoon next week."]
     )
-    extra = items[2].bullets[0] if len(items) > 2 and items[2].bullets else None
-    if extra:
+    extras = items[2].bullets[:2] if len(items) > 2 else []
+    if extras:
         role = roles[items[2].role_id]
-        paragraphs.append(
-            Cited(
-                text=f"Outside that, as {role.title} for {role.org}, I {lc_first(no_stop(extra.text))}. {closing}",
-                source_ids=extra.source_ids,
-            )
-        )
+        said = [f"Outside that, as {role.title} for {role.org}, I {lc_first(no_stop(extras[0].text))}."]
+        if len(extras) > 1:
+            said.append(f"I also {lc_first(no_stop(extras[1].text))}.")
+        said.append(closing)
+        paragraphs.append(Cited(text=" ".join(said), source_ids=[sid for b in extras for sid in b.source_ids]))
     else:
         paragraphs.append(Cited(text=closing, source_ids=[cv.summary.id] if cv.summary else []))
 
@@ -231,7 +333,7 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
         greeting=f"Dear {contact}," if contact else "Dear Hiring Team,",
         paragraphs=paragraphs,
         signoff=f"Kind regards,\n{cv.person.name}",
-        company_fact=CompanyFact(quote=fact),
+        company_fact=CompanyFact(quote=fact, policy_quote=policy),
         word_count=sum(words(p.text) for p in paragraphs),
         guard=GuardResult(pass_=True, violations=[], repaired=False),
     )
@@ -390,6 +492,7 @@ def _letter_output(inp: PackInput) -> dict:
         "paragraphs": [_cites(p) for p in letter.paragraphs],
         "signoff": letter.signoff,
         "companyQuote": letter.company_fact.quote,
+        "policyQuote": letter.company_fact.policy_quote,
     }
 
 
@@ -472,6 +575,125 @@ def _fit_score_output(variables: dict, cv: MasterCV) -> dict:
     }
 
 
+# Section headings a CV actually uses, mapped to where their entries belong.
+_SECTIONS: list[tuple[str, re.Pattern[str]]] = [
+    ("experience", re.compile(r"(?i)^\s*(work\s+)?(experience|employment|career history|professional experience)\s*:?\s*$")),
+    ("projects", re.compile(r"(?i)^\s*(projects?|portfolio|open[- ]source|personal projects?)\s*:?\s*$")),
+    ("education", re.compile(r"(?i)^\s*(education|academic background|qualifications)\s*:?\s*$")),
+    ("skills", re.compile(r"(?i)^\s*(skills|technical skills|technologies|tools)\s*:?\s*$")),
+    ("languages", re.compile(r"(?i)^\s*(languages)\s*:?\s*$")),
+    ("summary", re.compile(r"(?i)^\s*(summary|profile|about me|personal statement)\s*:?\s*$")),
+]
+
+_BULLET = re.compile(r"^\s*[-•*‣▪·]\s+")
+# "Senior Engineer, Monzo — Jan 2024 – present" and the handful of separators CVs use for it.
+_ROLE_LINE = re.compile(r"^(?P<left>.+?)\s*[–—|,]\s*(?P<right>.+?)\s*[–—-]\s*(?P<dates>[^–—-]+)$")
+_DATE_RANGE = re.compile(r"(?i)([A-Za-z]{3,9}\.?\s*\d{4}|\d{1,2}[/.]\d{4}|\d{4}-\d{1,2}|\d{4})\s*(?:[–—-]|to)\s*(.+)")
+_CONTACT = re.compile(r"(?i)[\w.+-]+@[\w-]+\.\w+|\+?\d[\d\s()-]{7,}\d")
+_URL = re.compile(r"(?i)\b((?:https?://|www\.)[^\s,;]+)")
+
+
+def _demo_sections(text: str) -> dict[str, list[str]]:
+    """Split a CV into its headed sections. Anything before the first heading is the header."""
+    out: dict[str, list[str]] = {"_header": []}
+    current = "_header"
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        heading = next((name for name, pattern in _SECTIONS if pattern.match(line)), None)
+        if heading:
+            current = heading
+            out.setdefault(current, [])
+            continue
+        out.setdefault(current, []).append(line)
+    return out
+
+
+def _demo_roles(lines: list[str]) -> list[dict]:
+    """Group a section's lines into roles: a non-bullet line starts one, bullets join it."""
+    roles: list[dict] = []
+    for line in lines:
+        if _BULLET.match(line):
+            if roles:
+                roles[-1]["bullets"].append(_BULLET.sub("", line).strip())
+            continue
+        title, org, start, end = _demo_role_head(line)
+        roles.append({"title": title, "org": org, "location": None, "start": start, "end": end, "bullets": []})
+    return [r for r in roles if r["title"] and r["org"]]
+
+
+def _demo_role_head(line: str) -> tuple[str, str, str, str]:
+    """ "Title, Org — Mar 2023 – present" → its four parts, best effort."""
+    start = end = ""
+    dates = _DATE_RANGE.search(line)
+    if dates:
+        start, end = dates.group(1).strip(), dates.group(2).strip()
+        line = line[: dates.start()].rstrip(" ,–—-|")
+    parts = [p.strip() for p in re.split(r"\s*[,|]\s*|\s+[–—]\s+|\s+at\s+", line) if p.strip()]
+    title = parts[0] if parts else line.strip()
+    org = parts[1] if len(parts) > 1 else "Not stated"
+    return title, org, start, end
+
+
+def _demo_terms(lines: list[str]) -> list[str]:
+    """A skills section, however it was punctuated."""
+    out: list[str] = []
+    for line in lines:
+        for term in re.split(r"[,;•|/]|\s{2,}", _BULLET.sub("", line)):
+            clean = re.sub(r"^\s*[A-Za-z ]+:\s*", "", term).strip(" .")
+            if 1 < len(clean) <= 40 and clean.casefold() not in {o.casefold() for o in out}:
+                out.append(clean)
+    return out[:40]
+
+
+def _cv_parse_output(variables: dict) -> dict:
+    """DEMO-01's stand-in for `cv.parse`: a real, if blunt, CV reader.
+
+    It uses headings, bullet markers and date ranges rather than a model, so demo mode can
+    genuinely import a CV someone uploads instead of pretending to. It will miss a two-column
+    layout and anything implied rather than written — which is exactly what the real model is
+    for, and why the demo says so on the screen.
+    """
+    text = str(variables.get("document") or "")
+    # The prompt wraps the document as untrusted data; strip the markers back off.
+    text = text.replace(OPEN, "").replace(CLOSE, "")
+    text = re.sub(r"(?m)^\s*\(uploaded CV\)\s*$", "", text)
+    sections = _demo_sections(text)
+
+    header = sections.get("_header", [])
+    # CV-06: contact details are stored apart from the CV and never parsed into it.
+    named = [ln for ln in header if not _CONTACT.search(ln)]
+    name = named[0].strip() if named else "Unnamed"
+    headline = named[1].strip() if len(named) > 1 and len(named[1]) < 120 else None
+    location = next((ln.strip() for ln in named[1:4] if re.search(r"(?i),\s*[a-z]|^[A-Z][a-z]+,", ln)), "Not stated")
+
+    summary = " ".join(sections.get("summary", []))[:600]
+    return {
+        "name": name,
+        "headline": headline,
+        "location": location,
+        "links": [{"label": "Link", "url": m.group(1)} for ln in header for m in [_URL.search(ln)] if m][:4],
+        "summary": summary or None,
+        "experience": _demo_roles(sections.get("experience", [])),
+        "projects": _demo_roles(sections.get("projects", [])),
+        "education": [
+            {"degree": parts[0], "institution": parts[1] if len(parts) > 1 else "Not stated", "start": None, "end": None}
+            for line in sections.get("education", [])
+            if not _BULLET.match(line)
+            for parts in [[p.strip() for p in re.split(r"\s*[,|]\s*|\s+[–—]\s+", line) if p.strip()]]
+            if parts
+        ][:6],
+        "skills": _demo_terms(sections.get("skills", [])),
+        "languages": [
+            {"name": parts[0], "level": parts[1] if len(parts) > 1 else "Not stated"}
+            for line in sections.get("languages", [])
+            for parts in [[p.strip() for p in re.split(r"[(:—–-]", _BULLET.sub("", line), maxsplit=1)]]
+            if parts and parts[0]
+        ][:8],
+    }
+
+
 def respond(task: str, variables: dict, context: dict | None, demo_input: PackInput | None = None) -> dict:
     """The demo answer for one §9.3 task.
 
@@ -479,6 +701,9 @@ def respond(task: str, variables: dict, context: dict | None, demo_input: PackIn
     pack tasks. The gateway validates whatever comes back against the same schema as a real reply.
     """
     cv = (context or {}).get("cv")
+    if task == "cv.parse":
+        # Deliberately does not need the master CV: this is where a *new* one comes from.
+        return _cv_parse_output(variables)
     if task == "profile.generate":
         if cv is None:
             raise KeyError("profile.generate needs the master CV in validation context")
