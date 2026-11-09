@@ -30,6 +30,30 @@ def ensure_database() -> None:
             seed(session, now_ms())
 
 
+def _sweep_if_due() -> None:
+    """SRCH-13: ask whether the shortlist's jobs still exist, if nobody has lately.
+
+    **The sweep was only ever scheduled for 07:00** (`api/scheduler.py`), which is fine for a
+    service that stays up and useless for one somebody starts when they sit down: on a real
+    database it had never run once, and every job on the shortlist had `lastCheckedAt` of null.
+    Stale postings were the visible symptom, and the cause was simply that nothing ever asked.
+
+    So it also runs on startup when it is due — `recheck.due` already keeps that to once every
+    twenty hours, so starting WERA four times in a morning sweeps once. Deferred rather than
+    awaited: it is minutes of HTTP against other people's boards and the app must come up now.
+    It spends no credits and no model calls, so there is no budget question to put to anyone.
+    """
+    from .graphs import recheck
+
+    with transaction() as session:
+        from .services.store import Store
+
+        if not recheck.due(Store(session, now_ms()).rechecked_at(), now_ms()):
+            return
+    logfire.info("Lifecycle sweep is due; checking which postings are still open")
+    tasks.spawn(recheck.run_async(), name="recheck:startup")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     ensure_database()
@@ -43,9 +67,11 @@ async def lifespan(_app: FastAPI):
         logfire.info("Resumed {count} unfinished application thread(s) after restart", count=resumed)
     # SCH-01: boards in the morning, the inbox through the day. Off in demo mode.
     scheduler.start()
+    _sweep_if_due()
     yield
     scheduler.stop()
-    await tasks.adrain(timeout=30)
+    # The default, which is sized to a pack's measured drafting time. See `tasks.adrain`.
+    await tasks.adrain()
 
 
 def create_app(*, manage_database: bool = True) -> FastAPI:

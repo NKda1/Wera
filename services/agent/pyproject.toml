@@ -35,6 +35,16 @@ dependencies = [
 # checkpointer exists to survive (REL-03).
 postgres = ["psycopg[binary]==3.3.6", "langgraph-checkpoint-postgres==3.2.0"]
 
+# SRCH-05's browser rung. An extra, not a default, because the Python package is only half of it:
+# the Chromium it drives is a separate ~150 MB download (`playwright install chromium`), and
+# making every clone pay for that would be a poor trade for a rung the ladder can skip.
+#
+# Without it, `sources.extract` still reads JSON-LD and ATS feeds over plain HTTP and still falls
+# back to the fast tier — so a default install is already far cheaper than the Firecrawl scrape it
+# replaces. With it, the JavaScript-rendered boards work too. `sources.browser` treats the whole
+# thing as optional and returns "couldn't render" when it isn't there.
+browser = ["playwright==1.57.0"]
+
 [project.scripts]
 wera = "wera_agent.cli:main"
 

@@ -14,10 +14,14 @@ import { Dialog } from "@/lib/ui/Dialog";
 import { Checkbox, FieldError, Help, Input, Label, Select } from "@/lib/ui/Field";
 import { useToast } from "@/lib/ui/Toast";
 
+// Only models `config/wera.yaml` has a price for. An unlisted model is charged at `prices.default`,
+// which is deliberately high so an unknown model is never free — so offering one here would be
+// offering a cost trap. Keep this list and that table in step.
 const MODEL_OPTIONS = {
-  fast: ["qwen/qwen3.7-flash", "qwen/qwen3.8-flash"],
-  scoring: ["qwen/qwen3.8-27b", "qwen/qwen3.7-plus"],
-  writing: ["qwen/qwen3.8-max-0902", "qwen/qwen3.7-plus"],
+  fast: ["qwen/qwen3.7-flash", "mistralai/mistral-small-3.2-24b-instruct", "google/gemini-2.5-flash-lite"],
+  select: ["deepseek/deepseek-v4.1-flash-1017", "qwen/qwen3.7-flash", "qwen/qwen3.8-27b"],
+  scoring: ["qwen/qwen3.8-27b", "qwen/qwen3.8-max-0902", "qwen/qwen3.7-flash"],
+  writing: ["qwen/qwen3.8-27b", "qwen/qwen3.8-max-0902", "deepseek/deepseek-v4.1-flash-1017"],
 };
 
 const WEIGHT_LABELS: { key: keyof FitWeights; label: string; hint: string }[] = [
@@ -92,8 +96,9 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-3">
             <ModelSelect id="fast" label="Fast tier" help="Importing, keywords, drafts" value={draft.models.fast} options={MODEL_OPTIONS.fast} onChange={(v) => set("models", { ...draft.models, fast: v })} />
+            <ModelSelect id="select" label="Select tier" help="Picks which CV lines to show · ids only" value={draft.models.select} options={MODEL_OPTIONS.select} onChange={(v) => set("models", { ...draft.models, select: v })} />
             <ModelSelect id="scoring" label="Scoring tier" help="Fit scores · reasoning low" value={draft.models.scoring} options={MODEL_OPTIONS.scoring} onChange={(v) => set("models", { ...draft.models, scoring: v })} />
-            <ModelSelect id="writing" label="Writing tier" help="CV, cover letter, answers" value={draft.models.writing} options={MODEL_OPTIONS.writing} onChange={(v) => set("models", { ...draft.models, writing: v })} />
+            <ModelSelect id="writing" label="Writing tier" help="Cover letter, answers, repairs" value={draft.models.writing} options={MODEL_OPTIONS.writing} onChange={(v) => set("models", { ...draft.models, writing: v })} />
           </div>
         </Card>
 

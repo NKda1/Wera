@@ -53,7 +53,7 @@ const PACK: Pack = {
     wordCount: 268,
     guard: clean,
   },
-  ats: { keywords: [{ term: "FastAPI", weight: "required", matched: true, inMasterCv: true }], coverage: 0.82, formatChecks: [], pages: 1, attempt: 1 },
+  ats: { keywords: [{ term: "FastAPI", weight: "required", matched: true, inMasterCv: true }], coverage: 0.82, backedCoverage: 1, formatChecks: [], pages: 1, attempt: 1 },
   answers: [],
 };
 
@@ -153,6 +153,15 @@ describe("cover letter", () => {
     const texts = exportDoc("letter", APP, CV, CONTACT).blocks.map((b) => b.text);
     expect(texts).toContain("Dear Hiring Team,");
     expect(texts.at(-1)).toBe(CV.person.name);
+  });
+
+  it("is dated and addressed, above the greeting", () => {
+    // The furniture a letter is supposed to carry. Without it the PDF opened on "Dear Hiring
+    // Team," — an email pasted into a page. Both lines come from data WERA already holds, so
+    // this is also the check that neither is invented: the date is the approval date (EXP-03)
+    // and the company and role are the job's own.
+    const texts = exportDoc("letter", APP, CV, CONTACT).blocks.map((b) => b.text);
+    expect(texts.slice(0, 4)).toEqual(["12 October 2026", "Fernhill Analytics", "Re: Machine Learning Engineer", "Dear Hiring Team,"]);
   });
 });
 

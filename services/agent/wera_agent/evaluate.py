@@ -429,7 +429,9 @@ def _use_cv(session: Any, cv_path: Path | None) -> tuple[Any, str]:
     store = Store(session)
     if cv_path is None:
         return store.cv(), "fixtures/demo/cv.json (seeded)"
-    store.put_cv(store.import_cv_yaml(cv_path.read_text(encoding="utf-8")))
+    # `rescore=False`: the eval scores the golden set itself and reports what that cost. A
+    # background re-score would both race it and bill the run for work nobody asked to measure.
+    store.put_cv(store.import_cv_yaml(cv_path.read_text(encoding="utf-8")), rescore=False)
     return store.cv(), str(cv_path)
 
 

@@ -95,11 +95,29 @@ function cvBlocks(app: ApplicationWithJob, cv: MasterCV): { blocks: Block[]; unr
   return { blocks, unresolvedRoleIds };
 }
 
+/** `2026-11-01` → `1 November 2026`. The date a letter is dated, not a timestamp. */
+function letterDate(date: Date): string {
+  return date.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+}
+
 function letterBlocks(app: ApplicationWithJob, cv: MasterCV): Block[] {
   const letter = app.pack!.letter;
   // The signoff's second line is the sender's name, which comes from the master CV (TAIL-02).
   const signoff = letter.signoff.replace(/\n.*$/, `\n${cv.person.name}`);
+  // The furniture a letter is supposed to carry and this one didn't: a date, and who it is
+  // addressed to. Both come from data WERA already holds — the approval time (EXP-03) and the
+  // job's own title and company — so nothing here is inferred, and a letter that opens straight
+  // into "Dear Hiring Team," reads as an email someone pasted into a PDF.
+  //
+  // No street address: WERA has the employer's name, not their post room, and inventing one in
+  // the place a reader expects a verifiable address is the wrong kind of tidy.
+  const recipient = [
+    { t: "body" as const, text: letterDate(new Date(app.approvedAt ?? app.createdAt)) },
+    { t: "body" as const, text: app.job.company },
+    { t: "body" as const, text: `Re: ${app.job.title}` },
+  ];
   return [
+    ...recipient,
     { t: "body", text: letter.greeting },
     ...letter.paragraphs.map((p): Block => ({ t: "body", text: p.text })),
     ...signoff.split("\n").map((line): Block => ({ t: "body", text: line })),

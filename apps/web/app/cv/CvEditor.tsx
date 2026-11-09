@@ -69,11 +69,13 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
     setSaving(true);
     setErrors({});
     try {
+      let cleared = 0;
       if (cvDirty) {
-        const { version } = await api.putCv(cv);
+        const { version, clearedJobs } = await api.putCv(cv);
         const next = { ...cv, version };
         setCv(next);
         setSaved(next);
+        cleared = clearedJobs;
       }
       if (contactDirty) {
         const c = await api.putContact(contact);
@@ -85,7 +87,19 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
       // search profile is what the intake run actually uses. Saying so here is the difference
       // between "I uploaded my CV" and "WERA is now looking for the right thing".
       setProfileStale(cvDirty);
-      toast({ tone: "ok", message: cvDirty ? `Saved as version ${saved.version + 1}.` : "Contact details saved." });
+      // `clearedJobs` is non-zero only when `reset_on_cv_upload` is on, and then the list the
+      // person left behind on the Jobs screen is simply gone. Naming the number is the whole
+      // point: a shortlist that empties itself without a word reads as a bug, whoever asked
+      // for it, and the next step ("search again") isn't obvious from an empty screen.
+      const savedMsg = `Saved as version ${saved.version + 1}.`;
+      toast({
+        tone: "ok",
+        message: !cvDirty
+          ? "Contact details saved."
+          : cleared
+            ? `${savedMsg} Cleared ${cleared} job${cleared === 1 ? "" : "s"} and everything built from them — run a search to start fresh.`
+            : savedMsg,
+      });
       router.refresh();
     } catch (e) {
       if (e instanceof ApiRequestError && e.fields) setErrors(e.fields);

@@ -46,6 +46,16 @@ class ShortlistMeta(Model):
     # New jobs with no fit report yet: past the day's scoring cap (MATCH-05), or left unscored
     # by a run that stopped. They are not on the shortlist, and saying so beats their absence.
     awaiting_score: int
+    # The jobs themselves, capped the same way `hidden` is. A count alone was all anyone got, so
+    # a job WERA had found, stored and filtered *in* was invisible until something scored it —
+    # which, before `jobs_needing_score`, could be never. `Job` rather than `ScoredJob` for the
+    # same reason as `hidden`: there is no fit report to show, and inventing a zero would read as
+    # a verdict rather than a queue position.
+    awaiting: list[Job] = []
+    # MATCH-05: how many of those a "score more" would take. From config, so the button can
+    # promise the number the run will actually deliver — and the screen needs it when no run is
+    # in flight, which is exactly when `IntakeRun.batchSize` isn't available.
+    scoring_batch_size: int = 8
     snoozed: int
     rejected: int
     active_run_ids: list[str]
@@ -95,8 +105,24 @@ class TestResult(Model):
     message: str
 
 
+class Started(Model):
+    """Work set off in the background, with nothing to return yet.
+
+    Used where the answer is "yes, it's running" rather than a result: the lifecycle sweep is
+    minutes of HTTP against other people's boards, and the screen reads what it found from
+    `ShortlistMeta` once it has finished.
+    """
+
+    started: bool = True
+
+
 class CvVersion(Model):
     version: int
+    # How many jobs saving this CV cleared (`reset_on_cv_upload`). Zero on the ordinary path,
+    # where the shortlist is re-scored instead and nothing is lost. Reported so the CV page can
+    # say what happened — a list that empties itself without a word reads as a bug, whoever
+    # asked for it.
+    cleared_jobs: int = 0
 
 
 class ListDiff(Model):

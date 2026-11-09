@@ -77,6 +77,284 @@ def scoring_calls() -> int:
         return len(session.scalars(select(LlmCallRow).where(LlmCallRow.task == "fit.score")).all())
 
 
+class TestReScoringAfterACvChange:
+    """CV-08: saving a CV sets off a pass that re-judges what WERA already has.
+
+    The path a multi-user install runs, and the reason `reset_on_cv_upload` is a flag rather than
+    a rewrite of `put_cv`: a user fixing a typo in their CV must keep their shortlist. Pinned on
+    purpose — the shipped config currently chooses the other path (see `TestClearingTheBacklog`),
+    and these tests would otherwise pass or fail on a setting someone flipped for an afternoon.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _rescore(self, cv_upload_mode):
+        cv_upload_mode("rescore")
+
+    def new_cv(self, store) -> None:
+        cv = store.cv()
+        cv.summary.text = f"{cv.summary.text} And a line that changes the document."
+        store.put_cv(cv)
+
+    def test_saving_a_cv_starts_a_rescore_run(self, client):
+        with transaction() as session:
+            self.new_cv(Store(session))
+        with transaction() as session:
+            started = session.scalars(select(IntakeRunRow).where(IntakeRunRow.channel == "rescore")).all()
+        assert len(started) == 1
+        # Straight into scoring: this run never searches for anything, so reporting a `searching`
+        # phase would describe work it doesn't do.
+        assert started[0].phase == "scoring"
+
+    def test_it_re_scores_the_stale_jobs_and_finishes(self, client):
+        with transaction() as session:
+            store = Store(session)
+            expected = len(store.list_jobs("new"))
+            self.new_cv(store)
+            run_id = session.scalars(select(IntakeRunRow.id).where(IntakeRunRow.channel == "rescore")).one()
+
+        intake.rescore(run_id)
+
+        row = row_for(run_id)
+        assert row.status == "succeeded"
+        assert row.progress == 1 and row.phase == "done"
+        with transaction() as session:
+            store = Store(session)
+            assert store.jobs_needing_score(cv_version=store.cv().version, model=store.scoring_model()) == []
+            assert not any(j.fit.stale for j in store.list_jobs("new"))
+            assert len(store.list_jobs("new")) == expected
+
+    def test_saving_a_cv_never_fails_because_a_search_is_running(self, client, runs):
+        """A busy run costs the re-score, never the CV. The next ordinary run picks the work up,
+        because `judge` asks what needs scoring rather than scoring only what it found."""
+        runs(["watchlist"])  # leaves a row with status "running"
+        with transaction() as session:
+            store = Store(session)
+            version = store.cv().version
+            self.new_cv(store)
+            assert store.cv().version == version + 1
+        with transaction() as session:
+            assert session.scalars(select(IntakeRunRow).where(IntakeRunRow.channel == "rescore")).all() == []
+
+    def test_nothing_to_score_means_no_run(self, client, monkeypatch):
+        """A progress bar for no work is worse than no progress bar — a fresh install shouldn't
+        get one just for saving its first CV.
+
+        Note what this does *not* claim: that re-saving an unedited CV is free. `put_cv` is
+        append-only and bumps the version whatever the content, so pressing Save without editing
+        really does invalidate every score and start a pass. Comparing content before bumping
+        would change what a CV version means, so it isn't done here.
+        """
+        monkeypatch.setattr(Store, "jobs_needing_score", lambda *_a, **_k: [])
+        with transaction() as session:
+            self.new_cv(Store(session))
+        with transaction() as session:
+            assert session.scalars(select(IntakeRunRow).where(IntakeRunRow.channel == "rescore")).all() == []
+
+
+class TestClearingTheBacklog:
+    """`reset_on_cv_upload`: saving a CV throws away everything built from the old one.
+
+    The testing-phase path, and the one the shipped config currently chooses. The loop it serves
+    is "upload a CV, search, read the shortlist and the generated documents, do it again with a
+    different CV" — which only measures anything if each pass starts from nothing.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset(self, cv_upload_mode):
+        cv_upload_mode("reset")
+
+    def new_cv(self, store) -> None:
+        cv = store.cv()
+        cv.summary.text = f"{cv.summary.text} And a line that changes the document."
+        store.put_cv(cv)
+
+    def test_it_clears_the_jobs_and_starts_no_rescore(self, client):
+        with transaction() as session:
+            store = Store(session)
+            assert store.list_jobs("new"), "the demo seed should have left a backlog"
+            self.new_cv(store)
+        with transaction() as session:
+            assert session.scalars(select(JobRow)).all() == []
+            # Nothing is left to score, so a run row here would be a progress bar for no work —
+            # and would spend the scoring tier on jobs that no longer exist.
+            assert session.scalars(select(IntakeRunRow).where(IntakeRunRow.channel == "rescore")).all() == []
+
+    def test_the_applications_and_packs_go_with_them(self, client):
+        """A pack cites master-CV bullet ids, and ids are derived from employer names
+        (`domain/cv_build`), so a pack written against a different person's CV doesn't merely
+        show stale scores — it cites lines that no longer exist."""
+        from wera_agent.db.models import ApplicationRow, DocumentRow
+
+        with transaction() as session:
+            assert session.scalars(select(ApplicationRow)).all(), "the demo seed should have applications"
+            assert session.scalars(select(DocumentRow)).all(), "the demo seed should have packs"
+        with transaction() as session:
+            self.new_cv(Store(session))
+        with transaction() as session:
+            assert session.scalars(select(ApplicationRow)).all() == []
+            assert session.scalars(select(DocumentRow)).all() == []
+
+    def test_it_keeps_the_cv_the_contact_details_and_the_profile(self, client):
+        """The person, not their job list. The CV being saved is the whole point of the call."""
+        with transaction() as session:
+            store = Store(session)
+            before = store.cv().version
+            contact, profile = store.get_contact(), store.get_profile()
+            self.new_cv(store)
+        with transaction() as session:
+            store = Store(session)
+            assert store.cv().version == before + 1
+            assert store.get_contact() == contact
+            assert store.get_profile().titles == profile.titles
+
+    def test_it_keeps_the_cost_ledger(self, client):
+        """COST-01: `llm_calls` is money that really left the account. Clearing it would hand
+        back the spend and let an afternoon of testing run past the weekly cap."""
+        with transaction() as session:
+            session.add(LlmCallRow(task="fit.score", tier="scoring", model="qwen/test", cost_usd=0.02, called_at=iso(now_ms())))
+            before = len(session.scalars(select(LlmCallRow)).all())
+        with transaction() as session:
+            self.new_cv(Store(session))
+        with transaction() as session:
+            assert len(session.scalars(select(LlmCallRow)).all()) == before
+
+    def test_it_never_reuses_an_application_id(self, client):
+        """`kv` holds `_next_id`'s counter and survives the wipe. Resetting it would make a new
+        application inherit a dead one's id, and with it a dead one's paused graph thread."""
+        with transaction() as session:
+            first = Store(session)._next_id()
+            self.new_cv(Store(session))
+        with transaction() as session:
+            assert Store(session)._next_id() > first
+
+    def test_it_clears_the_crawl_cache(self, client):
+        """SRCH-10: a cached search comes back without running, so leaving the cache would mean
+        the first thing tested after a reset is the cache rather than the search."""
+        from wera_agent.db.models import CrawlCacheRow
+
+        with transaction() as session:
+            session.add(
+                CrawlCacheRow(
+                    key="search:x", kind="search", payload={}, stored_at=iso(now_ms()), expires_at=iso(now_ms() + 10**7)
+                )
+            )
+        with transaction() as session:
+            self.new_cv(Store(session))
+        with transaction() as session:
+            assert session.scalars(select(CrawlCacheRow)).all() == []
+
+    def test_a_running_search_is_cancelled_rather_than_left_to_block(self, client, runs):
+        """Its jobs are gone, so it has nothing left to do — and both `start_rescore_if_idle` and
+        `start_score_more` refuse while a run is active, so one abandoned here would block the
+        next search instead of finishing."""
+        runs(["watchlist"])  # leaves a row with status "running"
+        with transaction() as session:
+            self.new_cv(Store(session))
+        with transaction() as session:
+            assert session.scalars(select(IntakeRunRow).where(IntakeRunRow.status == "running")).all() == []
+
+    def test_the_route_says_how_many_jobs_it_cleared(self, api):
+        """A shortlist that empties itself without a word reads as a bug, whoever asked for it —
+        and "search again" is not obvious from an empty screen."""
+        cv = api.ok("GET", "/cv")
+        before = len(api.ok("GET", "/jobs?status=new")["items"])
+        assert before, "the demo seed should have left a backlog"
+
+        result = api.ok("PUT", "/cv", cv)
+
+        assert result["clearedJobs"] >= before
+        assert api.ok("GET", "/jobs?status=new")["items"] == []
+
+    def test_a_fresh_search_can_find_the_same_postings_again(self, client):
+        """Why this deletes rather than archives: `known_apply_urls` reads every job row whatever
+        its status, so an archived job's URL is one `firecrawl_search` still skips (SRCH-05).
+        Archiving would leave a clean screen behind which the next search quietly found nothing.
+        """
+        with transaction() as session:
+            store = Store(session)
+            assert store.known_apply_urls(), "the demo seed should have apply URLs"
+            self.new_cv(store)
+        with transaction() as session:
+            assert Store(session).known_apply_urls() == set()
+
+
+class TestARunSaysWhatItIsDoing:
+    """UX-01: *"Progress must move while the slow work is happening, not between the phases
+    around it."* 0005 made the bar move; this is the half that names the stage."""
+
+    def phases_seen(self, monkeypatch) -> list[tuple[str, str | None]]:
+        """Every (phase, detail) a run publishes, in order, by watching the heartbeat."""
+        seen: list[tuple[str, str | None]] = []
+        real = intake.report
+
+        def spy(run_ids, **kw):
+            seen.append((kw["phase"], kw.get("detail")))
+            return real(run_ids, **kw)
+
+        monkeypatch.setattr(intake, "report", spy)
+        return seen
+
+    def test_the_shared_stages_between_fetching_and_scoring_are_named(self, client, runs, channels, monkeypatch):
+        """`collapsing` and `closing` are seconds of silence between two long phases, and silence
+        between stages is what a frozen bar is made of."""
+        ids = runs(["watchlist"])
+        channels(from_watchlist=lambda *a, **k: intake.ChannelOutcome(channel="watchlist", jobs=[job()], results=1))
+        seen = self.phases_seen(monkeypatch)
+
+        intake.run(["watchlist"], ids)
+
+        phases = [p for p, _ in seen]
+        assert "collapsing" in phases
+        assert "filtering" in phases
+        assert "closing" in phases
+        # In order, and never going backwards.
+        from wera_agent.schemas.runs import PHASE_ORDER
+
+        order = [PHASE_ORDER.index(p) for p in phases]
+        assert order == sorted(order), phases
+
+    def test_scoring_names_the_job_it_is_waiting_on(self, client, runs, channels, monkeypatch):
+        """Scoring is ~98% of a real run's wall clock at roughly eleven seconds a job, so a
+        count alone leaves the longest phase in the product with nothing changing."""
+        ids = runs(["watchlist"])
+        channels(from_watchlist=lambda *a, **k: intake.ChannelOutcome(channel="watchlist", jobs=[job()], results=1))
+        seen = self.phases_seen(monkeypatch)
+
+        intake.run(["watchlist"], ids)
+
+        scoring = [detail for phase, detail in seen if phase == "scoring"]
+        assert scoring, "scoring never reported"
+        assert any(d and "ML Engineer, Graduate" in d and "Fernhill AI" in d for d in scoring), scoring
+
+    def test_a_stale_detail_is_cleared_rather_than_left_behind(self, client, runs, channels):
+        """A sentence from the previous phase is worse than no sentence: it says WERA is reading a
+        board it finished with minutes ago."""
+        ids = runs(["watchlist"])
+        channels(from_watchlist=lambda *a, **k: intake.ChannelOutcome(channel="watchlist", jobs=[job()], results=1))
+        run_id = ids["watchlist"]
+
+        intake.report({"watchlist": run_id}, phase="feeds", progress=0.1, detail="32 employers")
+        assert row_for(run_id).detail == "32 employers"
+        intake.report({"watchlist": run_id}, phase="collapsing", progress=0.25)
+        assert row_for(run_id).detail is None
+
+    def test_a_finished_run_is_doing_nothing_and_says_so(self, client, runs, channels):
+        ids = runs(["watchlist"])
+        channels(from_watchlist=lambda *a, **k: intake.ChannelOutcome(channel="watchlist", jobs=[job()], results=1))
+
+        intake.run(["watchlist"], ids)
+
+        row = row_for(ids["watchlist"])
+        assert row.phase == "done"
+        assert row.detail is None
+
+    def test_a_detail_too_long_for_the_column_is_truncated_not_refused(self, client, runs):
+        """A heartbeat must never be the thing that fails a run."""
+        run_id = runs(["watchlist"])["watchlist"]
+        intake.report({"watchlist": run_id}, phase="scoring", progress=0.5, detail="x" * 500)
+        assert len(row_for(run_id).detail) == intake.DETAIL_LIMIT
+
+
 class TestOneChannelNeverTakesTheRun:
     def test_a_failed_watchlist_leaves_the_board_results(self, client, runs, channels):
         """SCH-04."""

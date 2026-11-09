@@ -111,9 +111,12 @@ class TestPlainLink:
     def test_any_other_link_is_scraped_once(self, monkeypatch):
         calls: list[str] = []
 
-        def scrape(url, schema, outcome, caps):
+        def scrape(url, schema, outcome, caps, **kwargs):
             calls.append(url)
             assert caps.max_pages == 1  # one click never turns into a crawl
+            # SRCH-05: the import takes the same ladder the board search does, so it gets a
+            # browser and the fast-tier parser and usually pays for nothing at all.
+            assert "fetch_html" in kwargs and "parse" in kwargs
             return {
                 "title": "Graduate Backend Engineer",
                 "company": "Harbour Analytics",

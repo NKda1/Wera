@@ -119,6 +119,22 @@ _HEADROOM: dict[Effort, int] = {"off": 0, "low": 1200, "on": 3000}
 # the same point as the first. That is how `cv.parse` failed twice at 4,600 and then 8,600.
 TRUNCATION_RETRY_FACTOR = 2
 
+# How long one §9.3 task may take in total, across every attempt it makes.
+#
+# This is the bound that was missing, and its absence is what "it hangs" meant. `timeout` bounds
+# one HTTP call; nothing bounded the task. The attempts multiply: `llm_max_retries` inside the
+# SDK, then each fallback model, then the shape retry in `_structured` — so at the old 60s a
+# single task could spend ~480s before giving up, and raising the timeout to 180s to stop healthy
+# calls being killed would have made that figure *worse*, not better.
+#
+# 300s is sized from the measurement: a writing-tier call runs 39–125s, so this allows a slow
+# call plus one full retry, and refuses the third. A pack chains four tasks, which puts a hard
+# ceiling of ~20 minutes on a draft that cannot finish — against no ceiling at all before.
+#
+# Checked between attempts rather than enforced with a signal: a cancelled call in flight would
+# lose the token accounting for tokens the provider has already charged for (see `_record`).
+TASK_DEADLINE_SECONDS = 300
+
 
 def _code_for(exc: BaseException) -> str:
     """Maps a provider exception to a WERA code by class name and status, so the same mapping
@@ -293,6 +309,7 @@ def _record(
     code: str | None = None,
     usage: dict[str, Any] | None = None,
     reported_cost: float | None = None,
+    detail: str | None = None,
 ) -> float:
     """Records the call and returns what it cost (PRIV-03: metadata only).
 
@@ -321,6 +338,8 @@ def _record(
         "latency_ms": int((time.monotonic() - started) * 1000),
         "ok": ok,
         "code": code,
+        # PRIV-03: field paths and rule names, never a value. See `_problem_fields`.
+        "detail": detail[:300] if detail else None,
         "attempt": attempt,
         "called_at": iso(now_ms()),
     }
@@ -486,6 +505,7 @@ def _structured[Out: BaseModel](
         _record(session, task=task, tier=spec.tier, model=model, started=started, attempt=1, ok=True)
         return out
 
+    # `settings_data` backfills a tier the stored blob predates, so this can't KeyError.
     models = [saved["models"][spec.tier], *cfg.fallbacks.get(spec.tier, [])]
     ceiling = spec.max_tokens
     headroom = _HEADROOM[spec.reasoning]
@@ -524,7 +544,13 @@ def _structured[Out: BaseModel](
         errors = None  # nothing was wrong with the shape; the reply never got as far as a shape
         return True
 
+    deadline = time.monotonic() + TASK_DEADLINE_SECONDS
     for attempt in (1, 2):
+        if time.monotonic() >= deadline:
+            # Out of time rather than out of attempts. Recorded as a timeout because that is what
+            # it is to the caller, and reported with no further round trip.
+            logfire.warn("{task} ran out of time after {attempt} attempt(s)", task=task, attempt=attempt - 1)
+            raise _fail(TIMEOUT)
         started = time.monotonic()
         turn = [*messages, ("human", RETRY_NOTE.format(errors=errors))] if errors else messages
         try:
@@ -562,6 +588,7 @@ def _structured[Out: BaseModel](
                 ok=False,
                 code=BAD_OUTPUT,
                 usage=_usage_from(problem),
+                detail=_problem_fields(problem),
             )
             errors = _problems(problem)
             logfire.warn(
@@ -617,6 +644,7 @@ def _structured[Out: BaseModel](
             code=BAD_OUTPUT,
             usage=usage,
             reported_cost=_reported_cost(metadata),
+            detail=_problem_fields(problem),
         )
         errors = _problems(problem)
         logfire.warn(

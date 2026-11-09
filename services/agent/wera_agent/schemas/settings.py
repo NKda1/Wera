@@ -11,6 +11,8 @@ type SecretStatus = Literal["set", "missing", "invalid"]
 
 class TierModels(Model):
     fast: Annotated[str, required("Pick a model")]
+    # Structured selection — short replies of ids, not prose. See `config.Tier`.
+    select: Annotated[str, required("Pick a model")]
     scoring: Annotated[str, required("Pick a model")]
     writing: Annotated[str, required("Pick a model")]
 

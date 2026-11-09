@@ -128,6 +128,7 @@ def _by_http(now: int, max_checks: int, summary: dict[str, int]) -> None:
     That asymmetry is the whole policy: a board that blocks a bot must never prune a shortlist.
     """
     from ..services.store import Store
+    from ..sources import browser
     from ..sources import liveness as live
 
     with transaction() as session:
@@ -135,12 +136,15 @@ def _by_http(now: int, max_checks: int, summary: dict[str, int]) -> None:
         # Jobs a feed already answered for were confirmed moments ago, so they sort last anyway.
         candidates = [j for j in store.recheck_candidates(max_checks) if j.ats is None and j.apply_url]
 
+    # One browser for the sweep, started only if a page actually turns out to need rendering
+    # (`browser.session` is lazy). Most pages answer in plain HTML and never reach it.
     verdicts: list[tuple[str, str]] = []
-    for job in candidates:
-        verdicts.append((job.id, live.check(job.apply_url)))
-        if len(verdicts) >= HTTP_BATCH:
-            _apply(now, verdicts, summary)
-            verdicts = []
+    with browser.session() as fetch_html:
+        for job in candidates:
+            verdicts.append((job.id, live.check(job.apply_url, fetch_html=fetch_html)))
+            if len(verdicts) >= HTTP_BATCH:
+                _apply(now, verdicts, summary)
+                verdicts = []
     if verdicts:
         _apply(now, verdicts, summary)
 

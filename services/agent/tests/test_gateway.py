@@ -476,15 +476,75 @@ class TestOutputContracts:
 
         assert "total" not in FitScoreOutput.model_fields  # MATCH-04
 
-    def test_a_tailored_line_must_cite_the_master_cv(self, store):
-        from wera_agent.schemas.llm_outputs import TailorOutput
+    def test_the_tailored_cv_has_nowhere_to_put_written_text(self):
+        """TAIL-01, as a property of the contract rather than a rule in the prompt.
 
+        `cv.tailor` used to return each bullet's `text`, so the model retyped every line and the
+        wording drifted. Nothing about "selection, not writing" was enforceable while a text
+        field existed, so the field is gone — and this is the test that keeps it gone.
+        """
+        from wera_agent.schemas.llm_outputs import RolePick, TailorSelection
+
+        assert "text" not in RolePick.model_fields
+        assert set(TailorSelection.model_fields) == {
+            "summary_id",
+            "experience",
+            "projects",
+            "skills",
+            "omitted_bullet_ids",
+        }
+
+    def test_one_bad_citation_does_not_throw_away_a_whole_letter(self, store):
+        """LTR-01. This used to raise, so a single mangled id cost a full `letter.write` retry —
+        and the task was failing its first attempt essentially every time, at 17–22 seconds a go.
+
+        Dropping loses nothing: `domain.guard.check_cited` is stricter than this and works per
+        paragraph, so an invented citation ends in the same place without taking three good
+        paragraphs with it."""
+        from wera_agent.schemas.llm_outputs import Cites
+
+        cv = store.cv()
+        real = cv.experience[0].bullets[0].id
+        cites = Cites.model_validate({"text": "I cut the retry rate.", "sourceIds": [real, "made-up-id"]}, context={"cv": cv})
+        assert cites.source_ids == [real]
+
+    def test_a_paragraph_whose_every_citation_was_invented_survives_to_the_guard(self, store):
+        """Empty sources is a paragraph the guard rejects, which is a better outcome than a
+        retry — and `check_cited` handles it explicitly as "No master-CV source cited"."""
+        from wera_agent.schemas.llm_outputs import Cites
+
+        cites = Cites.model_validate({"text": "A claim.", "sourceIds": ["nope", "also-nope"]}, context={"cv": store.cv()})
+        assert cites.source_ids == []
+
+    def test_a_selected_line_must_exist_in_the_master_cv(self, store):
+        from wera_agent.schemas.llm_outputs import TailorSelection
+
+        cv = store.cv()
+        role = cv.experience[0]
         payload = {
-            "summary": {"text": "Engineer", "sourceIds": ["not-a-real-id"]},
-            "experience": [],
+            "summaryId": None,
+            "experience": [{"roleId": role.id, "bulletIds": ["not-a-real-id"]}],
             "projects": [],
             "skills": ["Python"],
             "omittedBulletIds": [],
         }
-        with pytest.raises(ValidationError, match="Not in the master CV"):
-            TailorOutput.model_validate(payload, context={"cv": store.cv()})
+        with pytest.raises(ValidationError, match=f"Not lines of {role.id}"):
+            TailorSelection.model_validate(payload, context={"cv": cv})
+
+    def test_a_line_cannot_be_filed_under_another_role(self, store):
+        """The failure mode an ids-only contract introduces, and the one it has to refuse: both
+        ids are real, so only the *pair* is wrong — and the rendered CV would credit real work to
+        the wrong employer."""
+        from wera_agent.schemas.llm_outputs import TailorSelection
+
+        cv = store.cv()
+        mine, theirs = cv.experience[0], cv.experience[1]
+        payload = {
+            "summaryId": None,
+            "experience": [{"roleId": mine.id, "bulletIds": [theirs.bullets[0].id]}],
+            "projects": [],
+            "skills": [],
+            "omittedBulletIds": [],
+        }
+        with pytest.raises(ValidationError, match=f"Not lines of {mine.id}"):
+            TailorSelection.model_validate(payload, context={"cv": cv})

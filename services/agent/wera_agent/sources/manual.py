@@ -23,7 +23,7 @@ from ..config import Company
 from ..domain.text import is_linkedin_url, title_case
 from ..errors import ApiError
 from ..schemas.jobs import Job, JobSource
-from . import ats_feeds, firecrawl_search, normalise, resolve
+from . import ats_feeds, browser, firecrawl_search, normalise, resolve
 from .firecrawl_search import SearchCaps, SearchOutcome
 
 # One page, and a credit ceiling that cannot run away with a person's balance on a single click.
@@ -70,9 +70,24 @@ def from_ats(url: str, now: int) -> Job:
 
 
 def from_page(url: str, host: str, now: int) -> Job:
-    """Any other link: scraped once."""
+    """Any other link: read once, as cheaply as it can be read.
+
+    Same ladder as the board search (`sources.extract`), so a pasted link usually costs nothing
+    at all — and when it does fall through to Firecrawl, `IMPORT_CAPS` still bounds it to one
+    page and 5 credits.
+    """
+    from ..graphs.intake import normalise_with_model
+
     outcome = SearchOutcome()
-    card = firecrawl_search.scrape_card(url, firecrawl_search.CARD_SCHEMA, outcome, IMPORT_CAPS)
+    with browser.session() as fetch_html:
+        card = firecrawl_search.scrape_card(
+            url,
+            firecrawl_search.CARD_SCHEMA,
+            outcome,
+            IMPORT_CAPS,
+            fetch_html=fetch_html,
+            parse=normalise_with_model,
+        )
     if card is None:
         raise ApiError(
             502,

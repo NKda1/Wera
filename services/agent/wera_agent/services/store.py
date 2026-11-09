@@ -10,6 +10,7 @@ instead, and that graph records its own figures.
 """
 
 import re
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -21,17 +22,19 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..clock import iso, now_ms, parse_ms
-from ..config import sites
+from ..config import sites, wera
 from ..db import state
 from ..db.models import (
     ApplicationRow,
     ContactRow,
+    CrawlCacheRow,
     DecisionRow,
     DocumentRow,
     FitReportRow,
     IntakeRunRow,
     JobRow,
     KvRow,
+    LlmCallRow,
     MasterCvRow,
     ProfileRow,
 )
@@ -75,7 +78,7 @@ from .demo_data import DAY, MIN, first_run_seeds, seed_to_job
 # unrecognised step falls back to the first one (see `_draft`), so a step missing here shows the
 # person a pack that went backwards.
 DRAFT_ORDER = ("cv", "letter", "ats", "answers")
-RUN_MS = {"board_search": 6000, "email_alert": 3500, "watchlist": 2500}
+RUN_MS = {"board_search": 6000, "email_alert": 3500, "watchlist": 2500, "rescore": 4000, "score_more": 3000}
 PACK_KINDS = ("cv", "letter", "ats", "answers")
 
 # The two gates are what WERA promises, so they are counted as well as logged. Ids only:
@@ -126,7 +129,13 @@ def save_job(
     questions: list[str] | None = None,
     *,
     created_at: str | None = None,
+    cv_version: int | None = None,
 ) -> None:
+    """One job, and optionally the fit evidence that goes with it.
+
+    Pass `cv_version` whenever `evidence` is given: it is part of the score's cache key, and a
+    row without it is a score WERA can't tell is stale.
+    """
     row = session.get(JobRow, job.id)
     if row is None:
         row = JobRow(id=job.id, questions=questions or [])
@@ -142,12 +151,29 @@ def save_job(
     if questions is not None:
         row.questions = questions
     if evidence is not None:
+        from ..nodes.fit import job_hash
+
+        # COST-04: the cache key is the CV version, the model and the job's content — all three,
+        # or the row can never be recognised as still valid. This wrote only the model, so every
+        # score that arrived through here (the demo seed, a manual import) missed the cache and
+        # was paid for again on the next pass. It also made the row unreadable to the staleness
+        # check, which compares the same three things.
         fit = session.get(FitReportRow, job.id)
         data = evidence.model_dump(mode="json")
         if fit is None:
-            session.add(FitReportRow(job_id=job.id, evidence=data, model=evidence.model, created_at=created_at or iso(now_ms())))
+            session.add(
+                FitReportRow(
+                    job_id=job.id,
+                    evidence=data,
+                    model=evidence.model,
+                    cv_version=cv_version,
+                    job_hash=job_hash(job),
+                    created_at=created_at or iso(now_ms()),
+                )
+            )
         else:
             fit.evidence, fit.model = data, evidence.model
+            fit.cv_version, fit.job_hash = cv_version, job_hash(job)
 
 
 def _local(ms: int) -> datetime:
@@ -167,6 +193,16 @@ def _human(status: str) -> str:
     return status.replace("_", " ")
 
 
+def _run_name(channel: str) -> str:
+    """What to call a run in a refusal. Three kinds of run share `intake_runs` now, and "a search
+    is already running" is the wrong sentence for two of them — the Cancel button it points at is
+    on a panel the person has to recognise before they can use it."""
+    return {
+        "rescore": "Re-scoring your shortlist is",
+        "score_more": "Scoring more jobs is",
+    }.get(channel, "A search is")
+
+
 def _required(app_id: str | None) -> str:
     """A graph node always has an application by the time it drafts; this says so out loud."""
     if not app_id:
@@ -184,12 +220,22 @@ class Store:
         # Set by `decide` when an approval creates an application, so the route can hand it to
         # the graph thread it resumes.
         self.started_application_id: str | None = None
+        # How many jobs `reset_job_world` removed, so `PUT /cv` can say so. Clearing someone's
+        # list is not something to do silently, even when they asked for it.
+        self.cleared_jobs = 0
         # Work to start once this unit of work is committed; see wera_agent/tasks.py.
-        self.deferred: list[tuple[Any, str]] = []
+        self.deferred: list[tuple[Callable[[], Any], str]] = []
 
-    def defer(self, coro: Any, *, name: str) -> None:
-        """Run this after the transaction closes, not inside it."""
-        self.deferred.append((coro, name))
+    def defer(self, make: Callable[[], Any], *, name: str) -> None:
+        """Run this after the transaction closes, not inside it.
+
+        Takes a function that *makes* the coroutine rather than a coroutine, so nothing exists
+        until something is going to run it. Handed a live coroutine, any caller that didn't reach
+        the route dependency's drain — the eval harness, a test calling a store method directly —
+        left one un-awaited, which Python reports as a warning and which is a dropped task
+        wearing a warning's clothes.
+        """
+        self.deferred.append((make, name))
 
     # ---- loading ----
 
@@ -250,6 +296,31 @@ class Store:
         row = self.s.get(FitReportRow, job_id)
         return FitEvidence.model_validate(row.evidence) if row else None
 
+    def scoring_model(self) -> str:
+        return self._settings()["models"]["scoring"]
+
+    def _stale_score(self, job: Job) -> bool:
+        """Whether this job's stored score was judged against something that has since changed.
+
+        The same three-part key `fit.cached_evidence` uses — CV version, model, job content —
+        read on the *path that shows a score to someone*, which is the half that was missing.
+
+        **Only an actual mismatch counts.** A row with no `cv_version` or no `job_hash` predates
+        them being written (see `save_job`), and "WERA can't tell" is not the same claim as "this
+        is out of date". The same restraint `liveness` shows in only reporting `gone` on positive
+        evidence: a badge nobody can act on teaches people to ignore badges.
+        """
+        from ..nodes.fit import job_hash
+
+        row = self.s.get(FitReportRow, job.id)
+        if row is None:
+            return False
+        if row.cv_version is not None and row.cv_version != self.cv().version:
+            return True
+        if row.model and row.model != self.scoring_model():
+            return True
+        return bool(row.job_hash) and row.job_hash != job_hash(job)
+
     def _next_id(self) -> int:
         n = int(get_kv(self.s, "counter", 0)) + 1
         set_kv(self.s, "counter", n)
@@ -276,14 +347,78 @@ class Store:
         for run in self.s.scalars(select(IntakeRunRow).where(IntakeRunRow.status == "running")).all():
             elapsed = now - parse_ms(run.started_at)
             run.progress = min(1, elapsed / run.duration_ms)
-            if run.channel == "board_search":
-                run.queries = js_round(20 * run.progress)
-                # `done`/`total` are what the screen reads while a run is searching, so the demo
-                # animates them as well — otherwise the demo's bar has no label under it.
-                run.phase, run.done, run.total = "searching", run.queries, 20
+            self._animate_demo_phase(run)
             if elapsed >= run.duration_ms:
                 self._finish_run(run)
         self.s.flush()
+
+    # Where fetching ends and scoring begins on the demo's bar, mirroring `intake.SEARCH_SHARE`.
+    # Duplicated rather than imported: `graphs.intake` imports this module, and the demo's
+    # fractions below are hand-tuned for watchability anyway, so they are not the same number
+    # wearing two hats.
+    DEMO_SEARCH_SHARE = 0.25
+
+    # DEMO-01: the stages a demo run walks through, as (fraction reached, phase, detail). The demo
+    # has to exercise the real stage vocabulary — it is where anyone sees this screen first, and a
+    # demo that sat on one phase would make the checklist look broken rather than the run look
+    # fast.
+    DEMO_STAGES: dict[str, tuple[tuple[float, str, str], ...]] = {
+        "board_search": (
+            (0.0, "searching", "gradcracker.com"),
+            (0.12, "searching", "brightnetwork.co.uk"),
+            (0.2, "scraping", "boards.greenhouse.io"),
+            (0.25, "collapsing", "118 sightings"),
+            (0.3, "filtering", "118 found"),
+            (0.35, "scoring", ""),
+            (0.99, "closing", "checking which jobs are still open"),
+        ),
+        "email_alert": (
+            (0.0, "reading", "Job alerts"),
+            (0.25, "collapsing", "9 sightings"),
+            (0.3, "filtering", "9 found"),
+            (0.35, "scoring", ""),
+            (0.99, "closing", "checking which jobs are still open"),
+        ),
+        "watchlist": (
+            (0.0, "feeds", "32 employers"),
+            (0.25, "collapsing", "41 sightings"),
+            (0.3, "filtering", "41 found"),
+            (0.35, "scoring", ""),
+            (0.99, "closing", "checking which jobs are still open"),
+        ),
+        "rescore": ((0.0, "scoring", ""),),
+        "score_more": ((0.0, "scoring", ""),),
+    }
+
+    # An empty `detail` in `DEMO_STAGES` means "name the job being scored", rotated by `done`.
+    # A fixed string here would have left the demo's longest phase showing one unchanging line
+    # for its whole duration — a faithful reproduction of the bug this stage vocabulary exists
+    # to fix, in the one place anyone looks at it first.
+    DEMO_SCORING: tuple[str, ...] = (
+        "Machine Learning Engineer · Fernhill AI",
+        "Software Engineer, AI Platform · Northwind Labs",
+        "Graduate Data Engineer · Harbour Analytics",
+        "Junior ML Platform Engineer · Marlow Bio",
+        "Platform Engineer · Saltmarsh",
+        "Graduate Software Engineer · Brightwater Energy",
+    )
+
+    def _animate_demo_phase(self, run: IntakeRunRow) -> None:
+        """Walk a demo run through the stage list, so the checklist has something to show."""
+        stages = self.DEMO_STAGES.get(run.channel)
+        if not stages:
+            return
+        reached = [s for s in stages if run.progress >= s[0]] or [stages[0]]
+        _, run.phase, detail = reached[-1]
+        if run.channel == "board_search":
+            run.queries = js_round(20 * min(run.progress / self.DEMO_SEARCH_SHARE, 1))
+        # `done`/`total` are what the screen reads under the bar, so the demo animates them too —
+        # otherwise the demo's bar has no label beneath it.
+        if run.phase == "scoring":
+            run.done, run.total = js_round(12 * (run.progress - 0.35) / 0.64), 12
+        elif run.channel == "board_search":
+            run.done, run.total = run.queries, 20
+        run.detail = detail or self.DEMO_SCORING[run.done % len(self.DEMO_SCORING)]
 
     def _finish_run(self, run: IntakeRunRow) -> None:
         now = self.now
@@ -301,7 +436,7 @@ class Store:
                 for seed in first_run_seeds():
                     job, evidence, questions = seed_to_job(seed, now)
                     job.first_seen = iso(now)
-                    save_job(self.s, job, evidence, questions, created_at=iso(now))
+                    save_job(self.s, job, evidence, questions, created_at=iso(now), cv_version=self.cv().version)
                     added.append(job.id)
                 set_kv(self.s, "lastRunJobIds", added)
                 run.results, run.new_jobs, run.credits_used = 118, len(added), 40 + len(added) * 5
@@ -371,6 +506,65 @@ class Store:
         )
         return self.s.scalar(stmt) or 0
 
+    def scored_today(self) -> int:
+        """How many jobs reached the scoring tier in the last 24 hours (MATCH-05).
+
+        Counted from `llm_calls`, not from a tally WERA keeps: the gateway writes a row per call
+        whether or not the work it paid for succeeded, so this cannot drift from what was spent.
+        One `fit.score` call is one job.
+
+        It only became load-bearing with batching. The cap used to be enforced by handing the
+        whole day's allowance to a single run's pre-filter, so nothing had to remember anything;
+        now the allowance goes out in batches of eight and three "score more" clicks have to add
+        up to no more than one old run was permitted.
+        """
+        since = iso(self.now - DAY)
+        return int(
+            self.s.scalar(
+                select(func.count()).select_from(LlmCallRow).where(LlmCallRow.task == "fit.score", LlmCallRow.called_at >= since)
+            )
+            or 0
+        )
+
+    def jobs_needing_score(self, *, cv_version: int, model: str) -> list[Job]:
+        """Every new job whose score is missing or no longer valid (SCH-02, COST-04).
+
+        The gap this closes: `judge` scored only the jobs the *current run* had just found. Two
+        consequences, and the person reported both. A job past the day's cap (MATCH-05) was never
+        revisited, because a board search skips URLs it already knows (SRCH-05) so the job was
+        never found again — it sat on the list unscored for good. And after a CV change every
+        stored score was invalid at once, with nothing to recompute any of them.
+
+        Asked with the same predicate that decides whether to pay — `fit.cached_evidence` — so
+        this can never disagree with it and re-score something that was fine. `status == "new"`
+        keeps it off the thousands of hidden jobs, which are filtered before any model call and
+        are not waiting for anything.
+        """
+        from ..nodes import fit
+
+        # Newest first, so the order is deterministic and the day's cap favours recent postings
+        # when the embedding pre-filter has nothing to choose between.
+        rows = self.s.scalars(select(JobRow).where(JobRow.status == "new").order_by(JobRow.first_seen.desc())).all()
+        jobs = [self._job(r) for r in rows]
+        return [j for j in jobs if fit.cached_evidence(self.s, j, cv_version=cv_version, model=model) is None]
+
+    def list_awaiting_score(self, *, limit: int) -> list[Job]:
+        """New jobs with no fit report, newest first — the queue, not just its size.
+
+        These are jobs WERA found, stored and filtered *in*: they passed the profile and are
+        waiting on a model. The screen only ever had the count, so they were invisible, and
+        before `jobs_needing_score` they could wait indefinitely — found, kept, and never shown.
+        Capped like the hidden sample, with `awaiting_score()` as the true figure.
+        """
+        rows = self.s.scalars(
+            select(JobRow)
+            .outerjoin(FitReportRow, FitReportRow.job_id == JobRow.id)
+            .where(JobRow.status == "new", FitReportRow.job_id.is_(None))
+            .order_by(JobRow.first_seen.desc())
+            .limit(limit)
+        ).all()
+        return [self._job(r) for r in rows]
+
     def list_unscored(self, status: str, *, limit: int) -> list[Job]:
         """Jobs as stored, with no fit report attached.
 
@@ -382,18 +576,19 @@ class Store:
         return [self._job(r) for r in rows]
 
     def scored(self, job: Job, weights: FitWeights | None = None) -> ScoredJob:
-        fit = build_fit_report(
+        report = build_fit_report(
             job.id,
             self._evidence(job.id),
             job.posted_at,
             job.description_status == "missing",
             weights or self._weights(),
             self.now,
+            stale=self._stale_score(job),
         )
         return ScoredJob.model_validate(
             {
                 **job.model_dump(),
-                "fit": fit.model_dump(),
+                "fit": report.model_dump(),
                 "urgency": urgency(job.posted_at, self.now),
                 "liveness": liveness(job, self.now),
             }
@@ -506,6 +701,8 @@ class Store:
             hidden=self.list_unscored("hidden", limit=self.HIDDEN_SHOWN),
             hidden_total=self.count_jobs("hidden"),
             awaiting_score=self.awaiting_score(),
+            awaiting=self.list_awaiting_score(limit=self.HIDDEN_SHOWN),
+            scoring_batch_size=wera().scoring_batch_size,
             snoozed=self.count_jobs("snoozed"),
             rejected=self.count_jobs("rejected"),
             active_run_ids=list(self.s.scalars(select(IntakeRunRow.id).where(IntakeRunRow.status == "running"))),
@@ -697,7 +894,7 @@ class Store:
         existing = self.s.scalars(select(JobRow).where(JobRow.dedupe_key == job.dedupe_key)).first()
         if existing is not None:
             raise ApiError(409, "ALREADY_KNOWN", f"WERA already has this job: {existing.title} at {existing.company}.")
-        save_job(self.s, job, evidence, questions, created_at=iso(self.now))
+        save_job(self.s, job, evidence, questions, created_at=iso(self.now), cv_version=cv.version)
         set_kv(self.s, "lastRunJobIds", [job.id])
         self.s.flush()
         return self.scored(job)
@@ -756,7 +953,42 @@ class Store:
 
     def save_document(self, app_id: str | None, kind: str, document: Any) -> None:
         """One document, as a new version (G2-02); earlier versions stay."""
+        if kind == "cv":
+            self._assert_verbatim(document)
         self._save_document(_required(app_id), kind, document.model_dump(mode="json"))
+
+    def _assert_verbatim(self, doc: Any) -> None:
+        """TAIL-01, enforced where it can't be bypassed: a tailored CV says only what the master
+        CV says, word for word.
+
+        `cv.tailor` returns ids and `nodes.tailor` copies the text, so this should be impossible
+        to violate — which is the reason to check it here rather than only in a test. The property
+        that stops a CV drifting is worth more than the code that currently provides it, and the
+        next person to touch the tailor node gets a failure at the save instead of a subtly
+        different CV every run.
+
+        Three exemptions, all correct: a line the person edited themselves is theirs to write
+        (G2-02), a line with no sources is the empty summary of a CV that has none, and a line
+        marked `composed` was written from its sources rather than copied from one of them.
+
+        That third case is the professional profile of a CV whose master has no summary (TAIL-07),
+        and it is the only one. It is exempted from *this* check and no other: `check_cited` still
+        holds it to the lines it cites, which is the check that fits prose — "is this carried by
+        its sources" rather than "is this a copy of its source". A selected bullet that drifts by
+        a character still fails here, which is the property this function exists to defend.
+        """
+        lines = cv_line_index(self.cv())
+        items = [doc.summary, *(b for s in doc.sections for i in s.items for b in i.bullets)]
+        for item in items:
+            if item.edited_by_user or item.composed or not item.source_ids:
+                continue
+            source = lines.get(item.source_ids[0])
+            if source is None or item.text != source["text"]:
+                raise ApiError(
+                    500,
+                    "CV_DRIFTED",
+                    "A tailored CV line doesn't match the master CV line it cites. Nothing was saved.",
+                )
 
     def save_answers(self, app_id: str | None, items: list[AnswerItem]) -> None:
         self._save_document(_required(app_id), "answers", {"items": [a.model_dump(mode="json") for a in items]})
@@ -1312,7 +1544,13 @@ class Store:
         # title × board — and COST-05 requires the dialog's arithmetic and the cap's to be the
         # same one. Asking `queries_for` means they cannot drift again.
         queries = len(queries_for(p, sites())) if board else 0
-        pages = 10 if board else 0
+        # SRCH-05: pages are read locally first (`sources.extract`) and only fall through to a
+        # paid scrape when no free rung could read them. This figure is what the dialog promises,
+        # so it is the *fallback* rate, not the page count — and it is deliberately pessimistic
+        # rather than optimistic, because a quote that comes in under is a good surprise and one
+        # that comes in over is the thing the cap exists to prevent. Revise it from a real run's
+        # `fallbackPages`, which is recorded for exactly this purpose.
+        pages = 3 if board else 0
         stats = get_kv(self.s, "stats")
         return Estimate(
             queries=queries,
@@ -1339,8 +1577,9 @@ class Store:
 
     def _start_runs(self, channels: list[str], *, scheduled: bool) -> dict[str, str]:
         self.settle()
-        if self.s.scalar(select(func.count()).select_from(IntakeRunRow).where(IntakeRunRow.status == "running")):
-            raise ApiError(409, "RUN_ACTIVE", "A search is already running. Wait for it to finish or cancel it.")
+        active = self.s.scalars(select(IntakeRunRow.channel).where(IntakeRunRow.status == "running")).first()
+        if active is not None:
+            raise ApiError(409, "RUN_ACTIVE", f"{_run_name(active)} already running. Wait for it to finish or cancel it.")
         on = self._profile().channels
         enabled = [
             c for c in channels if (on.board_search if c == "board_search" else on.inbox if c == "email_alert" else on.watchlist)
@@ -1374,6 +1613,88 @@ class Store:
         self.s.flush()
         return ids
 
+    def start_rescore_if_idle(self) -> str | None:
+        """Start a re-scoring pass, or say why not (CV-08, SCH-02).
+
+        Returns the run id, or `None` when it didn't start. **Never raises**, which is the whole
+        design: this is called from `put_cv`, and saving a CV must not fail because a search
+        happens to be running or because the week's model budget is spent. Both of those are
+        reasons to not score right now, not reasons to lose someone's CV.
+
+        Skipping is safe rather than silent. Every stored score is already marked `stale` on the
+        read path (see `_stale_score`), so the shortlist says so; and the next ordinary run picks
+        the work up anyway, because `judge` now asks `jobs_needing_score` rather than scoring only
+        what it just found. This run is the thing that makes it *prompt*, not the thing that makes
+        it happen.
+        """
+        self.settle()
+        if self.s.scalar(select(func.count()).select_from(IntakeRunRow).where(IntakeRunRow.status == "running")):
+            logfire.info("Not re-scoring yet: a run is already active")
+            return None
+        if not self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model()):
+            # A fresh install, or a CV edit that changed nothing a score depends on. Either way a
+            # run row here would be a progress bar for no work.
+            logfire.info("Nothing to re-score")
+            return None
+        try:
+            self._assert_budget()  # COST-01: a person's action, so it refuses rather than overspends
+        except ApiError:
+            logfire.info("Not re-scoring: this week's model budget is spent")
+            return None
+        return self._start_scoring_run("rescore")
+
+    def start_score_more(self) -> RunIds:
+        """MATCH-05: call up the next batch from the broad search's pool.
+
+        The twin of `start_rescore_if_idle` and the opposite in one way that matters: **this one
+        raises.** A re-score is a side effect of saving a CV, so it declines rather than cost
+        someone their CV; this is a button whose entire purpose is to score more jobs, and a
+        button that silently does nothing is worse than one that says why it can't.
+        """
+        self.settle()
+        active = self.s.scalars(select(IntakeRunRow.channel).where(IntakeRunRow.status == "running")).first()
+        if active is not None:
+            raise ApiError(409, "RUN_ACTIVE", f"{_run_name(active)} already running. Wait for it to finish or cancel it.")
+        if not self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model()):
+            raise ApiError(409, "NOTHING_TO_SCORE", "Every job on your list has an up-to-date score. Run a search to find more.")
+        cfg = wera()
+        if self.scored_today() >= cfg.max_scored_per_day:
+            raise ApiError(
+                429,
+                "DAILY_CAP",
+                f"WERA has scored {cfg.max_scored_per_day} jobs today, which is the daily limit. "
+                "The rest are waiting, and tomorrow's run will reach them. Raise `max_scored_per_day` "
+                "in config/wera.yaml to change it.",
+            )
+        self._assert_budget()  # COST-01
+        return RunIds(run_ids=[self._start_scoring_run("score_more")])
+
+    def _start_scoring_run(self, channel: str) -> str:
+        """One `intake_runs` row for a pass that only scores — no channel, no credits, no fetching."""
+        run = IntakeRunRow(
+            id=f"run-{self._next_id()}",
+            channel=channel,
+            status="running",
+            started_at=iso(self.now),
+            progress=0,
+            # Straight to `scoring`: there is nothing to search for. The bar is honest from the
+            # first poll rather than sitting in a phase this run never enters.
+            phase="scoring",
+            done=0,
+            total=0,
+            queries=0,
+            results=0,
+            new_jobs=0,
+            credits_used=0,
+            credits_saved=0,
+            errors=[],
+            duration_ms=RUN_MS[channel],
+            settled=False,
+        )
+        self.s.add(run)
+        self.s.flush()
+        return run.id
+
     def get_run(self, run_id: str) -> IntakeRun:
         self.settle()
         run = self.s.get(IntakeRunRow, run_id)
@@ -1387,6 +1708,7 @@ class Store:
             finished_at=run.finished_at,
             progress=run.progress,
             phase=run.phase,  # type: ignore[arg-type]
+            detail=run.detail,
             done=run.done,
             total=run.total,
             queries=run.queries,
@@ -1394,6 +1716,12 @@ class Store:
             new_jobs=run.new_jobs,
             credits_used=run.credits_used,
             credits_saved=run.credits_saved,
+            local_pages=run.local_pages,
+            fallback_pages=run.fallback_pages,
+            # From config rather than the row: it is how scoring is handed out *now*, and a run
+            # reading back a batch size that has since changed would make the screen draw a
+            # boundary in the wrong place.
+            batch_size=wera().scoring_batch_size,
             errors=[RunError.model_validate(e) for e in run.errors],
         )
 
@@ -1411,7 +1739,66 @@ class Store:
     def cv_lines(self) -> dict[str, CvLine]:
         return {k: CvLine.model_validate(v) for k, v in cv_line_index(self.cv()).items()}
 
-    def put_cv(self, cv: MasterCV) -> int:
+    # Everything a CV is upstream of, newest dependency first so a foreign key is never left
+    # pointing at a deleted row. SQLite doesn't enforce them by default and Postgres does, so the
+    # order is load-bearing on one of the two backends and free on the other.
+    #
+    # Deliberately absent, and each for its own reason:
+    #
+    # * `llm_calls` — the money. It is the ledger the weekly budget reads (COST-01), so clearing
+    #   it would hand back spend that really happened and let a test afternoon run past the cap.
+    # * `kv` — holds `counter`, which `_next_id` increments. Resetting it would make a new
+    #   application reuse a dead one's id, and with it a dead one's paused graph thread.
+    # * `master_cv`, `contact`, `search_profile`, `settings` — the person, not their job list.
+    #   The CV being saved is the whole point of the operation.
+    RESET_TABLES = (DocumentRow, ApplicationRow, FitReportRow, DecisionRow, JobRow, CrawlCacheRow, IntakeRunRow)
+
+    def reset_job_world(self) -> dict[str, int]:
+        """Delete every job, score, decision, application and pack, and the crawl cache with them.
+
+        What `reset_on_cv_upload` does when it is on, and the operation that makes "upload a CV
+        and see how the whole service handles it" repeatable. Returns a row count per table so
+        the caller can say what it removed rather than clearing someone's work silently.
+
+        **Delete, not archive**, and that is forced rather than chosen: `known_apply_urls` reads
+        *every* job row whatever its status, so an archived job's URL is still a URL that
+        `firecrawl_search` skips (SRCH-05). Archiving would leave a clean screen behind which the
+        next search quietly found nothing — the opposite of a fresh start, and the failure would
+        look like the search being broken.
+
+        **The crawl cache goes too** (SRCH-10), for the same reason: a cached search comes back
+        without running, so leaving it would mean the first thing tested after a reset is the
+        cache rather than the search.
+
+        Paused graph threads are left where they are. A thread is keyed on an application id and
+        `_next_id` never reuses one, so an orphan is inert — and unlinking the checkpoint file
+        out from under the connections currently holding it open would be a real bug in exchange
+        for tidiness nobody can see.
+        """
+        self.settle()
+        # A run holding jobs that are about to disappear has nothing left to do. Cancelled rather
+        # than left running, because `start_rescore_if_idle` and `start_score_more` both refuse
+        # while one is active — so a run abandoned here would block the next search instead.
+        for run in self.s.scalars(select(IntakeRunRow).where(IntakeRunRow.status == "running")).all():
+            run.status, run.finished_at, run.settled = "cancelled", iso(self.now), True
+        self.s.flush()
+
+        counts: dict[str, int] = {}
+        for table in self.RESET_TABLES:
+            counts[table.__tablename__] = self.s.query(table).delete(synchronize_session=False)
+        self.s.flush()
+        self.s.expire_all()  # the ORM is holding rows that no longer exist
+        self.cleared_jobs = counts[JobRow.__tablename__]
+        logfire.info("Cleared the job backlog for a new CV: {counts}", counts=counts)
+        return counts
+
+    def put_cv(self, cv: MasterCV, *, rescore: bool = True) -> int:
+        """Save a new version of the master CV, and re-judge the shortlist against it.
+
+        `rescore=False` is for a caller that owns its own scoring — the eval harness pins a CV
+        into a throwaway database and measures scoring itself, so a background pass there would
+        spend money on fixtures and race the thing being measured.
+        """
         ids = [
             *([cv.summary.id] if cv.summary else []),
             *[x for r in [*cv.experience, *cv.projects] for x in [r.id, *(b.id for b in r.bullets)]],
@@ -1436,6 +1823,29 @@ class Store:
         self.s.add(MasterCvRow(version=cv.version, data=cv.model_dump(mode="json"), saved_at=iso(self.now)))
         self.s.flush()
         self._cv_cache = cv
+
+        # CV-08 / SCH-02: a new CV makes every stored fit score a judgement about a document that
+        # no longer exists. `fit_reports` has always keyed on `cv_version`, but only the write
+        # path read it, so the shortlist went on showing scores from the old CV indefinitely and
+        # nothing recomputed them. There are two answers to that and the config picks one.
+        #
+        # Re-scoring keeps the jobs and re-judges them, which is what a real user wants: their
+        # shortlist survives a typo fix. Clearing throws the jobs away so the next search starts
+        # from nothing, which is what a single tester wants: each CV gets an independent run at
+        # the whole pipeline, and a pack cites bullet ids that a different CV simply doesn't have.
+        #
+        # Re-scoring is deferred rather than awaited: it is minutes of work and this is a request
+        # someone is waiting on. `start_rescore_if_idle` declines instead of raising, so a busy
+        # run or a spent budget costs the re-score, never the CV. Clearing is immediate — it is
+        # fast, and a half-cleared list is worse than either state.
+        if rescore and wera().reset_on_cv_upload:
+            self.reset_job_world()
+            return cv.version
+        run_id = self.start_rescore_if_idle() if rescore else None
+        if run_id is not None:
+            from ..graphs.intake import run_rescore
+
+            self.defer(lambda: run_rescore(run_id), name=f"rescore:{run_id}")
         return cv.version
 
     def import_cv_yaml(self, text: str) -> MasterCV:
@@ -1583,6 +1993,14 @@ class Store:
     def put_settings(self, patch: SettingsPatch) -> SettingsResponse:
         data = dict(self._settings())
         changes = patch.model_dump(mode="json", exclude={"inbox"})
+        # SET-01: a tier the person picked here is theirs and config must stop overriding it; a
+        # tier they never touched should keep tracking `config/wera.yaml`. Recorded per tier
+        # rather than as one flag, so choosing a writing model doesn't silently freeze the other
+        # three at whatever they happened to be that day. See `state.with_model_defaults`.
+        if "models" in changes:
+            before = data.get("models") or {}
+            picked = {tier for tier, model in (changes["models"] or {}).items() if model != before.get(tier)}
+            data[state.MODELS_CHOSEN] = sorted(set(data.get(state.MODELS_CHOSEN) or []) | picked)
         data.update(changes)
         if patch.inbox is not None:
             data["inbox"] = {**data["inbox"], "senders": patch.inbox.senders}

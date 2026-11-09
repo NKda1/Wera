@@ -2,17 +2,21 @@
 
 It behaves like the SPEC §9.3 contract without any network: it selects master-CV bullets
 for the job, keeps their text verbatim with real source ids, and computes the ATS report in
-code. The real model replaces the selection and wording; the guard, coverage and retries stay.
+code. The real model replaces the selection; the guard and the coverage pass stay.
+
+Verbatim text was always how this responder worked, which is worth noting: the demo was the one
+place a tailored CV could not drift, so it was also the one place the bug this responder now
+matches — a model re-typing every bullet — never showed up.
 """
 
 import re
 from dataclasses import dataclass
 
+from ..config import wera
 from ..domain.guard import check_cited
 from ..domain.questions import SENSITIVE, kind, links_answer
-from ..domain.scoring import should_retry_tailoring
 from ..domain.vocab import skill_text, text_has_term
-from ..nodes.ats import build_ats
+from ..nodes.ats import build_ats, reconcile_skills
 from ..schemas.cv import Bullet, MasterCV, Role
 from ..schemas.jobs import FitEvidence, Job
 from ..schemas.pack import (
@@ -141,7 +145,18 @@ def _build_cv(inp: PackInput, chosen: dict[str, list[Bullet]]) -> TailoredCV:
     sections = [s for s in (section("experience", cv.experience), section("projects", cv.projects)) if s.items]
     used = {b.id for bs in chosen.values() for b in bs}
     omitted = [b.id for r in [*cv.experience, *cv.projects] for b in r.bullets if b.id not in used]
-    summary = Cited(text=cv.summary.text, source_ids=[cv.summary.id]) if cv.summary else Cited(text="", source_ids=[])
+    # TAIL-07's chain, the same way `nodes.tailor` runs it: the applicant's own summary first,
+    # then one composed from their cited lines. The seed path builds documents directly rather
+    # than through the gateway, so the fallback has to be here too or the demo would be the one
+    # place a CV still went out with no profile on it.
+    if cv.summary:
+        summary = Cited(text=cv.summary.text, source_ids=[cv.summary.id])
+    else:
+        # `composed=True` exactly as `nodes.tailor._profile` sets it. Without it the demo seed
+        # writes a document the real save path refuses as drifted, which is the one place DEMO-02
+        # cannot afford to differ: the demo would be modelling a pack that cannot be stored.
+        drafted = _summary_output(inp)
+        summary = Cited(text=drafted["text"], source_ids=drafted["sourceIds"], composed=True)
     doc = TailoredCV(
         job_id=job.id,
         cv_version=cv.version,
@@ -332,7 +347,11 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
         job_id=job.id,
         greeting=f"Dear {contact}," if contact else "Dear Hiring Team,",
         paragraphs=paragraphs,
-        signoff=f"Kind regards,\n{cv.person.name}",
+        # One of `LetterOutput`'s three valedictions. This was "Kind regards", which the real path
+        # would have normalised away — a demo that models what the product corrects teaches the
+        # wrong thing, and `generate_pack` builds this letter directly rather than through the
+        # schema, so nothing would have corrected it here.
+        signoff=f"Best regards,\n{cv.person.name}",
         company_fact=CompanyFact(quote=fact, policy_quote=policy),
         word_count=sum(words(p.text) for p in paragraphs),
         guard=GuardResult(pass_=True, violations=[], repaired=False),
@@ -397,17 +416,12 @@ def generate_pack(inp: PackInput) -> Pack:
     if short:
         total -= 1
 
-    # ATSC-03: re-tailor with missing-but-backed keywords as hints, max 2 retries.
-    attempt = 1
-    extra: list[str] = []
-    doc = _build_cv(inp, _select_bullets(inp, total, per_role, extra))
-    ats = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, attempt=attempt)
-    while should_retry_tailoring(ats) and attempt < 3:
-        attempt += 1
-        extra = [k.term for k in ats.keywords if not k.matched and k.in_master_cv]
-        total += 1
-        doc = _build_cv(inp, _select_bullets(inp, total, per_role + 1, extra))
-        ats = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, attempt=attempt)
+    # ATSC-02/03: select, then cover the job's keywords from the CV's own skills. The same two
+    # steps the real path takes (`drafting.step_cv`), and for the same reason — the re-tailor
+    # loop that used to be here is gone.
+    doc = _build_cv(inp, _select_bullets(inp, total, per_role, []))
+    doc = reconcile_skills(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, threshold=wera().ats_threshold)
+    ats = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, attempt=1)
 
     return Pack(cv=doc, letter=_build_letter(inp, doc), ats=ats, answers=_build_answers(inp, doc))
 
@@ -469,18 +483,66 @@ def _cites(item: Cited) -> dict:
 
 
 def _tailor_output(inp: PackInput) -> dict:
-    """Selection, as the writing tier would return it. Keyword hints ride in on the note, which
-    `_note_hints` already reads, so the ATS retry loop needs nothing extra here."""
+    """Selection, as the select tier would return it: ids only, matching `TailorSelection`.
+
+    No bullet text, for the same reason the real schema has none — the demo exercises the real
+    contract (DEMO-02), and a responder that still returned text would be the one place where a
+    drifted CV was representable.
+    """
     total, per_role = _budget(inp)
-    doc = _build_cv(inp, _select_bullets(inp, total, per_role, []))
-    items = {s.kind: [{"roleId": i.role_id, "bullets": [_cites(b) for b in i.bullets]} for i in s.items] for s in doc.sections}
+    chosen = _select_bullets(inp, total, per_role, [])
+    cv = inp.cv
+    used = {b.id for bs in chosen.values() for b in bs}
+
+    def picks(roles: list[Role]) -> list[dict]:
+        return [{"roleId": r.id, "bulletIds": [b.id for b in chosen[r.id]]} for r in roles if chosen.get(r.id)]
+
     return {
-        "summary": _cites(doc.summary),
-        "experience": items.get("experience", []),
-        "projects": items.get("projects", []),
-        "skills": doc.skills,
-        "omittedBulletIds": doc.omitted_bullet_ids,
+        "summaryId": cv.summary.id if cv.summary else None,
+        "experience": picks(cv.experience),
+        "projects": picks(cv.projects),
+        "skills": _tailor_skills(inp),
+        "omittedBulletIds": [b.id for r in [*cv.experience, *cv.projects] for b in r.bullets if b.id not in used],
     }
+
+
+def _summary_output(inp: PackInput) -> dict:
+    """A profile for a CV that has no summary of its own, as `summary.write` would return it
+    (TAIL-07).
+
+    Built out of the cited bullets' own words, which is what keeps it past `check_cited`: every
+    number in the text is in a line it cites, and every term is either there or stated as a fact
+    elsewhere in the CV. The same discipline as the demo letter, for the same reason.
+    """
+    cv = inp.cv
+    total, per_role = _budget(inp)
+    chosen = _select_bullets(inp, total, per_role, [])
+    picked = [b for r in [*cv.experience, *cv.projects] for b in chosen.get(r.id, [])][:2]
+
+    # What they are, from the CV's own headline or its most recent qualification — never from the
+    # job title, which would make the profile unusable the moment it is forwarded.
+    if cv.person.headline:
+        opener = no_stop(cv.person.headline)
+    elif cv.education:
+        opener = no_stop(cv.education[0].degree)
+    else:
+        opener = f"{no_stop(cv.experience[0].title)}" if cv.experience else "Software engineer"
+
+    parts = [f"{opener}."]
+    # The bullets as written. Not `.capitalize()`, which lower-cases everything after the first
+    # character and turned "FastAPI", "Presidio", "LLMs" and "C# / .NET" into mush — a profile is
+    # read for its proper nouns more than for its sentences.
+    parts += [f"{no_stop(b.text)}." for b in picked]
+    overlap = _matched_skills(inp, limit=3)
+    if overlap:
+        parts.append(f"Works in {_sentence_list(overlap)}.")
+    text = " ".join(parts)
+    # The 20–90 word band `SummaryDraft` enforces. Trimming the last sentence is better than
+    # trimming mid-clause, which is what a character budget would do.
+    while words(text) > 90 and len(parts) > 2:
+        parts.pop(-2)
+        text = " ".join(parts)
+    return {"text": text, "sourceIds": [sid for b in picked for sid in [b.id]]}
 
 
 def _letter_output(inp: PackInput) -> dict:
@@ -728,6 +790,8 @@ def respond(task: str, variables: dict, context: dict | None, demo_input: PackIn
         raise KeyError(f"The demo responder for {task!r} needs demo_input=PackInput")
     if task == "cv.tailor":
         return _tailor_output(demo_input)
+    if task == "summary.write":
+        return _summary_output(demo_input)
     if task == "letter.write":
         return _letter_output(demo_input)
     if task == "answers.draft":

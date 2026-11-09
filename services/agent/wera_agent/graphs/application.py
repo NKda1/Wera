@@ -39,6 +39,9 @@ class AppState(BaseModel):
     decision: Gate1Action | None = None
     gate2: Gate2Action | None = None
     note: str | None = None
+    # Vestigial: the ATS retry loop that used these is gone (see the `ats` node). Kept with their
+    # defaults so a checkpoint written before that change still loads — a thread parked at a gate
+    # must survive a deploy (REL-03), and a dropped field would make it unreadable.
     attempt: int = 1
     hints: list[str] = []
     failed: str | None = None  # a §9.4 code, when drafting couldn't finish
@@ -66,8 +69,6 @@ def gate1(state: AppState) -> dict[str, Any]:
         "decision": answer.get("action"),
         "application_id": answer.get("applicationId") or state.application_id,
         "note": answer.get("note"),
-        "attempt": 1,
-        "hints": [],
         "failed": None,
     }
 
@@ -96,7 +97,7 @@ def _mark(state: AppState, step: str) -> str:
 def tailor(state: AppState) -> dict[str, Any]:
     _mark(state, "cv")
     with transaction() as session:
-        drafting.step_cv(session, _app(state), note=state.note, hints=state.hints, attempt=state.attempt)
+        drafting.step_cv(session, _app(state), note=state.note)
     return {}
 
 
@@ -108,18 +109,17 @@ def letter(state: AppState) -> dict[str, Any]:
 
 
 def ats(state: AppState) -> dict[str, Any]:
-    """ATSC-02/03: coverage in code, and the decision to re-tailor with hints."""
+    """ATSC-02: coverage in code. No longer a branch.
+
+    This node used to be able to send the draft back to `tailor` with keyword hints, and with
+    mean coverage at 48% against a 0.75 threshold it nearly always did — re-running the two most
+    expensive calls in the pack up to three times. `step_cv` now covers those keywords from the
+    CV's own skills before this runs, so this measures and moves on.
+    """
     _mark(state, "ats")
     with transaction() as session:
-        hints = drafting.step_ats(session, _app(state), note=state.note, attempt=state.attempt)
-    if hints:
-        logfire.info("Re-tailoring {job_id} for coverage, attempt {attempt}", job_id=state.job_id, attempt=state.attempt + 1)
-        return {"attempt": state.attempt + 1, "hints": hints}
-    return {"hints": []}
-
-
-def after_ats(state: AppState) -> str:
-    return "tailor" if state.hints else "answers"
+        drafting.step_ats(session, _app(state), note=state.note)
+    return {}
 
 
 def answers(state: AppState) -> dict[str, Any]:
@@ -141,7 +141,7 @@ def gate2(state: AppState) -> dict[str, Any]:
     answer = interrupt({"gate": 2, "jobId": state.job_id, "applicationId": state.application_id})
     if isinstance(answer, str):
         answer = {"action": answer}
-    return {"gate2": answer.get("action"), "note": answer.get("note"), "attempt": 1, "hints": []}
+    return {"gate2": answer.get("action"), "note": answer.get("note")}
 
 
 def after_gate2(state: AppState) -> str:
@@ -173,7 +173,7 @@ def build() -> StateGraph:
     g.add_edge("snooze_wait", "gate1")
     g.add_edge("tailor", "letter")
     g.add_edge("letter", "ats")
-    g.add_conditional_edges("ats", after_ats, {"tailor": "tailor", "answers": "answers"})
+    g.add_edge("ats", "answers")
     g.add_edge("answers", "ready")
     g.add_edge("ready", "gate2")
     g.add_conditional_edges("gate2", after_gate2, {"tailor": "tailor", END: END})

@@ -120,8 +120,15 @@ function AtsCard({ ats }: { ats: AtsReport }) {
   const matched = ats.keywords.filter((k) => k.matched);
   const gaps = ats.keywords.filter((k) => !k.matched && !k.inMasterCv);
   const backed = ats.keywords.filter((k) => !k.matched && k.inMasterCv);
-  const good = ats.coverage >= 0.75;
+  // Two numbers, because one was answering two questions and so looked wrong at both. `coverage`
+  // is the literal overlap with the post and it is low for any partial match — a post naming 14
+  // technologies against a CV holding 5 reads 36% however well WERA did, and beside a fit score
+  // of 8 that looks like a contradiction rather than like "you can back 5 of these 14".
+  // `backedCoverage` is the half WERA is accountable for, and the sentence below names the gap
+  // between them so neither number has to be guessed at.
+  const good = ats.backedCoverage >= 0.75;
   const value = Math.round(ats.coverage * 100);
+  const coverable = Math.round(ats.backedCoverage * 100);
   return (
     <Card className="p-5">
       <div className="flex items-center justify-between gap-3">
@@ -131,6 +138,10 @@ function AtsCard({ ats }: { ats: AtsReport }) {
       <div className="mt-3 h-2 overflow-hidden rounded-full bg-mint-100" role="progressbar" aria-label="ATS keyword coverage" aria-valuemin={0} aria-valuemax={100} aria-valuenow={value}>
         <div className={cn("h-full rounded-full", good ? "bg-forest-700" : "bg-amber-500")} style={{ width: `${value}%` }} />
       </div>
+      <p className="mt-2 text-small text-ink-2">
+        {matched.length} of {ats.keywords.length} terms this post asks for are on your CV.
+        {gaps.length ? ` ${coverable}% of what your CV can back is in this pack — the other ${gaps.length} aren't in your CV at all.` : " Everything your CV can back is in this pack."}
+      </p>
       {ats.attempt > 1 ? <p className="mt-2 text-small text-ink-2">Retailored {ats.attempt - 1}× to lift coverage with lines from your CV.</p> : null}
 
       <p className="mt-4 mb-1.5 text-small text-ink-2">Matched · {matched.length}</p>

@@ -10,6 +10,20 @@ from wera_agent.services.demo_data import seed_to_job
 FERNHILL = 0  # Fernhill AI, Greenhouse
 
 
+def _letter_reply(**over) -> dict:
+    """A minimal valid `letter.write` reply, for testing one field at a time. Long enough to clear
+    `LetterOutput._length`, which counts the paragraphs."""
+    body = "I built the ingest path and cut its cost. " * 10
+    return {
+        "greeting": "Dear Hiring Team,",
+        "paragraphs": [{"text": body, "sourceIds": []} for _ in range(3)],
+        "signoff": "Sincerely,\nJordan Ellery",
+        "companyQuote": "",
+        "policyQuote": "",
+        **over,
+    }
+
+
 @pytest.fixture
 def pack(demo_cv, demo_jobs):
     seed = demo_jobs["shortlist"][FERNHILL]
@@ -45,11 +59,78 @@ class TestTheProfessionalProfileSurvives:
         assert fallback.text == demo_cv.summary.text
         assert fallback.source_ids == [demo_cv.summary.id]
 
-    def test_a_cv_with_no_summary_gets_no_invented_one(self, demo_cv):
-        """The one case where an empty profile is right: there is nothing honest to fall back to."""
+    def test_master_summary_alone_invents_nothing(self, demo_cv):
+        """`master_summary` is selection only: no summary in, nothing out. Composing one is a
+        separate call, so that this function can never be the thing that writes a claim."""
         from wera_agent.nodes.tailor import master_summary
 
         assert master_summary(demo_cv.model_copy(update={"summary": None})).text == ""
+
+    def test_a_cv_with_no_summary_still_gets_a_profile(self, demo_cv, demo_jobs):
+        """The bug this exists for: the CV went out with no professional profile at all.
+
+        The old chain was "the model's selection, or the master summary, or nothing", and for a CV
+        whose master has no summary every branch was nothing — so the export dropped the section
+        and the top of the page was a name and a contact line.
+        """
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        bare = demo_cv.model_copy(update={"summary": None})
+        doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=bare, cv_pages=1)).cv
+
+        assert doc.summary.text.strip(), "a CV with no master summary still has no profile"
+        assert 20 <= len(doc.summary.text.split()) <= 90
+
+    def test_a_composed_profile_cites_the_lines_it_was_built_from(self, demo_cv, demo_jobs):
+        """It is the one piece of CV prose a model writes, so it is held to the same citation rule
+        as a letter paragraph — and the guard has to actually pass, not merely run."""
+        from wera_agent.domain.vocab import cv_line_index
+
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        bare = demo_cv.model_copy(update={"summary": None})
+        doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=bare, cv_pages=1)).cv
+
+        lines = cv_line_index(bare)
+        assert doc.summary.source_ids
+        assert all(i in lines for i in doc.summary.source_ids)
+        assert doc.guard.pass_, doc.guard.violations
+
+    def test_a_composed_profile_survives_the_verbatim_check(self, demo_cv, demo_jobs, store):
+        """The collision `wera eval --packs` found: `Store._assert_verbatim` requires every cited
+        line to equal the master line it names, and a composed profile never can.
+
+        It cost 2 of 3 packs to `CV_DRIFTED`, and the third only "passed" because `summary.write`
+        had been truncated into the empty-profile fallback — so the feature either failed the save
+        or silently didn't happen. Asserted against the real save path, not against the flag.
+        """
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        bare = demo_cv.model_copy(update={"summary": None})
+        store.put_cv(bare, rescore=False)
+        doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=bare, cv_pages=1)).cv
+
+        assert doc.summary.composed, "a composed profile has to say so, or the save rejects it"
+        store._assert_verbatim(doc)  # raises CV_DRIFTED if the exemption is gone
+
+    def test_a_selected_bullet_that_drifts_is_still_caught(self, demo_cv, demo_jobs, store):
+        """Guards the exemption above: `composed` must buy the profile a pass and nothing else.
+        A tailored bullet that doesn't match its master line is still a refused document."""
+        from wera_agent.errors import ApiError
+
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)).cv
+        doc.sections[0].items[0].bullets[0].text = "Something the master CV never said."
+
+        with pytest.raises(ApiError) as caught:
+            store._assert_verbatim(doc)
+        assert caught.value.code == "CV_DRIFTED"
+
+    def test_a_composed_profile_does_not_name_the_company(self, demo_cv, demo_jobs):
+        """A profile is CV furniture, not a cover letter. One naming the employer is unusable the
+        moment the recruiter forwards the CV internally."""
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        bare = demo_cv.model_copy(update={"summary": None})
+        doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=bare, cv_pages=1)).cv
+
+        assert job.company.lower() not in doc.summary.text.lower()
 
 
 def test_only_lists_skills_from_the_master_cv(pack, demo_cv):
@@ -57,11 +138,124 @@ def test_only_lists_skills_from_the_master_cv(pack, demo_cv):
     assert set(p.cv.skills) <= {s.name for s in demo_cv.skills}
 
 
-def test_reports_gaps_the_cv_cant_back_and_never_invents_them(pack):
+def test_reports_gaps_the_cv_cant_back_and_never_invents_them(pack, demo_cv):
     p, _ = pack
     assert [k.term for k in p.ats.keywords if not k.matched and not k.in_master_cv] == ["Docker", "Model evaluation"]
-    assert "docker" not in tailored_text(p.cv).lower()
+    assert "docker" not in tailored_text(p.cv, demo_cv).lower()
     assert round(p.ats.coverage * 100) == 86
+
+
+def test_coverage_is_measured_over_the_page_the_parser_actually_reads(pack, demo_cv):
+    """`tailored_text` has to agree with `export/content.ts`, which renders role headers and the
+    education section from the master CV (TAIL-02).
+
+    It used to be summary + bullets + skills, so a degree subject the post asked for was reported
+    as a gap against a CV that prints it two inches above — and the headline percentage was
+    measuring a narrower document than the PDF it was describing.
+    """
+    p, _ = pack
+    text = tailored_text(p.cv, demo_cv).lower()
+    assert demo_cv.education[0].degree.lower() in text
+    assert demo_cv.education[0].institution.lower() in text
+    role = next(r for r in demo_cv.experience if any(i.role_id == r.id for s in p.cv.sections for i in s.items))
+    assert role.title.lower() in text and role.org.lower() in text
+
+
+class TestTheSameInputsGiveTheSameCv:
+    """The acceptance test for "CV generation is inconsistent every time".
+
+    The old `cv.tailor` returned each bullet's text, so the model retyped every line; altered
+    wording then failed the citation guard, a `guard.repair` call fired per failing line, and
+    whatever still failed was dropped — a different set each run. Selection by id removes every
+    step of that chain, so the output is a pure function of the inputs.
+    """
+
+    def test_two_runs_of_the_same_job_produce_identical_documents(self, demo_cv, demo_jobs):
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        inp = PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)
+        first, second = generate_pack(inp), generate_pack(inp)
+        assert first.cv.model_dump(mode="json") == second.cv.model_dump(mode="json")
+
+    def test_every_line_is_its_cited_master_cv_line(self, pack, demo_cv):
+        """What "verbatim" means, checked character for character rather than by eye."""
+        p, _ = pack
+        lines = cv_line_index(demo_cv)
+        for bullet in [b for s in p.cv.sections for i in s.items for b in i.bullets]:
+            assert bullet.text == lines[bullet.source_ids[0]]["text"]
+
+
+class TestSkillsReconciliation:
+    """ATSC-02/03 in code. What replaced the re-tailor loop — see `nodes.ats.reconcile_skills`."""
+
+    def test_covers_a_required_keyword_the_cv_lists_as_a_skill(self, demo_cv, demo_jobs):
+        """The coverage win, and the whole reason the loop existed: a keyword the CV already
+        backs just has to appear, which needs no model."""
+        from wera_agent.nodes.ats import reconcile_skills
+
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        inp = PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)
+        p = generate_pack(inp)
+
+        backed = [k for k in p.ats.keywords if k.in_master_cv]
+        assert backed, "fixture no longer has a keyword the CV can back"
+        # Strip the skills line and let reconciliation rebuild it from nothing.
+        stripped = p.cv.model_copy(deep=True)
+        stripped.skills = []
+        rebuilt = reconcile_skills(stripped, cv=demo_cv, evidence=evidence, cv_pages=1, threshold=0.75)
+        assert rebuilt.skills
+
+    def test_never_adds_a_keyword_the_cv_does_not_list_as_a_skill(self, demo_cv, demo_jobs):
+        """ATSC-04: a term that appears only inside a bullet is a gap for the person to decide
+        about, not a skill for WERA to claim on their behalf."""
+        from wera_agent.nodes.ats import reconcile_skills
+
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)).cv
+        rebuilt = reconcile_skills(doc, cv=demo_cv, evidence=evidence, cv_pages=1, threshold=1.0)
+        assert set(rebuilt.skills) <= {s.name for s in demo_cv.skills}
+        assert "Docker" not in rebuilt.skills  # the fixture's unbacked keyword
+
+    def test_stops_at_the_threshold_rather_than_stuffing_the_line(self, demo_cv, demo_jobs):
+        """A skills line carrying every term the post mentioned clears the robot and reads as
+        keyword spam to the person who sees it next."""
+        from wera_agent.nodes.ats import reconcile_skills
+
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)).cv
+        lenient = reconcile_skills(doc.model_copy(deep=True), cv=demo_cv, evidence=evidence, cv_pages=1, threshold=0.1)
+        strict = reconcile_skills(doc.model_copy(deep=True), cv=demo_cv, evidence=evidence, cv_pages=1, threshold=1.0)
+        assert len(lenient.skills) <= len(strict.skills)
+
+    def test_keeps_the_skills_line_inside_the_page_budget(self, demo_cv, demo_jobs):
+        from wera_agent.nodes.ats import SKILLS_LINE_CHARS, reconcile_skills
+
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)).cv
+        rebuilt = reconcile_skills(doc, cv=demo_cv, evidence=evidence, cv_pages=1, threshold=1.0)
+        assert len(" · ".join(rebuilt.skills)) <= SKILLS_LINE_CHARS
+
+    def test_the_threshold_is_met_by_the_line_that_actually_ships(self, demo_cv, demo_jobs):
+        """The loop stops at the threshold and the line is then capped to the page, so the two
+        have to be measured on the same thing.
+
+        They weren't: coverage was checked against every skill chosen so far, and `_fit_line` then
+        dropped whatever didn't fit — so a job with more backable keywords than fit on one page
+        stopped early against a line it had not produced, and the stored report came in under the
+        threshold the function had just declared met.
+        """
+        from wera_agent.nodes.ats import build_ats, reconcile_skills
+
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)).cv
+        doc.skills = []
+        rebuilt = reconcile_skills(doc, cv=demo_cv, evidence=evidence, cv_pages=1, threshold=0.75)
+        report = build_ats(rebuilt, cv=demo_cv, evidence=evidence, cv_pages=1, job=job, attempt=1)
+
+        backable = [k for k in report.keywords if k.in_master_cv]
+        uncovered = [k.term for k in backable if not k.matched]
+        # Either the threshold is genuinely met, or every keyword the CV can back is on the page
+        # and the shortfall is the applicant's gap rather than a premature stop.
+        assert report.coverage >= 0.75 or not uncovered, uncovered
 
 
 def test_quotes_a_company_fact_verbatim(pack):
@@ -103,6 +297,30 @@ class TestTheLetterReadsLikeAPerson:
             if letter:
                 assert 250 <= letter["wordCount"] <= 350, f"{app['job']['company']}: {letter['wordCount']} words"
                 assert letter["guard"]["pass"], f"{app['job']['company']}: lengthening broke the guard"
+
+    def test_the_salutation_is_never_a_dead_one(self):
+        """ "To Whom It May Concern" dates a letter by forty years and "Dear Sir or Madam" guesses
+        at something it has no business guessing at. Corrected rather than rejected: the greeting
+        is one line of furniture, and spending one of two attempts on it would be a poor trade."""
+        from wera_agent.schemas.llm_outputs import LetterOutput
+
+        for dead in ("To Whom It May Concern,", "Dear Sir or Madam", "dear sirs,"):
+            out = LetterOutput.model_validate(_letter_reply(greeting=dead))
+            assert out.greeting == "Dear Hiring Team,"
+
+    def test_a_named_salutation_is_left_alone(self):
+        from wera_agent.schemas.llm_outputs import LetterOutput
+
+        assert LetterOutput.model_validate(_letter_reply(greeting="Dear Priya Raman,")).greeting == "Dear Priya Raman,"
+
+    def test_the_signoff_is_one_of_three_valedictions(self):
+        """A closed set, because there are three forms a cover letter ends with and everything
+        else a model reaches for is wrong for the register or wrong for the century."""
+        from wera_agent.schemas.llm_outputs import LetterOutput
+
+        assert LetterOutput.model_validate(_letter_reply(signoff="Warmest regards,\nJordan")).signoff == "Sincerely,\nJordan"
+        assert LetterOutput.model_validate(_letter_reply(signoff="Best regards\nJordan")).signoff == "Best regards,\nJordan"
+        assert LetterOutput.model_validate(_letter_reply(signoff="Respectfully,")).signoff == "Respectfully,"
 
     def test_the_ban_list_actually_catches_filler(self, pack):
         """Guards the guard: a check that never fires is indistinguishable from no check. The

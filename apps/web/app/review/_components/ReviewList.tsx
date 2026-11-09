@@ -46,7 +46,7 @@ export function ReviewList({ apps }: { apps: Item[] }) {
                   {a.job.company} · {formatLocation(a.job)}
                   {a.changeNote ? ` · redrafting with your note` : ""}
                 </p>
-                <div className="mt-3">{a.draft ? <DraftProgress step={a.draft.step} /> : null}</div>
+                <div className="mt-3">{a.draft ? <DraftProgress step={a.draft.step} progress={a.draft.progress} /> : null}</div>
               </div>
               <Button
                 variant="secondary"

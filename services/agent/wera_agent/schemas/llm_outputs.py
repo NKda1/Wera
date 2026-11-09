@@ -8,12 +8,17 @@ Every constraint that matters lives on the model, so `with_structured_output(str
 sends it to the provider as JSON Schema *and* Pydantic re-checks it on the way back. Checks
 that need the master CV take it through validation context:
 
-    TailorOutput.model_validate(data, context={"cv": cv})
+    TailorSelection.model_validate(data, context={"cv": cv})
+
+Strict JSON schema enforces *shape*, and some of what matters here is *content* — whether a line
+is the applicant's own wording, whether a quote is really in the post. Where a constraint can be
+made structural it is, because that is the only kind a model cannot get wrong: see
+`TailorSelection`, which has no free-text field at all.
 """
 
 from typing import Annotated, Any, Literal
 
-from pydantic import ValidationInfo, field_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 
 from .base import Model, Opt, check, count, fail, required
 from .jobs import JobKeyword, Location, RemoteMode, Salary, SubScore
@@ -25,6 +30,24 @@ Score = Annotated[float, check(lambda v: 0 <= v <= 10, "range", "Scores run from
 REASON_LIMIT = 200
 Reason = Annotated[str, check(lambda v: len(v) <= REASON_LIMIT, "max", f"Keep the reason under {REASON_LIMIT} characters")]
 Term = Annotated[str, required("This can't be empty")]
+
+# A bound on the letter's length, as a validator rather than a sentence in the prompt. Same
+# reason as `REASON_LIMIT`: strict mode ignores `maxLength`, so a bound that is only described is
+# a bound that is only suggested — every `fit.score` reply overran `reason` until the limit was
+# enforced for real.
+#
+# **Wider than LTR-01's 250–350, deliberately.** That range is the target and it stays in
+# `LETTER_WRITE`; this is the range outside which something has gone wrong. The two are not the
+# same job, and conflating them is expensive: `llm.demo`'s reference letters — written before any
+# of this and perfectly good letters — come in at 212–238 words, so a 250-word floor would have
+# rejected every one of them and spent a retry doing it. A validator that fires on good output is
+# worse than no validator, because it burns the attempt that a genuinely bad reply needs.
+#
+# So: a letter under 150 words is a stub, and over 500 is an essay. Either is drift worth one
+# retry carrying the numbers back (§8.5 step 1), which is actionable in a way "write it well"
+# is not.
+LETTER_MIN_WORDS = 150
+LETTER_MAX_WORDS = 500
 
 
 def _cv(info: ValidationInfo) -> Any | None:
@@ -52,18 +75,33 @@ class Cites(Model):
     """A written line and the master-CV entries it came from (TAIL-03)."""
 
     text: Annotated[str, required("The line can't be empty")]
-    source_ids: Annotated[list[str], count(1, None, "Every line must cite at least one master-CV entry")]
+    source_ids: list[str]
 
     @field_validator("source_ids")
     @classmethod
-    def _ids_exist(cls, v: list[str], info: ValidationInfo) -> list[str]:
-        """§8.5 step 2, as a schema check so a bad citation never reaches the guard."""
+    def _drop_unknown_ids(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        """§8.5 step 2 — but as a filter, not a veto.
+
+        This used to raise, which meant **one mistyped id threw away an entire letter**. A model
+        writing four cited paragraphs has four chances to mangle an opaque id like `exp-2-b3`,
+        and `letter.write` was failing its first attempt essentially every time: two calls and
+        twice the wall clock for every cover letter, at 17–22 seconds each.
+
+        Dropping instead loses nothing, because the guard behind this is *stricter* and works per
+        paragraph rather than per letter. `domain.guard.check_cited` asks whether the text is
+        actually carried by the lines it cites; a paragraph left with no sources fails that and
+        is repaired or dropped, with the drop shown to the person (LTR-01). So an invented
+        citation ends up in exactly the same place it did before — it just doesn't take three
+        good paragraphs and twenty seconds with it on the way.
+
+        Note what is deliberately *not* done here: `source_ids` no longer carries a minimum. An
+        empty list is a paragraph the guard will reject, which is a better outcome than a retry.
+        """
         cv = _cv(info)
-        if cv is not None:
-            unknown = [i for i in v if i not in _known_bullet_ids(cv)]
-            if unknown:
-                raise fail("source_ids", f"Not in the master CV: {', '.join(unknown)}")
-        return v
+        if cv is None:
+            return v
+        known = _known_bullet_ids(cv)
+        return [i for i in v if i in known]
 
 
 # ---- profile.generate (PRF-01) ----
@@ -194,17 +232,73 @@ class KeywordList(Model):
 # ---- cv.tailor, letter.write, answers.draft ----
 
 
-class TailorItem(Model):
+class RolePick(Model):
+    """One master-CV role, and which of its lines to show (TAIL-01).
+
+    Ids only. There is deliberately no `text` field — see `TailorSelection`.
+    """
+
     role_id: Annotated[str, required("Name the role this belongs to")]
-    bullets: Annotated[list[Cites], count(1, None, "A role needs at least one line")]
+    bullet_ids: Annotated[list[str], count(1, None, "A role needs at least one line")]
+
+    @model_validator(mode="after")
+    def _bullets_belong_to_role(self, info: ValidationInfo) -> "RolePick":
+        """The role must exist, and each line must be one of *that* role's lines.
+
+        Checking the pair rather than each id separately is what stops a bullet being filed under
+        a role it did not come from: every id would still be "in the master CV", and the rendered
+        CV would attribute real work to the wrong employer.
+        """
+        cv = _cv(info)
+        if cv is None:
+            return self
+        role = next((r for r in [*cv.experience, *cv.projects] if r.id == self.role_id), None)
+        if role is None:
+            raise fail("role_id", f"Not a role in the master CV: {self.role_id}")
+        mine = {b.id for b in role.bullets}
+        stray = [i for i in self.bullet_ids if i not in mine]
+        if stray:
+            raise fail("bullet_ids", f"Not lines of {self.role_id}: {', '.join(stray)}")
+        return self
 
 
-class TailorOutput(Model):
-    summary: Cites
-    experience: list[TailorItem]
-    projects: list[TailorItem]
+class TailorSelection(Model):
+    """cv.tailor's reply: which master-CV lines to show, and in what order (TAIL-01).
+
+    **Selection, not writing — and the schema is what makes that true, not the prompt.** This
+    replaced a `TailorOutput` that carried each bullet's `text`, so the model re-typed every line
+    on every call. The wording drifted, the citation guard (§8.5) rejected the drift, a
+    `guard.repair` call fired per failing line, and whatever still failed was dropped — a
+    different set each run, which is why the same job produced a different CV every time.
+
+    Strict JSON schema could not have caught that: it enforces shape, and a drifted bullet is
+    perfectly well-shaped. So the fix is the absence of a field. Nothing here is free text —
+    every value is an id or a skill drawn from the CV's own list — so drifted wording is not
+    merely invalid, it is unrepresentable. `nodes.tailor` copies the text from the master CV.
+    """
+
+    # None when the CV has no summary to show, or when the model chose to omit it. Either way
+    # `nodes.tailor.master_summary` decides the fallback, not the model (TAIL-07).
+    summary_id: str | None
+    experience: list[RolePick]
+    projects: list[RolePick]
     skills: list[Term]
     omitted_bullet_ids: list[str]
+
+    @field_validator("summary_id")
+    @classmethod
+    def _summary_is_the_summary(cls, v: str | None, info: ValidationInfo) -> str | None:
+        """The professional profile is the CV's own summary line or nothing.
+
+        Narrower than "any known id" on purpose: a bullet promoted to the top of the page reads
+        as a profile the applicant wrote, and they didn't.
+        """
+        cv = _cv(info)
+        if v and cv is not None:
+            expected = cv.summary.id if cv.summary else None
+            if v != expected:
+                raise fail("summary_id", "summaryId must be the master CV's own summary id, or null")
+        return v
 
     @field_validator("skills")
     @classmethod
@@ -218,28 +312,113 @@ class TailorOutput(Model):
                 raise fail("skills", f"Not in the master CV's skills: {', '.join(unknown)}")
         return v
 
-    @field_validator("experience", "projects")
+    @field_validator("omitted_bullet_ids")
     @classmethod
-    def _roles_exist(cls, v: list[TailorItem], info: ValidationInfo) -> list[TailorItem]:
+    def _omitted_exist(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        """A line can only be "left out" if it was there to leave out — otherwise the review
+        screen offers the person a bullet they can't add back."""
         cv = _cv(info)
         if cv is not None:
-            known = {r.id for r in [*cv.experience, *cv.projects]}
-            unknown = [i.role_id for i in v if i.role_id not in known]
+            unknown = [i for i in v if i not in _known_bullet_ids(cv)]
             if unknown:
-                raise fail("role_id", f"Not a role in the master CV: {', '.join(unknown)}")
+                raise fail("omitted_bullet_ids", f"Not in the master CV: {', '.join(unknown)}")
         return v
+
+
+class SummaryDraft(Cites):
+    """TAIL-07: a professional profile composed from cited master-CV lines.
+
+    The one piece of CV prose a model is allowed to write, and only when the master CV has no
+    summary of its own to select — see `SUMMARY_WRITE` for why the exception exists and how it is
+    bounded. `Cites` gives it the id filter; `nodes.tailor` then puts it through the same citation
+    guard as a letter paragraph, so an unsupported profile is repaired or dropped rather than
+    printed at the top of the page.
+
+    The word bound is a validator for the same reason `LetterOutput._length` is: strict mode
+    ignores `maxLength`, and a profile that runs to a paragraph stops being a profile.
+    """
+
+    @model_validator(mode="after")
+    def _length(self) -> "SummaryDraft":
+        n = len(self.text.split())
+        if not 20 <= n <= 90:
+            raise fail("length", f"The profile is {n} words; write between 20 and 90")
+        return self
+
+
+# The sign-off is a closed set rather than free text: there are three forms a cover letter ends
+# with, and everything else a model reaches for ("Warmest regards", "Yours faithfully, with
+# thanks") is either wrong for the register or wrong for the century.
+type Valediction = Literal["Sincerely", "Best regards", "Respectfully"]
+
+
+class LetterParagraph(Cites):
+    """One cited paragraph, and the competency it is making the case for.
+
+    `theme` is deliberately write-only — nothing renders it. Naming the competency is what stops
+    a paragraph being a second helping of the one before it: a model that has to label what this
+    paragraph is proving writes a paragraph that proves one thing.
+    """
+
+    theme: str = ""
 
 
 class LetterOutput(Model):
     greeting: Annotated[str, required("Add a greeting")]
-    paragraphs: Annotated[list[Cites], count(3, 4, "Write 3 or 4 paragraphs", "Write 3 or 4 paragraphs")]
+    paragraphs: Annotated[list[LetterParagraph], count(3, 4, "Write 3 or 4 paragraphs", "Write 3 or 4 paragraphs")]
     signoff: Annotated[str, required("Add a sign-off")]
+    # Which opening the letter commits to. Also write-only, and also not decoration: the opening
+    # used to be whatever the model drifted into, which was usually a restatement of the job title.
+    # Choosing from a closed set forces a decision about what the first sentence is *for*.
+    hook_type: Literal["Core-Metric", "Company-Mission", "Industry-Problem", "Referral"] = "Core-Metric"
     company_quote: str  # LTR-02: one fact quoted word for word from the post
     # LTR-06: a second verbatim fact, about how the company works — its remote or hybrid policy,
     # learning budget, sponsorship, how it's structured. Empty when the post states none, which
     # is common and is not a failure: an invented policy is far worse than a missing paragraph.
     # Verified by exact substring against the post, exactly like `company_quote`.
     policy_quote: str = ""
+
+    @field_validator("greeting")
+    @classmethod
+    def _no_dead_salutation(cls, v: str) -> str:
+        """ "To Whom It May Concern" dates a letter by about forty years, and "Dear Sir or Madam"
+        guesses at something it has no business guessing at.
+
+        Corrected rather than rejected: the salutation is one line of furniture and the rest of
+        the letter may be perfectly good, so spending a retry — of two — on the greeting would be
+        a poor trade. `nodes.tailor` has no say in this; it arrives already fixed.
+        """
+        dead = ("to whom it may concern", "dear sir or madam", "dear sir/madam", "dear sirs", "dear sir", "dear madam")
+        return "Dear Hiring Team," if v.strip().lower().rstrip(",:").strip() in {d.rstrip(",:") for d in dead} else v
+
+    @field_validator("signoff")
+    @classmethod
+    def _valediction(cls, v: str) -> str:
+        """The sign-off, normalised to one of the three forms.
+
+        The name on the second line is replaced at render time from the master CV (TAIL-02), so
+        only the valediction itself matters here — and an unrecognised one becomes "Sincerely"
+        rather than failing the letter, for the same reason as the greeting above.
+        """
+        first, _, rest = v.partition("\n")
+        allowed = {"sincerely": "Sincerely", "best regards": "Best regards", "respectfully": "Respectfully"}
+        chosen = allowed.get(first.strip().rstrip(",").strip().lower(), "Sincerely")
+        return f"{chosen},\n{rest.strip()}" if rest.strip() else f"{chosen},"
+
+    @model_validator(mode="after")
+    def _length(self) -> "LetterOutput":
+        """LTR-01's word count, enforced on the model's reply.
+
+        Counted over the paragraphs only — the greeting and sign-off are fixed furniture, and
+        including them would make the bound depend on how long a name is.
+        """
+        count_ = sum(len(p.text.split()) for p in self.paragraphs)
+        if not LETTER_MIN_WORDS <= count_ <= LETTER_MAX_WORDS:
+            raise fail(
+                "length",
+                f"The letter is {count_} words; write between {LETTER_MIN_WORDS} and {LETTER_MAX_WORDS}",
+            )
+        return self
 
 
 class AnswerDraft(Model):

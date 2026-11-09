@@ -50,6 +50,13 @@ def guard_and_repair(
         item = by_location.get(location)
         if item is None:
             continue
+        if not item.source_ids:
+            # Nothing to repair *against*. The prompt's own instruction for this case is "return
+            # null", so asking costs a model call to be told what is already known — and since
+            # `Cites` started dropping unknown ids rather than rejecting a whole letter for one,
+            # a paragraph arriving with no sources is a case that actually happens.
+            decisions[location] = None
+            continue
         reasons = "\n".join(f"- {v.rule}: {v.detail}" for v in first.violations if v.location == location)
         try:
             out = structured(
@@ -66,7 +73,11 @@ def guard_and_repair(
         if out.item is None:
             decisions[location] = None
             continue
-        decisions[location] = Cited(text=out.item.text, source_ids=out.item.source_ids)
+        # `composed=True`, always: a repaired line was rewritten by a model, so whatever it was
+        # before, it is no longer a copy of anything. Without this a repair would hand
+        # `Store._assert_verbatim` a CV line that doesn't match the master line it cites, and the
+        # whole pack would be refused as drifted — the repair destroying the document it fixed.
+        decisions[location] = Cited(text=out.item.text, source_ids=out.item.source_ids, composed=True)
 
     # Re-check what the repairs produced; anything still failing is dropped.
     repaired = [(loc, decisions.get(loc) or by_location[loc]) for loc in sorted(failing) if decisions.get(loc) is not None]
@@ -81,7 +92,7 @@ def guard_and_repair(
 
 WHY = {
     "numbers": "a number that isn't in the lines it cited",
-    "terms": "a skill that isn't in the cited lines or your CV",
+    "terms": "a skill that isn't in the cited lines or anywhere in your CV",
     "sources": "no usable master-CV source",
 }
 

@@ -6,10 +6,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from wera_agent import clock, tasks
+from wera_agent.config import wera
 from wera_agent.db.session import make_engine, reset_caches, transaction
 from wera_agent.main import create_app
 from wera_agent.paths import FIXTURES_DIR
 from wera_agent.schemas.cv import MasterCV
+from wera_agent.services import store as store_module
 from wera_agent.services.store import Store
 from wera_agent.settings import Settings, get_settings
 
@@ -66,6 +68,24 @@ def isolated(tmp_path, monkeypatch) -> Iterator[None]:
 def client() -> Iterator[TestClient]:
     with TestClient(create_app(), headers={"Authorization": f"Bearer {TOKEN}"}) as c:
         yield c
+
+
+@pytest.fixture
+def cv_upload_mode(monkeypatch):
+    """Pin what saving a CV does, rather than inheriting `config/wera.yaml`'s answer.
+
+    Both paths are real and the config only decides which is live, so a test that wants one has
+    to say which: `cv_upload_mode("reset")` for the testing-phase wipe, `("rescore")` for CV-08's
+    re-judge, which is what a multi-user install will run. Left to the shipped config, half these
+    tests would pass or fail on a line someone flipped for an afternoon's testing.
+    """
+
+    def pin(mode: str) -> None:
+        assert mode in ("reset", "rescore")
+        pinned = wera().model_copy(update={"reset_on_cv_upload": mode == "reset"})
+        monkeypatch.setattr(store_module, "wera", lambda: pinned)
+
+    return pin
 
 
 @pytest.fixture

@@ -75,6 +75,10 @@ export const api = {
 
   estimate: (channels: IntakeChannel[]) => call<Estimate>(`/api/intake/estimate?channels=${channels.join(",")}`),
   startRun: (channels: IntakeChannel[]) => call<{ runIds: string[] }>("/api/intake/run", { method: "POST", body: { channels } }),
+  /** MATCH-05: score the next batch from the pool the broad search already found. */
+  scoreMore: () => call<{ runIds: string[] }>("/api/intake/score-more", { method: "POST", body: {} }),
+  /** SRCH-13: check which postings are still open. Free — feeds, plain HTTP and a browser. */
+  recheck: () => call<{ started: boolean }>("/api/jobs/recheck", { method: "POST", body: {} }),
   getRun: (id: string) => call<IntakeRun>(`/api/intake/runs/${id}`),
   cancelRun: (id: string) => call<IntakeRun>(`/api/intake/runs/${id}/cancel`, { method: "POST", body: {} }),
 
@@ -99,7 +103,7 @@ export const api = {
     call<ApplicationWithJob>(`/api/documents/${docId}`, { method: "PATCH", body: patch }),
   // Exports are plain <a download> links to /api/documents/:id/export (EXP-01).
 
-  putCv: (cv: MasterCV) => call<{ version: number }>("/api/cv", { method: "PUT", body: cv }),
+  putCv: (cv: MasterCV) => call<{ version: number; clearedJobs: number }>("/api/cv", { method: "PUT", body: cv }),
   putContact: (c: Contact) => call<Contact>("/api/cv/contact", { method: "PUT", body: c }),
   importCv: (yaml: string) => call<MasterCV>("/api/cv/import", { method: "POST", body: { yaml } }),
   /** CV-03: a PDF, DOCX or YAML file. Returns a proposal; nothing is saved until putCv. */

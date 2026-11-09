@@ -22,6 +22,27 @@ import { agentConfig } from "./env";
 import { ApiError } from "./http";
 
 const DOWN = "The WERA agent service isn't running. Start WERA with `pnpm dev`.";
+const SLOW = "The agent is taking too long to answer. It may still be working — reload in a moment.";
+
+// Every request to the agent is bounded. It wasn't, and that was a hang with no error: `fetch`
+// has no default timeout, so if the agent accepted the connection and then stalled, the request
+// sat there until the platform killed it and the person saw a spinner that never resolved.
+//
+// 30s suits almost everything, because the slow work is deferred: a Gate 1 approval returns as
+// soon as the decision is saved and the pack is drafted afterwards (`Store.defer`), and an
+// intake run's rows exist before its response. What's left is a database read.
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+// The exception, and the one route where a person waits on a model: `cv.parse` reads a whole
+// uploaded document on the writing tier, synchronously, inside the request. The agent's own
+// ceiling for one task is 300s (`gateway.TASK_DEADLINE_SECONDS`), so this sits above it — the
+// agent should be the thing that gives up and says why, not this fetch.
+const SLOW_ROUTES = [/^\/cv\/(parse|import)\b/];
+const SLOW_TIMEOUT_MS = 330_000;
+
+function timeoutFor(path: string): number {
+  return SLOW_ROUTES.some((re) => re.test(path)) ? SLOW_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+}
 
 async function call(path: string, init: { method?: string; body?: string } = {}): Promise<Response> {
   const { url, token } = agentConfig();
@@ -32,8 +53,12 @@ async function call(path: string, init: { method?: string; body?: string } = {})
       headers: { authorization: `Bearer ${token}`, ...(init.body !== undefined ? { "content-type": "application/json" } : {}) },
       body: init.body,
       cache: "no-store",
+      signal: AbortSignal.timeout(timeoutFor(path)),
     });
-  } catch {
+  } catch (err) {
+    // A timeout is not the agent being down: it answered the connection and then didn't finish,
+    // so "start WERA with pnpm dev" would be the wrong thing to tell someone. 504, not 503.
+    if (err instanceof DOMException && err.name === "TimeoutError") throw new ApiError(504, "AGENT_TIMEOUT", SLOW);
     throw new ApiError(503, "AGENT_DOWN", DOWN);
   }
 }

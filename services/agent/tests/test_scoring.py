@@ -1,9 +1,9 @@
 """Scoring in code (SPEC §8)."""
 
 from wera_agent.clock import iso, parse_ms
-from wera_agent.domain.scoring import DEFAULT_WEIGHTS, ROUGH_CAP, ats_coverage, fit_total, freshness_score, should_retry_tailoring
+from wera_agent.domain.scoring import DEFAULT_WEIGHTS, ROUGH_CAP, ats_coverage, fit_total, freshness_score
 from wera_agent.schemas.jobs import FitEvidence, FitWeights
-from wera_agent.schemas.pack import AtsKeyword, AtsReport
+from wera_agent.schemas.pack import AtsKeyword
 
 NOW = parse_ms("2026-10-12T09:00:00.000Z")
 
@@ -47,10 +47,6 @@ def test_ats_coverage_weighs_required_keywords_double():
     assert round(ats_coverage(kws) * 100) == 86
 
 
-def test_retries_only_when_a_missing_keyword_is_backed_by_the_master_cv():
-    def report(k: AtsKeyword, attempt: int = 1) -> AtsReport:
-        return AtsReport(keywords=[k], coverage=0.5, format_checks=[], pages=1, attempt=attempt)
-
-    assert not should_retry_tailoring(report(kw("required", False, False, "Docker")))
-    assert should_retry_tailoring(report(kw("required", False, True, "Python")))
-    assert not should_retry_tailoring(report(kw("required", False, True, "Python"), attempt=3))
+# The retry rule that used to be tested here is gone with `should_retry_tailoring`. What replaced
+# it — covering those keywords in code instead of asking the writing tier again — is tested
+# against a real CV in `test_writer.py`, which has the fixtures for it.

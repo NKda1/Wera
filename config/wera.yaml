@@ -5,15 +5,25 @@
 # A person can change these in Settings; everything below is file-only.
 models:
   fast: qwen/qwen3.7-flash
+  # Structured selection: cv.tailor returns bullet ids, not prose. A short, cheap, almost
+  # deterministic call, so the cheapest capable model is the right one — and DeepSeek's measured
+  # weakness was long structured prose, which this tier never asks for.
+  select: deepseek/deepseek-v4.1-flash-1017
   scoring: qwen/qwen3.8-27b
-  writing: deepseek/deepseek-v4.1-flash-1017
+  # Prose, and only prose. This was DeepSeek v4.1 Flash, which returned usable output on 63.6%
+  # of 55 calls against this model's 97.6% on 41 — burning 409s on calls that produced nothing
+  # (SPEC §14, 2026-10-25). Output is ~3.7x the price per token and a letter is ~2,500 tokens, so
+  # a cover letter goes from about $0.0015 to $0.0055: noise against the $0.06–0.08 an
+  # application costs in fit scoring, and it buys back the calls that produced nothing at all.
+  writing: qwen/qwen3.8-27b
 
 # Tried in order when the tier's model fails with a transport or server error. A different
 # vendor first, so a provider outage doesn't take every attempt with it.
 fallbacks:
   fast: [mistralai/mistral-small-3.2-24b-instruct, google/gemini-2.5-flash-lite]
+  select: [qwen/qwen3.8-27b]
   scoring: [qwen/qwen3.7-flash]
-  writing: [qwen/qwen3.8-27b]
+  writing: [deepseek/deepseek-v4.1-flash-1017]
 
 # USD per million tokens, used to price llm_calls rows and enforce the weekly budget (COST-01).
 # Read from OpenRouter's /models on 2026-10-17 — re-check after changing a model id, because a
@@ -51,16 +61,52 @@ tasks:
   # off seven of eight jobs. 2,400 clears the observed range, and a cut-off reply retries once
   # with double the room (gateway.TRUNCATION_RETRY_FACTOR). Only generated tokens are billed.
   fit.score: { tier: scoring, max_tokens: 2400, reasoning: low }
-  # The writing tier, resized from `wera eval --packs`. Every one of these was cut off at its
-  # ceiling plus the old `reasoning` allowance — cv.tailor at 4,200, letter.write at 2,700 — so
-  # the thinking was eating the answer it was supposed to be preparing. The allowance itself is
-  # now 3,000 for `on` and 1,200 for `low` (gateway._HEADROOM), and the truncation retry scales
-  # it too, so these ceilings are for the reply alone. Only generated tokens are billed; what a
-  # bigger ceiling raises is what the provider reserves against the balance for the one call.
-  cv.tailor: { tier: writing, max_tokens: 4500, reasoning: "on" }
+  # The select tier, and 700 tokens rather than 4,500 — because the reply is now a list of ids.
+  #
+  # This was `{ tier: writing, max_tokens: 4500, reasoning: "on" }`, and it was the single
+  # most expensive and least reliable call in the product: the old `TailorOutput` made the model
+  # retype every bullet, so the reply was most of a CV, it still overran 7,500 tokens on
+  # `wera eval --packs`, and any wording that came back altered was then rejected by the citation
+  # guard — one `guard.repair` call per failing line, and a different CV every run.
+  #
+  # `reasoning: off`, like the other tasks that select rather than compose: which bullet answers
+  # a requirement is read off the page, and the model has no text to plan.
+  cv.tailor: { tier: select, max_tokens: 700, reasoning: "off" }
+  # TAIL-07: the professional profile, composed from cited CV lines — and only for a CV that has
+  # no summary of its own to select, so this fires rarely rather than once per pack.
+  #
+  # The writing tier, for two sentences. It is the first thing a recruiter reads and the one line
+  # on the page a model actually composes, so it is the wrong place to save $0.002.
+  #
+  # `reasoning: off`, and measured rather than assumed: this shipped as `low` on the argument that
+  # choosing which of a dozen bullets belongs in a 50-word profile is a judgement. It is, but not
+  # one this tier needs thinking tokens for — `wera eval --packs` cut the call off at 2,100 (900
+  # plus the `low` allowance) while producing a 60-word answer, which is the same pathology
+  # `guard.repair` above was measured into: given room to deliberate over a short rewrite, this
+  # model spends it, and the answer is what gets truncated. Off, 900 tokens is roughly fifteen
+  # times the reply.
+  summary.write: { tier: writing, max_tokens: 900, reasoning: "off" }
+  # Resized from `wera eval --packs`: this was cut off at its ceiling plus the old `reasoning`
+  # allowance (2,700), so the thinking was eating the answer it was meant to be preparing. The
+  # allowance is now 3,000 for `on` and 1,200 for `low` (gateway._HEADROOM), and the truncation
+  # retry scales it too, so this ceiling is for the reply alone. Only generated tokens are
+  # billed; a bigger ceiling only raises what the provider reserves for the one call.
   letter.write: { tier: writing, max_tokens: 2500, reasoning: "on" }
-  guard.repair: { tier: writing, max_tokens: 2500, reasoning: low }
-  answers.draft: { tier: writing, max_tokens: 3000, reasoning: "on" }
+  # `reasoning: off`, and the measurement that forced it: this task was given an average of 429
+  # input tokens — one line, its source lines, and what failed — and emitted an average of **972
+  # output tokens over 16.8 seconds** to rewrite a single sentence. The sentence is forty tokens.
+  # The rest was deliberation about a task that needs none: the instruction is "remove or soften
+  # what the cited lines don't carry, or return null", which is a rewrite, not a judgement.
+  #
+  # It runs three to five times per cover letter, serially, so it was most of the letter's wall
+  # clock — more than `letter.write` itself. The ceiling drops with it: a repaired line is one
+  # line, and 2,500 tokens was a budget for thinking rather than for the answer.
+  guard.repair: { tier: writing, max_tokens: 600, reasoning: "off" }
+  # `low`, not `on`. Measured at 1,266 output tokens for two or three short answers, which is
+  # several times the answers themselves. Some judgement is wanted here — deciding an answer is
+  # not in the CV and returning null is the whole point (ANS-02/03) — so this keeps a thinking
+  # allowance, just not the largest one.
+  answers.draft: { tier: writing, max_tokens: 1500, reasoning: low }
   outreach.draft: { tier: fast, max_tokens: 400, reasoning: "off" }
 
 # §8.2 fit weights. Normalised in code, so they needn't sum to 1.
@@ -78,8 +124,14 @@ weights:
 # day): 20 queries costs 40, which leaves 22 new pages. `max_pages: 30` would need 150 credits
 # on its own, so on a heavy first run the credit cap is what stops it — which is the right way
 # round, because credits are what the invoice is in. Raise this with the plan, not with hope.
+# `max_pages` now bounds *paid* page reads only. SRCH-05 reads pages locally first — JSON-LD, the
+# ATS feeds, then the fast tier (`sources/extract.py`) — and only a page no free rung could read
+# reaches Firecrawl. So the cap stopped being "how many pages a run may read", which was what made
+# it the thing that ended a run early, and became "how many a run may pay for". Lowered to match:
+# if a run is paying for more than ten pages, something has changed about a board and the right
+# response is to notice, not to keep buying. Watch `fallbackPages` on the run row.
 max_queries: 20
-max_pages: 30
+max_pages: 10
 max_credits_per_run: 150
 
 # SRCH-10: a short-term cache in front of Firecrawl, so a run doesn't pay for the last one's
@@ -115,8 +167,25 @@ crawl_cache:
 # quietly ate a morning's board search. 8 searches is 16 credits, about a tenth of a run.
 discovery_max_queries: 8
 
-# MATCH-05: how many jobs a day reach the scoring tier.
+# MATCH-05: how many jobs a day reach the scoring tier. The day's ceiling, across every run and
+# every "score more" — batching below changes *when* a job is paid for, never how many are.
 max_scored_per_day: 40
+
+# How scoring is handed out. A job takes about eleven seconds, so forty of them is seven minutes
+# in which a run produced nothing anyone could look at — the shortlist only changed when the
+# whole thing finished.
+#
+# Eight at a time, two batches a run: the first batch is on screen in about a minute and a half,
+# the second is scored while it's being read, and then the run stops. The rest of the broad search
+# stays in the pool (`Store.jobs_needing_score`), listed and waiting, and "Score 8 more" calls up
+# the next batch when someone actually wants it.
+#
+# Two batches rather than one because the second is the one that makes "more" feel instant, and
+# rather than five because jobs scored past the point someone stopped reading are jobs nobody
+# asked for. The ordering is best-first (`prefilter.shortlist`), so a batch is always worse than
+# the one before it and stopping early costs the least.
+scoring_batch_size: 8
+scoring_batches_per_run: 2
 
 # LTR-04: phrases that make a cover letter read like a form. A hit triggers one rewrite, and the
 # phrase is quoted back so the model knows which words to lose rather than guessing at "be less
@@ -159,11 +228,47 @@ lifecycle:
   max_http_checks: 150
   archive_after_days: 30 # NORM-07, measured on max(lastSeen, lastConfirmedAt)
 
+# ATSC-03's target coverage. `nodes/ats.py:reconcile_skills` adds master-CV-backed keywords to
+# the skills line until coverage clears this, then stops — a line carrying every term the post
+# mentioned passes the robot and reads as keyword spam to the person who sees it next.
 ats_threshold: 0.75
 weekly_budget_usd: 5
 cv_pages: 1
 
+# Saving a CV clears every job, score, application and pack built from the old one, so the next
+# search starts from nothing (`Store.reset_job_world`).
+#
+# **On because WERA has one user and that user is testing it.** The loop this serves is: upload a
+# CV, run a search, judge the shortlist, read the generated CV and letter, then do it again with
+# a different CV. Each pass has to be independent, and without this it isn't — a pack cites
+# master-CV bullet ids, and ids are derived from employer names (`domain/cv_build`), so a pack
+# written against a different person's CV doesn't merely show stale scores, it cites lines that
+# no longer exist. The crawl cache goes too, or the "fresh search" replays the last one's results
+# from cache and the search is the one thing not being tested.
+#
+# **Turn this off before accounts exist.** Then a new CV means CV-08's re-score — the behaviour
+# `put_cv` still has when this is false — because a real user editing their CV must not lose the
+# applications they have already sent. What stays either way is the money and the person: the
+# `llm_calls` ledger behind the weekly budget (COST-01), the CV itself, the contact details, the
+# search profile and the settings.
+reset_on_cv_upload: true
+
+# How much of a posting the prompts that write may see (see config.py for why).
+job_description_limit: 6000
+
 # One model call: how long to wait, and how many times to retry a transport error before
 # falling back. Schema failures are retried once by the gateway, not here.
-llm_timeout_seconds: 60
-llm_max_retries: 2
+#
+# 180, not 60. Measured on `wera eval --packs`, a writing-tier call takes 39–125s — so a 60s
+# timeout cut off most of them *mid-generation*, and each cut-off call then burnt its SDK
+# retries and its fallback model before anything gave up. The timeout was manufacturing the
+# failures it existed to bound.
+#
+# Retries drop to 1 for the same reason: the fallback chain already covers a provider that can't
+# answer, so a second SDK retry only multiplies the wait on a model that won't.
+#
+# Raising a per-call timeout makes the *worst* case worse, so it is paired with
+# `gateway.TASK_DEADLINE_SECONDS`, which bounds one logical task across every attempt. That is
+# the number that stops a hang; this one just stops a healthy call being killed.
+llm_timeout_seconds: 180
+llm_max_retries: 1

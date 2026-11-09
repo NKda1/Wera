@@ -133,6 +133,10 @@ class IntakeRunRow(Base):
     # almost all of a real run's time goes — 40 jobs at ~11s each — and until these existed the
     # screen had nothing to show for it but a sentence that never changed.
     phase: Mapped[str] = mapped_column(String(16), default="searching")
+    # What it is doing inside that phase, in words: which board, which job. `phase` is a short
+    # enum and has to cover twenty queries or forty jobs with one value, so on its own it stops
+    # changing for minutes at a time — which reads as a stuck process however much the bar moves.
+    detail: Mapped[str | None] = mapped_column(String(200))
     done: Mapped[int] = mapped_column(Integer, default=0)
     total: Mapped[int] = mapped_column(Integer, default=0)
     queries: Mapped[int] = mapped_column(Integer, default=0)
@@ -143,6 +147,11 @@ class IntakeRunRow(Base):
     # beside it rather than folded into it because the two are different facts — one is what the
     # invoice will say, the other is what it would have said.
     credits_saved: Mapped[int] = mapped_column(Integer, default=0)
+    # SRCH-05: pages read for nothing by `sources.extract`, against pages that still needed a
+    # paid Firecrawl scrape. The ratio is the only honest measure of whether the local ladder is
+    # earning its keep — see migration 0008.
+    local_pages: Mapped[int] = mapped_column(Integer, default=0)
+    fallback_pages: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[list[Any]]
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)  # demo runs progress over time
     settled: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -166,6 +175,11 @@ class LlmCallRow(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     code: Mapped[str | None] = mapped_column(String(32))
+    # Which fields a rejected reply got wrong, from `gateway._problem_fields`. Field paths and
+    # rule names only — never a value — so this stays inside PRIV-03 while making a systematic
+    # schema failure visible in the one place someone will look for it. Without it, "this task
+    # fails its first attempt every time" and "this task is occasionally flaky" are the same row.
+    detail: Mapped[str | None] = mapped_column(String(300))
     attempt: Mapped[int] = mapped_column(Integer, default=1)
     called_at: Mapped[str] = mapped_column(Iso, index=True)
 

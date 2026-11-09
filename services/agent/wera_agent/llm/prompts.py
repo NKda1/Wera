@@ -114,6 +114,18 @@ CV_PARSE = ChatPromptTemplate.from_messages(
             "Rules:\n"
             "- Copy only what the document says. Never add a skill, employer, date, qualification "
             "or achievement that isn't in it, and never improve a bullet's wording.\n"
+            # This rule was missing entirely, and the result was a parsed CV whose `summary` was
+            # always null: every other field had a line telling the model what belonged in it, so
+            # the two that didn't were the two that came back empty. An absent profile then
+            # propagated all the way to the rendered PDF, which drops the section when there is no
+            # text for it — a CV with no profile at the top, from a document that had one.
+            "- `summary` is the professional profile at the top of the CV, whatever the document "
+            "calls it — Summary, Profile, Personal Statement, Objective, About Me — copied word "
+            "for word. This is wanted: it is the first thing a recruiter reads. Only leave it "
+            "empty if the document really has no such paragraph.\n"
+            '- `headline` is the short role line under the name ("Backend Engineer", "Computer '
+            'Science graduate"), if the CV has one. Not the summary, and not a job title from the '
+            "experience section.\n"
             "- Dates as YYYY-MM. A role that is still going has end `present`. If a date really "
             "isn't in the document, leave it empty rather than guessing — a blank is corrected in "
             "one click and a wrong date is not.\n"
@@ -138,10 +150,33 @@ KEYWORDS_EXTRACT = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "Pull the skills and tools a job post asks for, at most 25. Mark a keyword `required` "
-            "when the post treats it as essential and `nice` otherwise. Use the post's own wording, "
-            "normalised to its common name (PostgreSQL, not Postgres). Skip generic filler like "
-            '"team player" and anything about salary or benefits.\n\n' + _DATA_RULE,
+            "Pull the skills and tools a job post asks for, at most 25. Use the post's own wording, "
+            "normalised to its common name (PostgreSQL, not Postgres).\n\n"
+            # These keywords are the denominator of the ATS coverage score, so anything listed
+            # here that a CV cannot name is reported to the applicant as a skill they are missing.
+            # Measured on real posts, the list came back as: Pair programming, Fast feedback,
+            # Knowledge sharing, Code quality, Technical debt reduction, Developer experience,
+            # Learning and development — twelve of fifteen terms, all marked `required`. Coverage
+            # read 7%, and the applicant was shown "Fast feedback" as a skill to go and acquire.
+            "**Only concrete, checkable things.** A keyword must be something a CV could name: a "
+            "language, framework, library, tool, platform, database, protocol, named methodology "
+            "(Scrum, TDD), a field of study, or a qualification.\n\n"
+            "Leave out — these are not keywords, however prominently the post states them:\n"
+            "- Ways of working and values: pair programming, fast feedback, knowledge sharing, "
+            "code quality, collaboration, ownership, continuous improvement, developer experience.\n"
+            "- Soft skills and traits: communication, problem solving, attention to detail, "
+            "team player, self-starter.\n"
+            "- Activities with no tool named: writing clean code, reducing technical debt, "
+            "shipping fast, mentoring.\n"
+            "- Salary, benefits, perks, learning budgets, visa or location terms.\n\n"
+            "If the post is mostly culture writing and names only three technologies, return three "
+            "keywords. A short, true list is the correct answer; padding it misreports the "
+            "applicant's gaps.\n\n"
+            "`required` only when the post states the keyword as essential — under Requirements, "
+            '"must have", "you will need", or similar. Everything else is `nice`, including '
+            "anything under a bonus, desirable or nice-to-have heading. A required keyword counts "
+            "double in WERA's scoring, so marking the whole list required makes the score "
+            "meaningless.\n\n" + _DATA_RULE,
         ),
         ("human", "{job}"),
     ]
@@ -243,15 +278,60 @@ CV_TAILOR = ChatPromptTemplate.from_messages(
             "system",
             "Choose which lines of this CV to show for this job, and order them so the strongest "
             "evidence comes first.\n\n"
-            "This is selection, not writing. Keep each line's wording as it is in the CV — you may "
-            "fix tense or trim a trailing clause, nothing more. Cite the id of every line you use. "
-            "List the ids you left out in `omittedBulletIds`; leaving a line out is normal and the "
-            "applicant can add it back.\n\n"
+            "**You return ids, not text.** Every line is identified by the id in square brackets "
+            "beside it. For each role worth showing, give its role id and the ids of the lines to "
+            "show, strongest first; the order you list them in is the order they appear. WERA "
+            "copies the wording from the CV itself, so you cannot and need not retype it.\n\n"
+            "Rules:\n"
+            "- A line's ids must belong to the role you file them under. Don't move a line between "
+            "roles — it would credit the wrong employer.\n"
+            "- `summaryId` is the CV's own summary id, or null if the profile is better left off.\n"
+            "- `omittedBulletIds` is the lines you chose not to show. Leaving a line out is normal "
+            "and the applicant can add it back, so say which.\n"
+            "- `skills` must be the CV's own skills, spelled exactly as the CV spells them.\n\n"
             f"{_HONESTY}\n\n"
-            "Keep it to what fits {pages} page(s): about {budget} lines in total, at most 3 per role. "
-            "Skills must be the CV's own skills, spelled the same way.\n\n" + _DATA_RULE,
+            "Keep it to what fits {pages} page(s): about {budget} lines in total, at most 3 per "
+            "role.\n\n" + _DATA_RULE,
         ),
         ("human", "CV:\n{cv}\n\n{job}\n\nKeywords worth covering: {keywords}\n\nWhat the applicant asked for: {note}"),
+    ]
+)
+
+SUMMARY_WRITE = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            # TAIL-07. `cv.tailor` may only *select* the master CV's own summary, which is right —
+            # a profile is the one line a recruiter certainly reads, and a drifted one is the worst
+            # place for drift. But it left no answer at all for a CV that has no summary to select:
+            # `master_summary` returned empty, the export dropped the section, and the CV went out
+            # with no professional profile on it.
+            #
+            # So this is the narrow exception, and it is narrow in three ways: it runs only when
+            # the master CV has no summary, it must cite the lines it is built from, and it goes
+            # through the same citation guard as a letter paragraph — which drops it if it cannot
+            # be vouched for. The fallback chain stays honest: the applicant's own summary, then a
+            # composed and guarded one, then nothing.
+            "Write the professional profile for the top of this applicant's CV, for this job. "
+            "Two or three sentences, 40–60 words, third-person-implied with no pronoun — the form "
+            'a CV uses: "Computer Science finalist with internship experience in distributed '
+            'systems…", not "I am a…".\n\n'
+            "It must be built from the CV lines below and cite the ids of every line it draws on. "
+            "Say what the applicant is, the evidence that matters most for *this* post, and what "
+            "they are looking for next — in that order, as prose, not a list.\n\n"
+            "Rules:\n"
+            "- No adjectives about the applicant. Not passionate, driven, highly motivated, "
+            "results-oriented, detail-oriented or enthusiastic. The facts are the argument.\n"
+            "- No number that isn't in a line you cite, and no skill the CV doesn't list.\n"
+            "- No years-of-experience total unless the CV states one. Counting roles is arithmetic "
+            "on dates, and it is how a graduate's CV ends up claiming three years.\n"
+            "- Name the specific thing, not the category: 'Rust and distributed systems' beats "
+            "'a range of modern technologies'.\n"
+            "- Don't name the company or repeat the job title back. This is a CV, and the same "
+            "profile should be defensible if the recruiter forwards it internally.\n\n"
+            f"{_HONESTY}\n\n" + _DATA_RULE,
+        ),
+        ("human", "CV:\n{cv}\n\n{job}\n\nKeywords worth covering: {keywords}"),
     ]
 )
 
@@ -279,19 +359,60 @@ LETTER_WRITE = ChatPromptTemplate.from_messages(
             "system",
             "Write a cover letter of 3 or 4 paragraphs, 250–350 words. Cite the CV line ids behind "
             "each paragraph.\n\n"
-            "Cover these, in this order:\n"
-            "1. Why this role — the specific work in the post that the applicant has actually done.\n"
-            "2. What in their record fits it, with the evidence, not the adjective.\n"
-            "3. **Why this company in particular**: something the post says about how the company "
-            "works — how it builds, how it treats people, how it's structured, its stated policy on "
-            "remote or hybrid working, learning, sponsorship, open source, the problem it has chosen "
-            "— and why that suits this applicant. Ground it in `companyQuote` and, where the post "
-            "gives you a second such fact, in `policyQuote`. This is the paragraph most letters "
-            "skip, and the one that shows the applicant read the post rather than the job title.\n"
-            "4. A close.\n\n"
-            "You may merge 3 into another paragraph if the letter reads better at three paragraphs, "
-            "but the company point itself is not optional.\n\n"
+            # The structure below is an industry-standard cover letter schema, and it is here
+            # because the letters were structurally fine and read like nothing. "Why this role,
+            # what fits it, why this company, a close" told the model what each paragraph was
+            # *about* but never what it had to *do* — so paragraph 2 came back as a list of
+            # restated bullets with no result attached, and paragraph 1 opened on a thesis the
+            # letter then never argued. Each paragraph now has a job and a shape.
+            "**Paragraph 1 — the opening.** Three or four sentences. Pick one hook and set "
+            "`hookType` to it:\n"
+            "- `Core-Metric` — lead on the single most relevant result in the CV, with its number. "
+            "The default, and the strongest when the CV has a number worth leading on.\n"
+            "- `Industry-Problem` — lead on the problem this role exists to solve, then the "
+            "applicant's claim on it.\n"
+            "- `Company-Mission` — lead on what the post says the company is doing. Only when the "
+            "post says something concrete enough to quote.\n"
+            "- `Referral` — only if the applicant's note names someone who referred them.\n\n"
+            "Then name the role, and state in one sentence the thesis the rest of the letter will "
+            "prove — what this applicant is bringing. Don't announce that you're applying.\n\n"
+            "**Paragraphs 2 (and optionally 3) — the proof.** One competency per paragraph; put "
+            "it in `theme` ('Scale and infrastructure', 'Shipping under constraint'). Each must "
+            "follow the X-Y-Z shape: **accomplished X, as measured by Y, by doing Z** — the "
+            "result before the method, and the outcome before the activity. A paragraph with no "
+            "outcome in it is a duty, and duties are what a CV is for.\n\n"
+            # The hard rule, and it is here because the softer version cost a paragraph. This
+            # read "the number is the point of the sentence" with a worked example full of
+            # invented metrics (400ms → 90ms), and `wera eval --packs` then dropped a paragraph
+            # for "a number that isn't in the lines it cited" — the model had pattern-matched the
+            # example and produced a figure the CV doesn't contain. So the example is gone and
+            # the consequence is stated instead: the citation guard checks every number against
+            # the cited lines, and a paragraph that fails is rewritten once and then cut.
+            "**Every number must appear in a line you cite.** Not approximately, not rounded, not "
+            "inferred from two lines put together, and never a plausible figure that makes the "
+            "sentence land better. WERA checks each one against the lines you cited and deletes "
+            "the paragraph if it isn't there, so an invented metric doesn't make a weaker claim — "
+            "it loses the argument entirely.\n\n"
+            "Where a cited line carries no number, say the concrete result in its own terms: what "
+            "existed afterwards that didn't before, what it was used for, who used it. 'Built the "
+            "gateway every prompt now passes through' is evidence. 'Significantly improved "
+            "reliability' is not.\n\n"
+            "**Why this company.** Something the post says about how the company works — how it "
+            "builds, how it treats people, how it's structured, its stated policy on remote or "
+            "hybrid working, learning, sponsorship, open source, the problem it has chosen — and "
+            "why that suits this applicant. Ground it in `companyQuote` and, where the post gives "
+            "you a second such fact, in `policyQuote`. This is the paragraph most letters skip, "
+            "and the one that shows the applicant read the post rather than the job title. It may "
+            "be its own paragraph or the first half of the close, but the point itself is not "
+            "optional.\n\n"
+            "**The close.** Say the CV is attached, ask for a conversation, and stop. One or two "
+            "sentences. No summary of the letter, no restating the thesis, no gratitude for being "
+            "considered.\n\n"
             f"{_LETTER_VOICE}\n\n"
+            "`greeting` addresses a named person if the post names one — 'Dear Priya Raman,' — and "
+            "otherwise 'Dear Hiring Team,'. Never 'To Whom It May Concern' and never 'Dear Sir or "
+            "Madam'. `signoff` is exactly one of 'Sincerely', 'Best regards' or 'Respectfully', "
+            "followed by a newline and the applicant's name.\n\n"
             f"{_HONESTY}\n\n"
             "Two rules on the company half, because it is where letters invent things. Quote the "
             "company facts **word for word from the post** — `companyQuote` for the first and "
@@ -340,6 +461,7 @@ TEMPLATES: dict[str, ChatPromptTemplate] = {
     "profile.generate": PROFILE_GENERATE,
     "cv.parse": CV_PARSE,
     "cv.tailor": CV_TAILOR,
+    "summary.write": SUMMARY_WRITE,
     "letter.write": LETTER_WRITE,
     "answers.draft": ANSWERS_DRAFT,
     "guard.repair": GUARD_REPAIR,

@@ -31,78 +31,153 @@ watch_titles: []
 max_companies: 60
 discover_every_days: 7
 companies:
-- name: Palantir
+- name: Catapult Sports
+  vendor: greenhouse
+  token: catapultsports
+  discovered_on: '2026-10-29'
+  matched: Graduate Software Engineer
+- name: Partly.Com
+  vendor: ashby
+  token: partly.com
+  discovered_on: '2026-10-29'
+  matched: Graduate Software Engineer
+- name: Graphcore Early Careers
+  vendor: greenhouse
+  token: graphcore-early-careers
+  discovered_on: '2026-10-29'
+  matched: Graduate Software Engineer
+- name: Graphcore
+  vendor: greenhouse
+  token: graphcore
+  discovered_on: '2026-10-29'
+  matched: Software Engineer
+- name: Blenheim Chalcot
+  vendor: greenhouse
+  token: blenheimchalcot
+  discovered_on: '2026-10-29'
+  matched: Junior Software Engineer
+- name: Leverdemo 8
   vendor: lever
-  token: palantir
-  discovered_on: '2026-10-21'
-  matched: AI Engineer
-- name: Airwallex
+  token: leverdemo-8
+  discovered_on: '2026-10-29'
+  matched: Junior Software Engineer
+- name: Wiz, Inc.
+  vendor: greenhouse
+  token: wizinc
+  discovered_on: '2026-10-29'
+  matched: Backend Engineer
+- name: Orbitalindustries
   vendor: ashby
-  token: airwallex
-  discovered_on: '2026-10-21'
-  matched: AI Engineer
-- name: Trm Labs
+  token: orbitalindustries
+  discovered_on: '2026-10-29'
+  matched: Backend Engineer
+- name: Monzo
+  vendor: greenhouse
+  token: monzo
+  discovered_on: '2026-10-29'
+  matched: Backend Engineer
+- name: Dualentry
   vendor: ashby
-  token: trm-labs
-  discovered_on: '2026-10-21'
-  matched: AI Engineer
-- name: Teneo
+  token: dualentry
+  discovered_on: '2026-10-29'
+  matched: Backend Engineer
+- name: Rightmove Careers
   vendor: greenhouse
-  token: teneo
-  discovered_on: '2026-10-21'
-  matched: AI Engineer
-- name: Pinterest
+  token: rightmovecareers
+  discovered_on: '2026-10-29'
+  matched: Backend Engineer
+- name: Referrals Only
   vendor: greenhouse
-  token: pinterest
-  discovered_on: '2026-10-21'
-  matched: Graduate Software Engineer
-- name: Figma
+  token: monzoreferrals
+  discovered_on: '2026-10-29'
+  matched: Backend Engineer
+- name: Capsa
+  vendor: ashby
+  token: capsa
+  discovered_on: '2026-10-29'
+  matched: Backend Engineer
+- name: Intropic
+  vendor: lever
+  token: intropic
+  discovered_on: '2026-11-05'
+  matched: Backend Engineer
+- name: Scale AI
   vendor: greenhouse
-  token: figma
-  discovered_on: '2026-10-21'
-  matched: Graduate Software Engineer
-- name: Databricks
+  token: scaleai
+  discovered_on: '2026-11-05'
+  matched: Backend Engineer
+- name: Ripple
   vendor: greenhouse
-  token: databricks
-  discovered_on: '2026-10-21'
-  matched: Graduate Software Engineer
-- name: Optiver
+  token: ripple
+  discovered_on: '2026-10-29'
+  matched: Software Engineer
+- name: Anthropic
   vendor: greenhouse
-  token: optiverus
-  discovered_on: '2026-10-21'
-  matched: Graduate Software Engineer
-- name: CoreWeave Europe
+  token: anthropic
+  discovered_on: '2026-10-29'
+  matched: Software Engineer
+- name: Tripadvisor
   vendor: greenhouse
-  token: coreweaveu
-  discovered_on: '2026-10-21'
-  matched: Graduate Software Engineer
+  token: tripadvisor
+  discovered_on: '2026-10-29'
+  matched: Software Engineer
+- name: Addepar
+  vendor: greenhouse
+  token: addepar1
+  discovered_on: '2026-11-05'
+  matched: Software Engineer
+- name: Robinhood
+  vendor: greenhouse
+  token: robinhood
+  discovered_on: '2026-10-29'
+  matched: Software Engineer
+- name: Clear Street
+  vendor: greenhouse
+  token: clearstreet
+  discovered_on: '2026-11-05'
+  matched: Software Engineer
 - name: Cloudflare
   vendor: greenhouse
   token: cloudflare
-  discovered_on: '2026-10-21'
-  matched: Graduate Software Engineer
-- name: Duolingo
+  discovered_on: '2026-11-05'
+  matched: Systems Engineer
+- name: Lumaai
+  vendor: ashby
+  token: lumaai
+  discovered_on: '2026-11-05'
+  matched: Systems Engineer
+- name: Cloudflare Events
   vendor: greenhouse
-  token: duolingo
-  discovered_on: '2026-10-21'
-  matched: Graduate Software Engineer
-- name: Airapps
+  token: careersday
+  discovered_on: '2026-11-05'
+  matched: Systems Engineer
+- name: Sensor Tower
   vendor: ashby
-  token: airapps
-  discovered_on: '2026-10-21'
-  matched: ML Engineer
-- name: SumUp
+  token: sensor-tower
+  discovered_on: '2026-11-05'
+  matched: DevOps Engineer
+- name: Teza Technologies
+  vendor: ashby
+  token: teza-technologies
+  discovered_on: '2026-11-05'
+  matched: DevOps Engineer
+- name: Walkme
+  vendor: lever
+  token: walkme
+  discovered_on: '2026-11-05'
+  matched: DevOps Engineer
+- name: Hasbro
   vendor: greenhouse
-  token: sumup
-  discovered_on: '2026-10-21'
-  matched: ML Engineer
-- name: Mimica
-  vendor: ashby
-  token: mimica
-  discovered_on: '2026-10-21'
-  matched: Backend Engineer (Python)
-- name: Elevenlabs
-  vendor: ashby
-  token: elevenlabs
-  discovered_on: '2026-10-21'
-  matched: Backend Engineer (Python)
+  token: hasbro
+  discovered_on: '2026-11-05'
+  matched: DevOps Engineer
+- name: Wiz
+  vendor: greenhouse
+  token: wizprivate
+  discovered_on: '2026-11-05'
+  matched: DevOps Engineer
+- name: Nearform
+  vendor: greenhouse
+  token: nearform
+  discovered_on: '2026-11-05'
+  matched: DevOps Engineer

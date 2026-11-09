@@ -10,7 +10,11 @@ from pydantic import BaseModel, Field
 
 from .paths import CONFIG_DIR
 
-type Tier = Literal["fast", "scoring", "writing"]
+# `select` is the fourth tier, for structured selection: a task that chooses between things the
+# CV already says, and returns ids rather than prose. Split out from `writing` because the two
+# want opposite models — selection is a short, cheap, near-deterministic call, while prose is
+# where reliability is worth paying for, and one tier could not be both.
+type Tier = Literal["fast", "select", "scoring", "writing"]
 type Effort = Literal["off", "low", "on"]
 
 
@@ -48,6 +52,14 @@ class Site(BaseModel):
     # Up to two URLs the host matched on, so reviewing a proposal means looking at real postings
     # rather than taking WERA's word that this is a job board.
     examples: list[str] = []
+    # A board WERA reads itself rather than paying a search engine to find jobs on. It still
+    # belongs in this file, because this file is the terms gate (`reviewed`) and that applies
+    # however a board is read — but it must never reach a Firecrawl query, or the board would be
+    # both searched *and* fetched and the free source would start costing credits.
+    #
+    # `careers.google.com` is the first of these: one employer with its own listing pages, read
+    # through `sources.extract` on the free watchlist channel.
+    direct: bool = False
 
     @property
     def reviewed(self) -> bool:
@@ -135,6 +147,7 @@ class CompaniesFile(BaseModel):
 
 class Models(BaseModel):
     fast: str
+    select: str
     scoring: str
     writing: str
 
@@ -223,14 +236,42 @@ class WeraConfig(BaseModel):
     max_credits_per_run: int = 100
     discovery_max_queries: int = 8
     max_scored_per_day: int = 40
+    # MATCH-05's batching. `max_scored_per_day` is still the day's ceiling; these decide how much
+    # of it one run spends before stopping and leaving the rest in the pool.
+    scoring_batch_size: int = 8
+    scoring_batches_per_run: int = 2
+
+    @property
+    def scored_per_run(self) -> int:
+        """How many jobs one run scores — never more than the day allows."""
+        return min(self.scoring_batch_size * self.scoring_batches_per_run, self.max_scored_per_day)
+
     # LTR-04. Empty disables the check, which is why it's a config list rather than a constant:
     # the phrases that read as filler are a matter of taste and of language.
     letter_banned_phrases: list[str] = []
+    # ATSC-03's target. Read by `nodes.ats.reconcile_skills`, which stops adding skills once
+    # coverage clears it. It was dead config until then: the retry rule that was meant to use it
+    # hardcoded 0.75 and was never passed this value.
     ats_threshold: float = 0.75
     weekly_budget_usd: float = 5
     cv_pages: int = 1
-    llm_timeout_seconds: int = 60
-    llm_max_retries: int = 2
+    # Whether saving a CV wipes everything downstream of it (CV-08). See
+    # `Store.reset_job_world` for what "downstream" means and why the default is off.
+    #
+    # **This is a single-user testing setting and it must be off before accounts exist.** It is a
+    # flag rather than plain code in `put_cv` for exactly that reason: with real users, someone
+    # correcting a typo in their CV must not lose their applications, and the line that would
+    # cause it should be one a reader can find and switch off rather than a behaviour buried in
+    # a save path.
+    reset_on_cv_upload: bool = False
+    # How much of a job posting the prompts that *write* may see. The ad's first part is the job;
+    # the rest is benefits, boilerplate and legal. `prefilter.job_text` has always capped at
+    # 2,000 characters, while `cv.tailor`, `letter.write` and `answers.draft` sent the whole
+    # thing — so the uncapped prompts were the expensive ones. Generous enough to keep the
+    # company facts a letter has to quote (LTR-02/06), which sit in the body, not the tail.
+    job_description_limit: int = 6000
+    llm_timeout_seconds: int = 180
+    llm_max_retries: int = 1
 
     def task(self, name: str) -> Task:
         try:

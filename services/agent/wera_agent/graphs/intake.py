@@ -26,13 +26,14 @@ from ..config import companies, companies_file, senders, sites, wera, write_comp
 from ..db.session import transaction
 from ..domain import dedupe, filters
 from ..errors import ApiError
+from ..http import host_of
 from ..llm.gateway import AUTH, BUDGET, MESSAGES, QUOTA, RATE
 from ..nodes import fit, prefilter
 from ..schemas.jobs import Job
 from ..schemas.llm_outputs import JobCardList
 from ..schemas.profile import SearchProfile
 from ..settings import get_settings
-from ..sources import ats_discovery, ats_feeds, crawl_cache, firecrawl_search, inbox, normalise, resolve
+from ..sources import ats_discovery, ats_feeds, browser, crawl_cache, firecrawl_search, inbox, normalise, resolve
 from ..sources.firecrawl_search import SearchCaps
 
 CHANNELS = ("board_search", "email_alert", "watchlist")
@@ -64,6 +65,10 @@ class ChannelOutcome:
     discovered: int = 0
     # SRCH-10: what the crawl cache answered for free, in Firecrawl's credit units.
     credits_saved: int = 0
+    # SRCH-05: pages `sources.extract` read for nothing, against pages that still needed a paid
+    # Firecrawl scrape.
+    local_pages: int = 0
+    fallback_pages: int = 0
 
 
 class Cancelled(Exception):
@@ -76,9 +81,14 @@ class Progress(Protocol):
     The channel doesn't know which slice of the bar it owns — `run` does, because only it knows
     how many channels there are — so a channel reports 0…1 of itself and the caller maps that
     onto the run's bar.
+
+    `phase` and `detail` are the channel's to name: it is the only thing that knows whether it is
+    searching or scraping, and which board it is doing it to.
     """
 
-    def __call__(self, fraction: float, *, done: int, total: int, results: int) -> None: ...
+    def __call__(
+        self, fraction: float, *, phase: str, detail: str | None = None, done: int, total: int, results: int
+    ) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -131,10 +141,12 @@ def run_discovery(profile: SearchProfile, now: int) -> tuple[ats_discovery.Disco
     return outcome, len(merged)
 
 
-def from_watchlist(profile: SearchProfile, now: int, *, discover: bool = False) -> ChannelOutcome:
+def from_watchlist(profile: SearchProfile, now: int, *, discover: bool = False, tick: Progress | None = None) -> ChannelOutcome:
     """ATS-01: the employers' own boards, and ATS-05: finding which boards those are."""
     out = ChannelOutcome(channel="watchlist")
     if discover:
+        if tick is not None:
+            tick(0.0, phase="discovering", detail="looking for employers hiring your titles", done=0, total=0, results=0)
         try:
             found, _total = run_discovery(profile, now)
             out.queries = found.queries
@@ -148,12 +160,51 @@ def from_watchlist(profile: SearchProfile, now: int, *, discover: bool = False) 
     watched = companies()
     if not watched:
         return out
+    if tick is not None:
+        # One fetch per employer covers every job on that board, so this is the honest unit: a
+        # watchlist of 32 companies is 32 requests, not 3,913 jobs.
+        tick(
+            0.3,
+            phase="feeds",
+            detail=f"{len(watched)} {'employer' if len(watched) == 1 else 'employers'}",
+            done=0,
+            total=len(watched),
+            results=0,
+        )
     result = ats_feeds.fetch_all(watched)
     out.results = len(result.jobs)
     out.jobs = [normalise.from_feed(feed, now) for feed in result.jobs]
     out.errors += [("WATCHLIST_FEED", message) for message in result.errors]
     out.feed = result
+    out.jobs += _from_direct_sites(profile, now, tick=tick)
     return out
+
+
+def _from_direct_sites(profile: SearchProfile, now: int, *, tick: Progress | None = None) -> list[Job]:
+    """Boards WERA reads itself (SRCH-04, `Site.direct`) — today, `careers.google.com`.
+
+    Rides the watchlist because it spends no Firecrawl credits, and sits behind the same terms
+    gate as every other board: an entry with no `terms_reviewed_on` is loaded, shown in the UI
+    and **never fetched**. So this does nothing at all until a person has read the terms and
+    recorded the date, which is the intended behaviour rather than a missing step.
+
+    Its failures are returned as jobs-not-found rather than raised: a board WERA can't read must
+    not cost the watchlist the employers it could.
+    """
+    from ..sources import google_careers
+
+    direct = firecrawl_search.direct_sites(profile, sites())
+    if not any(s.domain == google_careers.HOST for s in direct):
+        return []
+    if tick is not None:
+        tick(0.7, phase="feeds", detail=google_careers.HOST, done=0, total=0, results=0)
+    with browser.session() as fetch_html:
+        jobs, errors = google_careers.list_jobs(
+            watch_titles(profile), profile.locations, fetch_html=fetch_html, now=now, parse=normalise_with_model
+        )
+    for message in errors:
+        logfire.info("Google Careers: {message}", message=message)
+    return jobs
 
 
 def sites_due(last_run: str | None, now: int) -> bool:
@@ -194,6 +245,31 @@ def run_site_discovery(profile: SearchProfile, now: int) -> tuple[int, int, list
     return len(outcome.found), outcome.credits_used, [("SITE_DISCOVERY", m) for m in outcome.errors]
 
 
+def normalise_with_model(text: str) -> dict[str, Any] | None:
+    """`extract`'s last free rung: the fast tier reads a page no parser could (SRCH-05).
+
+    About $0.0002 a page against 5 Firecrawl credits (~$0.019). The task was already written —
+    its prompt, schema and config row all existed with **no call site** — so this is a wiring
+    change, not a new model call.
+
+    Its own short transaction, because the scrape loop runs outside one on purpose: the budget
+    check and the `llm_calls` row both need a session, and holding one open across thirty page
+    reads would lock SQLite for the whole crawl.
+    """
+    from ..llm.gateway import structured
+    from ..llm.prompts import untrusted
+    from ..schemas.llm_outputs import NormalisedJob
+
+    try:
+        with transaction() as session:
+            out = structured(session, "job.normalise", NormalisedJob, {"job": untrusted("job page", text)}, context={})
+        return out.model_dump(by_alias=True)
+    except ApiError:
+        # A spent budget or a refused key is a reason to fall through to Firecrawl, not to fail
+        # the page. `structured` has already recorded what it cost.
+        return None
+
+
 def from_board_search(
     profile: SearchProfile,
     known_urls: set[str],
@@ -211,6 +287,8 @@ def from_board_search(
     out = ChannelOutcome(channel="board_search")
 
     if discover:
+        if tick is not None:
+            tick(0.0, phase="discovering", detail="looking for new job boards", done=0, total=0, results=0)
         try:
             found, credits, errors = run_site_discovery(profile, now)
             out.discovered = found
@@ -220,29 +298,57 @@ def from_board_search(
             logfire.exception("Site discovery failed")
             out.errors.append(("SITE_DISCOVERY", f"Couldn't look for new boards ({type(exc).__name__})."))
 
-    def on_query(outcome: firecrawl_search.SearchOutcome, answered: int, planned: int) -> None:
+    def on_query(outcome: firecrawl_search.SearchOutcome, answered: int, planned: int, domain: str) -> None:
         if tick is not None:
-            tick(QUERY_SHARE * answered / max(planned, 1), done=answered, total=planned, results=len(outcome.hits))
+            tick(
+                QUERY_SHARE * answered / max(planned, 1),
+                phase="searching",
+                # The board, which `search` has had in scope all along and dropped on the floor.
+                # Twenty queries is minutes of wall clock under one unchanging word.
+                detail=domain,
+                done=answered,
+                total=planned,
+                results=len(outcome.hits),
+            )
 
     outcome = firecrawl_search.search(profile, sites(), caps, known_urls, cache=cache, on_query=on_query)
     out.results = len(outcome.hits)
     out.errors = [("BOARD_SEARCH", message) for message in outcome.errors]
 
-    planned = outcome.queries_answered
-    for index, hit in enumerate(outcome.hits):
-        card = firecrawl_search.scrape_card(hit.url, firecrawl_search.CARD_SCHEMA, outcome, caps, cache=cache)
-        if tick is not None:
-            tick(
-                QUERY_SHARE + (1 - QUERY_SHARE) * (index + 1) / len(outcome.hits),
-                done=planned,
-                total=planned,
-                results=len(outcome.hits),
+    # `done`/`total` switch units with the phase: queries while searching, pages while scraping.
+    # They used to stay pinned to the query count through the scrape loop, which left the label
+    # reading "22 / 22 queries" for the minutes it spent reading pages.
+    #
+    # One browser for the whole burst of pages (see `browser.session`), and a `parse` that opens
+    # its own short transaction per call — the scrape loop deliberately runs outside one, so that
+    # progress stays readable and SQLite isn't locked for the duration.
+    with browser.session() as fetch_html:
+        for index, hit in enumerate(outcome.hits):
+            # Reported *before* the scrape, not after: a page takes seconds, and the screen should
+            # name what it is waiting on rather than what it has already finished.
+            if tick is not None:
+                tick(
+                    QUERY_SHARE + (1 - QUERY_SHARE) * index / len(outcome.hits),
+                    phase="scraping",
+                    detail=host_of(hit.url) or hit.site,
+                    done=index,
+                    total=len(outcome.hits),
+                    results=len(outcome.hits),
+                )
+            card = firecrawl_search.scrape_card(
+                hit.url,
+                firecrawl_search.CARD_SCHEMA,
+                outcome,
+                caps,
+                cache=cache,
+                fetch_html=fetch_html,
+                parse=normalise_with_model,
             )
-        if card is None:
-            continue
-        job = normalise.from_scrape(card, url=hit.url, site=hit.site, markdown=card.get("description"), now=now)
-        if job is not None:
-            out.jobs.append(job)
+            if card is None:
+                continue
+            job = normalise.from_scrape(card, url=hit.url, site=hit.site, markdown=card.get("description"), now=now)
+            if job is not None:
+                out.jobs.append(job)
     # Queries *answered*, not queries sent. `intake_runs.queries` is what the Jobs screen shows,
     # and a warm run reporting "0 / 20 queries" reads exactly like a run that did nothing. The
     # narrower `queries_run` stays inside `SearchOutcome`, where the caps use it.
@@ -251,11 +357,15 @@ def from_board_search(
     # a plain assignment would hide them from the run's total and from the cap's arithmetic.
     out.credits_used += outcome.credits_used
     out.credits_saved = outcome.credits_saved
+    out.local_pages = outcome.local_pages
+    out.fallback_pages = outcome.fallback_pages
     out.partial = outcome.partial
     return out
 
 
-def from_inbox(session: Any, profile: SearchProfile, last_uid: int | None, now: int) -> ChannelOutcome:
+def from_inbox(
+    session: Any, profile: SearchProfile, last_uid: int | None, now: int, tick: Progress | None = None
+) -> ChannelOutcome:
     """MAIL-01…10: read the alerts folder, then resolve what it found."""
     out = ChannelOutcome(channel="email_alert")
     env = get_settings()
@@ -263,6 +373,10 @@ def from_inbox(session: Any, profile: SearchProfile, last_uid: int | None, now: 
     if not (env.alerts_imap_host and env.alerts_imap_user and password):
         out.errors.append(("INBOX_NOT_CONFIGURED", "Set the inbox details to use the alert channel."))
         return out
+    if tick is not None:
+        # The mailbox, not the account: `alerts_folder` is what a person configured, and naming it
+        # is how they can tell "read the wrong folder" from "no new alerts".
+        tick(0.2, phase="reading", detail=env.alerts_folder, done=0, total=0, results=0)
 
     def extract(text: str) -> list[dict[str, Any]]:
         """MAIL-04's fallback, on the fast tier, with no tools and no URLs in the prompt."""
@@ -342,11 +456,18 @@ SEARCH_SHARE = 0.25
 QUERY_SHARE = 0.6
 
 
+# How long a `detail` may be, matching `intake_runs.detail`. A job title or a board domain fits;
+# anything longer is truncated rather than refused, because a heartbeat must never be the thing
+# that fails a run.
+DETAIL_LIMIT = 200
+
+
 def report(
     run_ids: dict[str, str],
     *,
     phase: str,
     progress: float,
+    detail: str | None = None,
     done: int | None = None,
     total: int | None = None,
     results: int | None = None,
@@ -368,6 +489,11 @@ def report(
                 row = session.get(IntakeRunRow, run_id)
                 if row is not None and row.status == "running":
                     row.phase, row.progress = phase, round(progress, 4)
+                    # `detail` is cleared when not given, unlike the counters below. A phase has
+                    # moved on by the time the next heartbeat lands, and a sentence left behind
+                    # from the previous one is worse than no sentence: it says WERA is reading a
+                    # board it finished with minutes ago.
+                    row.detail = detail[:DETAIL_LIMIT] if detail else None
                     # Omitted means "leave it alone", not "zero". The between-channel heartbeat
                     # carries only a progress figure, and zeroing the counts there blanked the
                     # label — "20 / 20 queries" flicked back to "Searching boards…" on the step
@@ -389,9 +515,18 @@ class Judged:
     new_ids: set[str] = field(default_factory=set)
     scored: int = 0
     errors: list[tuple[str, str]] = field(default_factory=list)
+    # Jobs left in the pool after this pass took its batches — what "score more" would work on.
+    pool: int = 0
 
 
-def judge(jobs: list[Job], *, now: int, run_ids: dict[str, str] | None = None) -> Judged:
+def judge(
+    jobs: list[Job],
+    *,
+    now: int,
+    run_ids: dict[str, str] | None = None,
+    progress_from: float = SEARCH_SHARE,
+    limit: int | None = None,
+) -> Judged:
     """Filter, save, pre-filter, score, rank — in that order, and the order matters.
 
     The filters run first because they are free (MATCH-01). The jobs are **saved next**, before
@@ -399,18 +534,33 @@ def judge(jobs: list[Job], *, now: int, run_ids: dict[str, str] | None = None) -
     means a run whose scoring fails still leaves the jobs on the list rather than losing them.
     Only then is the expensive step reached, on a pre-filtered shortlist (MATCH-05).
 
-    **One transaction per scored job, not one for the lot.** Scoring forty jobs takes about
-    seven minutes, and holding a write transaction open for it meant three things: no progress
-    could be read until it was over, no other request could write to SQLite in the meantime, and
-    a run that died lost every score it had already paid for. Committing per job fixes all
-    three, and costs nothing semantically — re-running skips jobs that already have a valid fit
-    report (SCH-02, COST-04), so a partially scored run is exactly what the next run expects.
+    **Only a batch or two of it, though.** `limit` is how many jobs this pass scores, defaulting
+    to `config.scored_per_run` — eight at a time, two batches. A job takes about eleven seconds,
+    so the forty this used to work through was seven minutes during which the shortlist showed
+    nothing new: the broad search was done in the first quarter of that and then sat unreadable.
+    What the rest of the pool does now is wait, listed, in `Store.jobs_needing_score` — and
+    "score more" calls up the next batch. Ordering is best-first, so a batch is always worse than
+    the one before it and stopping early costs the least.
+
+    **One transaction per scored job, not one for the lot.** Holding a write transaction open for
+    the whole pass meant three things: no progress could be read until it was over, no other
+    request could write to SQLite in the meantime, and a run that died lost every score it had
+    already paid for. Committing per job fixes all three, and costs nothing semantically —
+    re-running skips jobs that already have a valid fit report (SCH-02, COST-04), so a partially
+    scored run is exactly what the next one expects. That is also what makes batching safe: a
+    batch is just a pass that stopped early, which the pool already knew how to represent.
     """
     from ..db import state
     from ..services.store import Store
 
     runs = run_ids or {}
     out = Judged()
+
+    # The free rules and the embedding pre-filter. Fast on a small list and *not* fast on a real
+    # one — against 15 boards carrying 3,913 vacancies the filters alone are seconds, and the
+    # pre-filter embeds every survivor locally — so it gets its own named stage rather than
+    # looking like the first job taking an unexplained minute to score.
+    report(runs, phase="filtering", progress=progress_from, detail=f"{len(jobs)} found" if jobs else "checking the shortlist")
 
     # Everything that is free, in one transaction: filter, store, pre-filter.
     with transaction() as session:
@@ -424,9 +574,31 @@ def judge(jobs: list[Job], *, now: int, run_ids: dict[str, str] | None = None) -
 
         kept, hidden = filters.apply(jobs, profile, now)  # MATCH-01, before any model call
         saved_jobs, out.new_ids = store.upsert_jobs([*kept, *hidden])
-        # Score what was stored, not what was found: a merged sighting kept the id it already had.
-        scoreable = [j for j in saved_jobs if j.status == "new"]
-        chosen = prefilter.shortlist(scoreable, cv, demo_mode=demo_mode, top_n=wera().max_scored_per_day)  # MATCH-05
+        # Everything still waiting for a score, not just what this run turned up. A board search
+        # skips URLs it already knows (SRCH-05), so a job left unscored by yesterday's cap was
+        # never found again and so never scored — and a CV change invalidates every stored score
+        # at once with nothing to recompute them. Both are the same omission, fixed in one place.
+        #
+        # Read from the database rather than unioned with `saved_jobs`, which is both simpler and
+        # more correct: `upsert_jobs` has already written this run's finds, so these rows *are*
+        # the merged jobs, and asking with `cached_evidence`'s own predicate means a re-sighting
+        # whose score is still valid can't take a slot under the day's cap from one that has none.
+        scoreable = store.jobs_needing_score(cv_version=cv.version, model=model)
+        cfg = wera()
+        # MATCH-05's day ceiling, minus what today has already spent. Counted here rather than
+        # left to the batch arithmetic, because batching hands the cap out in instalments and
+        # three "score more" clicks must not add up to more than one old run was allowed.
+        remaining_today = max(cfg.max_scored_per_day - store.scored_today(), 0)
+        take = min(limit if limit is not None else cfg.scored_per_run, remaining_today)
+        # Ranked over the *whole* pool, then sliced. Ranking only the slice would mean each batch
+        # was the best of an arbitrary subset rather than the best of what's left.
+        ranked = prefilter.shortlist(scoreable, cv, demo_mode=demo_mode, top_n=max(len(scoreable), 1))
+        chosen = ranked[:take]
+        out.pool = max(len(scoreable) - len(chosen), 0)
+        if scoreable and not chosen:
+            out.errors.append(
+                ("DAILY_CAP", f"Today's scoring limit of {cfg.max_scored_per_day} jobs is used up. The rest are waiting.")
+            )
 
     scored: list[tuple[Job, Any]] = []
     for position, job in enumerate(chosen):
@@ -435,7 +607,13 @@ def judge(jobs: list[Job], *, now: int, run_ids: dict[str, str] | None = None) -
         report(
             runs,
             phase="scoring",
-            progress=SEARCH_SHARE + (1 - SEARCH_SHARE) * (position / max(len(chosen), 1)),
+            # `progress_from` is where searching left off: a quarter of the bar for an intake run,
+            # and zero for a re-score, which never searched for anything.
+            progress=progress_from + (1 - progress_from) * (position / max(len(chosen), 1)),
+            # The job being judged. Scoring is ~98% of a real run's wall clock at roughly eleven
+            # seconds a job, so "Scoring 3 / 40" alone leaves the longest phase in the product
+            # with nothing changing between one job and the next.
+            detail=f"{job.title} · {job.company}",
             done=position,
             total=len(chosen),
         )
@@ -459,6 +637,66 @@ def judge(jobs: list[Job], *, now: int, run_ids: dict[str, str] | None = None) -
     # only needs to exist — the store sorts on `fit.total`.
     fit.rank(scored)
     return out
+
+
+async def run_rescore(run_id: str, channel: str = "rescore") -> dict[str, Any]:
+    """A scoring-only pass on a worker thread, so the request that asked for it can return."""
+    import asyncio
+
+    try:
+        return await asyncio.to_thread(rescore, run_id, channel)
+    finally:
+        from ..llm.gateway import flush_unrecorded
+
+        flush_unrecorded()
+
+
+def rescore(run_id: str, channel: str = "rescore") -> dict[str, Any]:
+    """Judge jobs WERA already has, with no fetching at all (CV-08, SCH-02, MATCH-05).
+
+    Two callers, one pass. `rescore` recomputes what a CV change invalidated; `score_more` calls
+    up the next batch from the broad search's pool. Both are `judge` with nothing new to add, and
+    all the work comes from `jobs_needing_score` — which is why this is so small. The real change
+    was teaching `judge` to ask what still needs scoring, rather than scoring only what a run had
+    just found; this exists so that can happen when the CV changes or when someone asks, instead
+    of only when the next search is.
+    """
+    from ..db.models import IntakeRunRow
+
+    now = now_ms()
+    run_ids = {channel: run_id}
+    summary: dict[str, Any] = {"new_jobs": 0, "scored": 0, "credits_saved": 0, "errors": []}
+
+    # One batch for a click, the run's full allowance for a CV change. A person who pressed
+    # "Score 8 more" is already waiting, so scoring sixteen would be making them wait twice as
+    # long as the button promised; a re-score is nobody waiting on a screen, and the second batch
+    # is what makes the next one feel instant.
+    limit = wera().scoring_batch_size if channel == "score_more" else None
+
+    try:
+        judged = judge([], now=now, run_ids=run_ids, progress_from=0.0, limit=limit)
+    except Cancelled:
+        logfire.info("{channel} cancelled", channel=channel)
+        return summary
+
+    summary["scored"] = judged.scored
+    summary["errors"] = judged.errors
+    with transaction() as session:
+        row = session.get(IntakeRunRow, run_id)
+        if row is not None and row.status == "running":
+            row.errors = [{"code": code, "message": message} for code, message in judged.errors]
+            row.progress, row.phase = 1, "done"
+            row.detail = None
+            row.finished_at = iso(now_ms())
+            row.settled = True
+            row.status = "partial" if judged.errors else "succeeded"
+    logfire.info(
+        "{channel} finished: {scored} job(s) judged, {pool} still waiting",
+        channel=channel,
+        scored=judged.scored,
+        pool=judged.pool,
+    )
+    return summary
 
 
 async def run_intake(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
@@ -504,7 +742,7 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
         cache.prune()
 
     outcomes: list[ChannelOutcome] = []
-    report(run_ids, phase="searching", progress=0.02)
+    report(run_ids, phase="queued", progress=0.02)
 
     def ticker(channel: str, index: int) -> Progress:
         """The slice of the bar this channel owns, as something it can report into.
@@ -517,9 +755,17 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
         hi = SEARCH_SHARE * (index + 1) / max(len(channels), 1)
         mine = {channel: run_ids[channel]} if channel in run_ids else {}
 
-        def tick(fraction: float, *, done: int, total: int, results: int) -> None:
+        def tick(fraction: float, *, phase: str, detail: str | None = None, done: int, total: int, results: int) -> None:
             progress = lo + (hi - lo) * min(max(fraction, 0.0), 1.0)
-            report(mine, phase="searching", progress=max(progress, 0.02), done=done, total=total, results=results)
+            report(
+                mine,
+                phase=phase,
+                progress=max(progress, 0.02),
+                detail=detail,
+                done=done,
+                total=total,
+                results=results,
+            )
 
         return tick
 
@@ -528,14 +774,14 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
             with transaction() as session:
                 _check_cancelled(session, list(run_ids.values()))
             if channel == "watchlist":
-                outcomes.append(from_watchlist(profile, now, discover=discover))
+                outcomes.append(from_watchlist(profile, now, discover=discover, tick=ticker(channel, index)))
             elif channel == "board_search":
                 outcomes.append(
                     from_board_search(profile, known_urls, caps, now, cache, ticker(channel, index), discover=find_sites)
                 )
             else:
                 with transaction() as session:
-                    outcomes.append(from_inbox(session, profile, last_uid, now))
+                    outcomes.append(from_inbox(session, profile, last_uid, now, tick=ticker(channel, index)))
         except Cancelled:
             logfire.info("Intake cancelled before {channel}", channel=channel)
             break
@@ -544,12 +790,20 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 — one channel never takes the run with it
             logfire.exception("Channel {channel} failed", channel=channel)
             outcomes.append(ChannelOutcome(channel=channel, errors=[("CHANNEL_FAILED", type(exc).__name__)]))
-        report(run_ids, phase="searching", progress=SEARCH_SHARE * (index + 1) / max(len(channels), 1))
 
     if cache is not None:
         cache.summary()
 
-    # Everything together, so a job found twice is scored once.
+    # Everything together, so a job found twice is scored once. Named, because on a run that
+    # found a few hundred sightings this is seconds of silence between two long phases, and
+    # silence between stages is what a frozen bar is made of.
+    total_found = sum(len(o.jobs) for o in outcomes)
+    report(
+        run_ids,
+        phase="collapsing",
+        progress=SEARCH_SHARE,
+        detail=f"{total_found} {'sighting' if total_found == 1 else 'sightings'}",
+    )
     found = dedupe.collapse([job for outcome in outcomes for job in outcome.jobs])
 
     # Outside a transaction: `judge` opens one per scored job so progress is readable while it
@@ -560,6 +814,11 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
         judged = judge(found, now=now, run_ids=run_ids)
     except Cancelled:
         return summary
+
+    # ATS-03's sweep walks every job the watchlist can speak for, so it is the last thing between
+    # the final score and a finished run. Named for the same reason as `collapsing`: an unnamed
+    # pause at 99% is where someone reloads the page.
+    report(run_ids, phase="closing", progress=0.99, detail="checking which jobs are still open")
 
     with transaction() as session:
         store = Store(session, now)
@@ -581,9 +840,14 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
             row.results = outcome.results
             row.credits_used = outcome.credits_used
             row.credits_saved = outcome.credits_saved
+            row.local_pages = outcome.local_pages
+            row.fallback_pages = outcome.fallback_pages
             row.new_jobs = len([j for j in found if j.id in new_ids and outcome.channel in {s.channel for s in j.sources}])
             row.errors = [{"code": code, "message": message} for code, message in [*outcome.errors, *score_errors]]
             row.progress, row.phase = 1, "done"
+            # A finished run has nothing it is doing, so nothing to say about it. The summary
+            # line takes over from here (`runStatus`).
+            row.detail = None
             row.finished_at = iso(now_ms())
             row.settled = True
             # Finding jobs and scoring them fail separately. A channel that fetched nothing has

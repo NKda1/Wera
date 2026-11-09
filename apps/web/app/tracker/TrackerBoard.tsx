@@ -157,7 +157,7 @@ function TrackerCard({ app, onMove }: { app: ApplicationWithJob; onMove: (to: Ap
       </p>
 
       <div className="mt-2 text-small">
-        {app.status === "drafting" && app.draft ? <DraftProgress step={app.draft.step} /> : null}
+        {app.status === "drafting" && app.draft ? <DraftProgress step={app.draft.step} progress={app.draft.progress} /> : null}
         {app.status === "ready_for_review" ? (
           <Link href={`/review/${app.id}`} className="font-semibold text-forest-700 underline underline-offset-2">
             Waiting for your review

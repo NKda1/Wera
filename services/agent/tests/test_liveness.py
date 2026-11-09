@@ -94,6 +94,71 @@ class TestTwoHundred:
         assert classify(200, None, "We closed our Series B. This position is open.") == "open"
 
 
+class TestTheRenderRung:
+    """The blind spot this module used to document as out of scope.
+
+    A client-rendered board serves a shell with no words in it, the phrase check finds nothing to
+    match, and a withdrawn job looks open for ever. The file said detecting those "needs a
+    rendered scrape at 5 credits a job" — which was true until `sources.extract` made rendering
+    free. So a 200 with nothing readable on it is now rendered and re-read.
+    """
+
+    SHELL = '<html><body><div id="root"></div><script src="/app.js"></script></body></html>'
+
+    def reply(self, monkeypatch, body: str, status: int = 200):
+        from wera_agent.sources import liveness as live
+
+        monkeypatch.setattr(
+            live,
+            "request",
+            lambda *_a, **_k: type("R", (), {"status_code": status, "text": body, "headers": {}})(),
+        )
+        return live
+
+    def test_a_shell_page_is_rendered_and_read(self, monkeypatch):
+        live = self.reply(monkeypatch, self.SHELL)
+        rendered = "<h1>ML Engineer</h1><p>This vacancy has expired</p>" + "x" * 500
+        assert live.check("https://board.example/1", fetch_html=lambda _u: rendered) == "likely_gone"
+
+    def test_a_shell_that_renders_a_live_job_is_open(self, monkeypatch):
+        live = self.reply(monkeypatch, self.SHELL)
+        rendered = "<h1>ML Engineer</h1><p>Apply now. We build guardrails.</p>" + "y" * 500
+        assert live.check("https://board.example/1", fetch_html=lambda _u: rendered) == "open"
+
+    def test_a_shell_that_cannot_be_rendered_is_unknown_not_open(self, monkeypatch):
+        """Asked and couldn't tell is not the same fact as asked and found a job — and `unknown`
+        is the verdict that cannot close anything."""
+        live = self.reply(monkeypatch, self.SHELL)
+        assert live.check("https://board.example/1", fetch_html=lambda _u: None) == "unknown"
+
+    def test_without_a_browser_the_verdict_is_what_it_always_was(self, monkeypatch):
+        """The rung is optional. An install with no Chromium keeps the old behaviour rather than
+        losing the check."""
+        live = self.reply(monkeypatch, self.SHELL)
+        assert live.check("https://board.example/1") == "open"
+
+    def test_a_readable_page_is_never_rendered(self, monkeypatch):
+        """Rendering is free but not instant. A page with words on it has already answered."""
+        live = self.reply(monkeypatch, "<h1>ML Engineer</h1><p>Apply now.</p>" + "z" * 500)
+        asked: list[str] = []
+        assert live.check("https://board.example/1", fetch_html=lambda u: asked.append(u) or None) == "open"
+        assert asked == []
+
+    def test_a_404_is_still_gone_without_rendering_anything(self, monkeypatch):
+        live = self.reply(monkeypatch, "", status=404)
+        asked: list[str] = []
+        assert live.check("https://board.example/1", fetch_html=lambda u: asked.append(u) or None) == "gone"
+        assert asked == []
+
+    def test_rendering_can_never_turn_a_page_into_gone(self, monkeypatch):
+        """A closure phrase is a hint however it got onto the page, so the strongest a rendered
+        verdict gets is `likely_gone`. Only a 404, a 410 or a lost-identity redirect closes."""
+        live = self.reply(monkeypatch, self.SHELL)
+        for body in ("this job has closed", "position has been filled", "applications are closed"):
+            verdict = live.check("https://board.example/1", fetch_html=lambda _u, b=body: f"<div>{b}</div>" + "x" * 500)
+            assert verdict == "likely_gone", body
+
+
 class TestTheFlagOnRead:
     """MATCH-10: four states from three fields, computed on read like `urgency`."""
 

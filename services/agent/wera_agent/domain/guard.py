@@ -5,7 +5,7 @@ import re
 
 from ..schemas.cv import MasterCV
 from ..schemas.pack import Cited, GuardResult, Violation
-from .vocab import cv_line_index, skill_text, text_has_term
+from .vocab import backing_text, cv_line_index, text_has_term
 
 # Terms the guard watches for: master skills, aliases, job keywords and a common tech list.
 COMMON_TECH = ["Docker", "Kubernetes", "AWS", "GCP", "Azure", "Rust", "Java", "React", "Django", "Kafka", "Terraform"]
@@ -15,7 +15,7 @@ NUMBER = re.compile(r"\d+(?:[.,]\d+)?\s?%?")
 
 def check_cited(items: list[tuple[str, Cited]], cv: MasterCV, job_keywords: list[str] | None = None) -> GuardResult:
     lines = cv_line_index(cv)
-    master_skills = " · ".join(skill_text(s) for s in cv.skills)
+    backing = backing_text(cv)
     vocabulary = [*[t for s in cv.skills for t in [s.name, *(s.aliases or [])]], *(job_keywords or []), *COMMON_TECH]
     violations: list[Violation] = []
 
@@ -35,8 +35,8 @@ def check_cited(items: list[tuple[str, Cited]], cv: MasterCV, job_keywords: list
             if n.strip() not in source_text:
                 violations.append(Violation(location=location, rule="numbers", detail=f'"{n.strip()}" is not in the cited lines'))
         for term in vocabulary:
-            if text_has_term(item.text, term) and not text_has_term(source_text, term) and not text_has_term(master_skills, term):
+            if text_has_term(item.text, term) and not text_has_term(source_text, term) and not text_has_term(backing, term):
                 violations.append(
-                    Violation(location=location, rule="terms", detail=f'"{term}" is not in the cited lines or your skills')
+                    Violation(location=location, rule="terms", detail=f'"{term}" is not in the cited lines or your CV')
                 )
     return GuardResult(pass_=not violations, violations=violations, repaired=False)

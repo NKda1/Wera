@@ -132,6 +132,15 @@ class FitReport(FitEvidence):
     freshness: float  # computed from postedAt
     total: float  # computed in code, §8.2
     rough_only: bool
+    # Whether this score was judged against something that has since changed — a different CV
+    # version, a different scoring model, or a job whose description has been rewritten.
+    #
+    # `fit_reports` has carried that cache key since the start, but only the *write* path ever
+    # read it: `cached_evidence` consulted it to decide whether to re-score, and nothing on the
+    # read path did. So saving a new CV left every job on the shortlist showing a score computed
+    # against the old one, with nothing to say so. Computed on read, like `urgency` and
+    # `liveness`, and for the same reason — it is a claim about now.
+    stale: bool = False
 
 
 class FitWeights(Model):

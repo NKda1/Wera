@@ -47,7 +47,7 @@ run. The agent is the only process that reads a key; the web app never holds one
 | Variable | For |
 |---|---|
 | `LLM_API_KEY` | OpenRouter. **Set a per-key credit limit on it** — belt and braces with WERA's own weekly budget. |
-| `FIRECRAWL_API_KEY` | Board search. The Hobby plan is enough for one run a day; see the cost model below. |
+| `FIRECRAWL_API_KEY` | Board search. Only the searches themselves now; pages are read locally (see below). |
 | `ALERTS_IMAP_*` | A **dedicated** mailbox for job alerts, with an app password. WERA opens it read-only and never marks anything read. |
 | `DATABASE_URL` | Optional Postgres (`postgresql://…`) instead of SQLite in `data/`. Install the extra: `uv sync --extra postgres`. |
 | `LOGFIRE_TOKEN` | Optional tracing. Without a token nothing is sent, whatever else is set. |
@@ -74,28 +74,56 @@ Add companies by hand whenever you like: an entry you wrote is never removed by 
 
 Then press **Search now** on the Jobs screen for the first real run.
 
+### Optional: a headless browser
+
+```bash
+cd services/agent
+uv sync --extra browser && uv run playwright install chromium
+```
+
+WERA reads job pages itself rather than paying Firecrawl to — JSON-LD first, then the employer's
+own ATS feed, then the fast model tier. That all works over plain HTTP, so **this step is
+optional**. What it adds is the boards that render their listings in JavaScript, which plain HTTP
+sees as an empty shell. Chromium is a ~150 MB download, which is why it isn't part of
+`pnpm install`; without it those pages fall through to a 5-credit Firecrawl scrape, and the run
+panel tells you how many did (`18 free, 2 paid`).
+
+It is also what `careers.google.com` needs. That board ships in `config/sites.yaml` with
+`terms_reviewed_on: null`, so WERA loads it, shows it, and **fetches nothing** until you have
+read Google's terms and recorded the date yourself.
+
 ---
 
 ## What it costs
 
-About **$22–23 a month** for one active person: one intake run a day, 25 jobs scored a day and
-ten applications a week.
+Model spend is a few dollars a month for one active person — one intake run a day, 25 jobs scored
+a day and ten applications a week — and sits comfortably inside the $5/week default budget:
 
 | | Monthly |
 |---|---:|
-| Firecrawl (Hobby: 5,000 credits, ~2,700 used) | $19.00 |
 | Fit scoring + keyword extraction | $2.48–3.20 |
 | Application packs (~43) | $0.14–0.30 |
 
-**Firecrawl is ~85% of it**, and model spend sits comfortably inside the $5/week default budget.
-A typical intake run is about **$0.43** — $0.34 of Firecrawl credits and $0.10 of model calls.
 Per application, models cost about **$0.06–0.08**, mostly the eleven jobs scored for each one
 applied to rather than the writing.
 
-Two caps keep it there, and both refuse rather than overspend: a **weekly USD budget** on model
-calls (refused at 100%, warned at 80%) and a **per-run Firecrawl credit cap** counted in
-Firecrawl's own units. See [ARCHITECTURE §9](<WERA system/ARCHITECTURE.md>) for the full
-breakdown, and `config/wera.yaml` to change any of it.
+**Firecrawl used to be ~85% of the bill**, at $19/month for the Hobby plan. Almost all of that
+was page scraping: a search costs 2 credits and a JSON-format page scrape costs 5, so ~22 pages a
+run were about three quarters of every credit spent. WERA now reads those pages itself
+(`services/agent/wera_agent/sources/extract.py`) and only pays Firecrawl for a page no free rung
+could read — so what remains is the searches, roughly a fifth of what it was.
+
+How much that actually saves you depends on the boards in your profile, which is why it is
+measured rather than promised: every run records how many pages it read free and how many it paid
+for, and the Jobs screen shows both (`18 free, 2 paid`). Watch that number for a run or two before
+changing your Firecrawl plan.
+
+Three caps keep spend bounded, and all of them refuse rather than overspend: a **weekly USD
+budget** on model calls (refused at 100%, warned at 80%), a **per-task deadline** so one call
+can't hang a draft, and a **per-run Firecrawl credit cap** counted in Firecrawl's own units —
+which now bounds *paid* page reads only, since free ones cost nothing to allow. See
+[ARCHITECTURE §9](<WERA system/ARCHITECTURE.md>) for the full breakdown, and `config/wera.yaml`
+to change any of it.
 
 ---
 
@@ -113,6 +141,7 @@ uv run wera reset                 # delete this mode's database and seed it agai
 uv run wera schemas               # re-export the Pydantic contracts to packages/schemas/json
 uv run wera supabase              # re-export the Postgres schema to supabase/schema.sql
 uv run wera discover              # find ATS boards hiring for your titles (--dry-run to preview)
+uv run playwright install chromium  # optional: read JavaScript-rendered boards (needs --extra browser)
 uv run wera eval                  # the golden eval (see below)
 uv run pytest -q                  # the agent suite, network blocked
 uv run ruff check . && uv run ruff format .
@@ -160,6 +189,13 @@ Browser → Next.js route handlers (BFF) → FastAPI + LangGraph → LangChain �
 - **The cheap checks run first:** hard filters, then local embeddings, then a model. Against 15
   real ATS boards carrying 3,913 live vacancies, the free filters left 88 — the single biggest
   reason being "not one of your target titles". Nothing reached a model until then.
+- **The cheap *readers* run first too.** A job page is tried as JSON-LD, then as the employer's
+  own ATS feed, then rendered in a browser, then given to the fast model tier — and only a page
+  none of that could read is paid for (`sources/extract.py`). Each rung exists for the pages the
+  one above it couldn't answer.
+- **A tailored CV is selected, not written.** `cv.tailor` returns bullet *ids*; the wording is
+  copied from your master CV in code. So the same job produces the same CV twice, and a line that
+  drifted from what you wrote is not something the contract can express.
 - **The watchlist maintains itself.** Discovery is paid and weekly; watching is free and daily.
 
 `WERA system/ARCHITECTURE.md` is how it's built; `WERA system/SPEC.md` is what it must do, with

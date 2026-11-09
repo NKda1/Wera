@@ -81,6 +81,14 @@ export function JobCard({
                 New
               </Pill>
             ) : null}
+            {/* CV-08: this score judged a CV, a model or a posting that has since changed. Amber,
+                not red — the score is out of date, not wrong, and it is still the best evidence
+                WERA has until the re-scoring pass reaches this job. */}
+            {fit.stale ? (
+              <Pill tone="amber" dot={false} className="ml-2 align-middle text-[11px]">
+                Re-scoring
+              </Pill>
+            ) : null}
           </h3>
           <p className="mt-0.5 text-small text-ink-2">{meta}</p>
           <p className="mt-1.5">
@@ -168,6 +176,13 @@ export function JobCard({
                     <span className="font-mono">{fit.model}</span>.
                   </li>
                 </ul>
+                {fit.stale ? (
+                  <p className="mt-2 rounded-control bg-amber-50 px-3.5 py-2.5 text-small text-amber-700">
+                    This score was judged against an earlier version of your CV, a different scoring model, or a posting that has
+                    since been rewritten. It&apos;s shown because it is the best evidence WERA has; it will be replaced when the
+                    re-scoring pass reaches this job.
+                  </p>
+                ) : null}
               </div>
             ) : null}
             <div>

@@ -2,14 +2,59 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, type Estimate } from "@/lib/api";
-import type { IntakeChannel, IntakeRun, SearchProfile } from "@/lib/types";
+import type { IntakeChannel, IntakeRun, RunPhase, SearchChannel, SearchProfile } from "@/lib/types";
 import { Button, Spinner } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { Dialog } from "@/lib/ui/Dialog";
 import { Checkbox } from "@/lib/ui/Field";
-import { ProgressBar } from "@/lib/ui/ProgressSteps";
+import { ProgressBar, ProgressSteps, type StepState } from "@/lib/ui/ProgressSteps";
 
-const NAMES: Record<IntakeChannel, string> = { board_search: "Board search", email_alert: "Alert inbox", watchlist: "ATS watchlist" };
+// Keyed on the wide type, because `RunPanel` has to name a re-score run as well as a channel.
+const NAMES: Record<IntakeChannel, string> = {
+  board_search: "Board search",
+  email_alert: "Alert inbox",
+  watchlist: "ATS watchlist",
+  rescore: "Re-scoring your shortlist",
+  score_more: "Scoring more jobs",
+};
+
+/** UX-01: what each stage is called, in words someone can act on.
+ *
+ * Every one of these was already a step in the intake graph; none of them had a name the person
+ * could see, because `phase` had three values and "searching" stood for all of the fetching. */
+const PHASE_LABELS: Record<RunPhase, string> = {
+  queued: "Starting",
+  discovering: "Finding boards",
+  searching: "Searching",
+  scraping: "Reading pages",
+  feeds: "Checking feeds",
+  reading: "Reading alerts",
+  collapsing: "Merging duplicates",
+  filtering: "Filtering",
+  scoring: "Scoring",
+  closing: "Checking still open",
+  done: "Done",
+};
+
+/** The unit `done`/`total` are counted in, per stage. They change meaning with the phase —
+ *  queries while searching, pages while scraping, jobs while scoring — and labelling them all
+ *  "queries" is what left the old panel reading "22 / 22 queries" through the scrape loop. */
+const PHASE_UNITS: Partial<Record<RunPhase, string>> = {
+  searching: "queries",
+  scraping: "pages",
+  feeds: "employers",
+  scoring: "jobs",
+};
+
+/** Which stages each kind of run actually passes through, in order. `discovering` is added by
+ *  `stepsFor` only while it is happening, because it is weekly and most runs skip it. */
+const STEPS: Record<IntakeChannel, RunPhase[]> = {
+  board_search: ["searching", "scraping", "collapsing", "filtering", "scoring", "closing"],
+  email_alert: ["reading", "collapsing", "filtering", "scoring", "closing"],
+  watchlist: ["feeds", "collapsing", "filtering", "scoring", "closing"],
+  rescore: ["scoring"],
+  score_more: ["scoring"],
+};
 
 /** PRF-05: show what a search will cost before it runs. */
 export function SearchDialog({
@@ -19,14 +64,14 @@ export function SearchDialog({
 }: {
   profile: SearchProfile;
   onClose: () => void;
-  onStart: (channels: IntakeChannel[]) => Promise<void>;
+  onStart: (channels: SearchChannel[]) => Promise<void>;
 }) {
-  const enabled = {
+  const enabled: Record<SearchChannel, boolean> = {
     board_search: profile.channels.boardSearch,
     email_alert: profile.channels.inbox,
     watchlist: profile.channels.watchlist,
   };
-  const [chosen, setChosen] = useState<IntakeChannel[]>((Object.keys(enabled) as IntakeChannel[]).filter((c) => enabled[c]));
+  const [chosen, setChosen] = useState<SearchChannel[]>((Object.keys(enabled) as SearchChannel[]).filter((c) => enabled[c]));
   const [est, setEst] = useState<Estimate>();
   const [busy, setBusy] = useState(false);
 
@@ -38,7 +83,7 @@ export function SearchDialog({
     };
   }, [chosen]);
 
-  const toggle = (c: IntakeChannel, on: boolean) => setChosen((cs) => (on ? [...cs, c] : cs.filter((x) => x !== c)));
+  const toggle = (c: SearchChannel, on: boolean) => setChosen((cs) => (on ? [...cs, c] : cs.filter((x) => x !== c)));
 
   return (
     <Dialog
@@ -103,19 +148,40 @@ export function SearchDialog({
 }
 
 /** UX-01: live progress for each channel, with Cancel. */
-export function RunPanel({ runIds, onFinished }: { runIds: string[]; onFinished: (runs: IntakeRun[]) => void }) {
+export function RunPanel({
+  runIds,
+  onFinished,
+  onBatch,
+}: {
+  runIds: string[];
+  onFinished: (runs: IntakeRun[]) => void;
+  /** MATCH-05: a batch of scores has landed, so the shortlist is worth re-reading. */
+  onBatch?: () => void;
+}) {
   const [runs, setRuns] = useState<IntakeRun[]>([]);
   const finished = useRef(false);
   const onDone = useRef(onFinished);
   onDone.current = onFinished;
+  const onBatchRef = useRef(onBatch);
+  onBatchRef.current = onBatch;
+  // How many whole batches have been shown. Scoring reports after every job, and refreshing the
+  // page every eleven seconds would be worse than not refreshing at all — so the list is re-read
+  // when a batch boundary is crossed, which is the point at which there is something new to see.
+  const batches = useRef(0);
 
   useEffect(() => {
     finished.current = false;
+    batches.current = 0;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
         const next = await Promise.all(runIds.map((id) => api.getRun(id)));
         setRuns(next);
+        const done = batchesDone(next);
+        if (done > batches.current) {
+          batches.current = done;
+          onBatchRef.current?.();
+        }
         if (next.every((r) => r.status !== "running" && r.status !== "queued")) {
           if (!finished.current) {
             finished.current = true;
@@ -152,7 +218,9 @@ export function RunPanel({ runIds, onFinished }: { runIds: string[]; onFinished:
           </Button>
         ) : null}
       </div>
-      <ul className="mt-4 grid gap-4 md:grid-cols-3">
+      {/* One row per channel rather than three columns: a stage checklist needs the width, and
+          a percentage with no named stage beside it was the original complaint. */}
+      <ul className="mt-4 flex flex-col gap-5">
         {runs.map((r) => (
           <li key={r.id}>
             <div className="mb-1.5 flex items-baseline justify-between gap-2 text-small">
@@ -160,10 +228,14 @@ export function RunPanel({ runIds, onFinished }: { runIds: string[]; onFinished:
               <span className="text-ink-2">{runStatus(r)}</span>
             </div>
             <ProgressBar value={r.progress} label={`${NAMES[r.channel]} progress`} />
-            {r.status === "running" && r.phase === "scoring" && r.total > 0 ? (
-              <p className="mt-1 text-small text-ink-2">
-                Scoring {r.done} of {r.total}
-              </p>
+            {r.status === "running" ? (
+              <>
+                <ProgressSteps className="mt-2.5" steps={stepsFor(r)} />
+                {/* The noun. `phase` is an enum and has to stand for twenty queries or forty
+                    jobs, so without this the active step stops changing for minutes at a time —
+                    which reads as a hung process however much the bar moves. */}
+                {r.detail ? <p className="mt-1.5 text-small text-ink-2">{r.detail}</p> : null}
+              </>
             ) : null}
           </li>
         ))}
@@ -172,27 +244,78 @@ export function RunPanel({ runIds, onFinished }: { runIds: string[]; onFinished:
   );
 }
 
+/** How many whole batches of scoring have finished across these runs.
+ *
+ * Scoring is shared, so the runs report the same `done` — the maximum is the run's progress, not
+ * the sum. Zero until the first batch completes, which is what stops the shortlist being
+ * re-read before there is anything new on it. */
+function batchesDone(runs: IntakeRun[]): number {
+  return runs.reduce((most, r) => {
+    const size = r.batchSize || 0;
+    return size > 0 ? Math.max(most, Math.floor(r.done / size)) : most;
+  }, 0);
+}
+
+/** The stages this run passes through, in order, with where it has got to.
+ *
+ * Taken from the channel rather than from `PHASE_ORDER` wholesale, because which stages apply
+ * depends on what the run is: a board search scrapes pages, a watchlist reads feeds, a re-score
+ * does neither. Showing a stage that will never happen is as misleading as showing none.
+ */
+function stepsFor(r: IntakeRun): { label: string; state: StepState; detail?: string }[] {
+  const phases = STEPS[r.channel];
+  // `discovering` is weekly (ATS-05) and most runs skip it, so it appears only while it is
+  // actually happening — never as a pending step that may never arrive.
+  const ordered = r.phase === "discovering" ? (["discovering", ...phases] as RunPhase[]) : phases;
+  const at = ordered.indexOf(r.phase);
+  return ordered.map((phase, i) => ({
+    label: PHASE_LABELS[phase],
+    // A phase WERA has moved past is done; the one it is in is active. An unknown phase (`at`
+    // of -1) leaves everything "todo", which is the honest reading of "we don't know yet".
+    state: at < 0 ? "todo" : i < at ? "done" : i === at ? "active" : "todo",
+    detail: i === at ? countFor(r) : undefined,
+  }));
+}
+
+/** How far through the current stage, in that stage's own unit. */
+function countFor(r: IntakeRun): string | undefined {
+  if (!r.total) return undefined;
+  const unit = PHASE_UNITS[r.phase];
+  return unit ? `${r.done} / ${r.total} ${unit}` : undefined;
+}
+
 function runStatus(r: IntakeRun): string {
   if (r.status === "cancelled") return "Cancelled";
   if (r.status === "failed") return r.errors[0]?.message ?? "Failed";
   if (r.status === "running") {
-    // Scoring is shared across the channels and is where nearly all of a run's time goes, so
-    // once it starts every channel reports it rather than leaving two of the three on a
-    // sentence that stopped being true minutes ago.
-    if (r.phase === "scoring") return r.total ? `Scoring ${r.done} / ${r.total}` : "Scoring…";
-    // The query total comes from the run, not a constant: it used to be a hardcoded 20, which
-    // was both frozen at "0 / 20" for the whole search (nothing wrote `queries` until the run
-    // ended) and wrong as soon as the query grid stopped being 4 titles × 5 locations.
-    if (r.channel === "board_search") return r.total ? `${r.done} / ${r.total} queries` : "Searching boards…";
-    return r.channel === "email_alert" ? "Reading alert emails…" : "Checking feeds…";
+    // The stage name and its count, from the same two tables the checklist uses — so the line
+    // above the bar and the active step below it can never disagree. The counts come from the
+    // run rather than a constant: `queries` used to be a hardcoded 20, which was both frozen at
+    // "0 / 20" for the whole search and wrong as soon as the query grid changed shape.
+    const count = countFor(r);
+    return count ? `${PHASE_LABELS[r.phase]} · ${count}` : `${PHASE_LABELS[r.phase]}…`;
   }
+  // Neither of these *finds* anything, by design: they judge jobs WERA already has. "nothing
+  // new" — true of every one of them ever — would read as a run that failed.
+  if (r.channel === "rescore") return r.total ? `Done · ${r.total} re-scored` : "Done";
+  if (r.channel === "score_more") return r.total ? `Done · ${r.total} scored` : "Done";
   const found = r.newJobs ? `${r.newJobs} new ${r.newJobs === 1 ? "job" : "jobs"}` : "nothing new";
   if (r.channel === "board_search") {
     // SRCH-10: what the crawl cache answered for free. Shown rather than netted off, because
     // "0 credits" on its own reads as a run that never happened — the "saved" clause is what
     // says the searches were answered, just not paid for again.
     const saved = r.creditsSaved ? ` · ${r.creditsSaved} saved` : "";
-    return `Done · ${found} · ${r.creditsUsed} credits${saved}`;
+    // SRCH-05: how the pages were read. "18 pages free" is the number that says the local ladder
+    // is working; a rising `fallbackPages` is a board that has changed shape, and seeing it here
+    // is cheaper than seeing it on the invoice.
+    const pages = pagesRead(r);
+    return `Done · ${found} · ${r.creditsUsed} credits${saved}${pages}`;
   }
   return `Done · ${found}`;
+}
+
+function pagesRead(r: IntakeRun): string {
+  if (!r.localPages && !r.fallbackPages) return "";
+  if (!r.fallbackPages) return ` · ${r.localPages} ${r.localPages === 1 ? "page" : "pages"} read free`;
+  return ` · ${r.localPages} free, ${r.fallbackPages} paid`;
 }

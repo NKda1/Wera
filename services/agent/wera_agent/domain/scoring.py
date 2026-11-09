@@ -7,7 +7,7 @@ import math
 
 from ..clock import parse_ms
 from ..schemas.jobs import FitEvidence, FitReport, FitWeights, Job
-from ..schemas.pack import AtsKeyword, AtsReport
+from ..schemas.pack import AtsKeyword
 
 DEFAULT_WEIGHTS = FitWeights(core=0.35, adjacent=0.2, experience=0.2, eligibility=0.15, freshness=0.1)
 
@@ -128,7 +128,14 @@ def fit_total(e: FitEvidence, freshness: float, weights: FitWeights, rough_only:
 
 
 def build_fit_report(
-    job_id: str, evidence: FitEvidence, posted_at: str | None, rough_only: bool, weights: FitWeights, now_ms: int
+    job_id: str,
+    evidence: FitEvidence,
+    posted_at: str | None,
+    rough_only: bool,
+    weights: FitWeights,
+    now_ms: int,
+    *,
+    stale: bool = False,
 ) -> FitReport:
     freshness = freshness_score(posted_at, now_ms)
     return FitReport(
@@ -137,6 +144,7 @@ def build_fit_report(
         freshness=freshness,
         rough_only=rough_only,
         total=fit_total(evidence, freshness, weights, rough_only),
+        stale=stale,
     )
 
 
@@ -151,8 +159,9 @@ def ats_coverage(keywords: list[AtsKeyword]) -> float:
     return 0 if total == 0 else hit / total
 
 
-def should_retry_tailoring(report: AtsReport, threshold: float = 0.75) -> bool:
-    """§8.3 retry rule: below threshold AND something missing that the master CV can back up."""
-    if report.attempt >= 3:
-        return False
-    return report.coverage < threshold and any(not k.matched and k.in_master_cv for k in report.keywords)
+# `should_retry_tailoring` was here. It implemented §8.3's retry rule — re-tailor when coverage is
+# below the threshold and the master CV can back something that's missing — and it has been
+# removed rather than merely disabled, because the condition it tested is now handled before it
+# could ever be true: `nodes.ats.reconcile_skills` covers those keywords in code, from the CV's
+# own skills, at no inference cost. See that function for the measurements that made the loop
+# untenable. It also never read `ats_threshold` from the config; the new path does.

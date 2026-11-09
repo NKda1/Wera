@@ -60,8 +60,14 @@ def drain(timeout: float = 60.0) -> None:
             return
 
 
-async def adrain(timeout: float = 30.0) -> None:
-    """The same wait, awaited, for shutdown inside the app's lifespan."""
+async def adrain(timeout: float = 120.0) -> None:
+    """The same wait, awaited, for shutdown inside the app's lifespan.
+
+    120s rather than 30: a pack took a mean of 81 seconds to draft on `wera eval --packs`, so the
+    old window expired in the middle of most of them. Abandoning one isn't data loss —
+    `graphs.application.resume_unfinished` picks it up on the next boot (REL-03) — but finishing
+    is cheaper than resuming, and a restart during a draft is exactly when someone is watching.
+    """
     while _pending:
         done, _ = await asyncio.wait([asyncio.wrap_future(f) for f in _pending], timeout=timeout)
         if not done:

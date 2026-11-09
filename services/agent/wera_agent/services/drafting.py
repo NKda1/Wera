@@ -12,23 +12,28 @@ from dataclasses import replace
 
 from sqlalchemy.orm import Session
 
+from ..config import wera
 from ..errors import ApiError
 from ..nodes.answers import answers as draft_answers
-from ..nodes.ats import build_ats
+from ..nodes.ats import build_ats, reconcile_skills
 from ..nodes.tailor import letter as write_letter
 from ..nodes.tailor import tailor as tailor_cv
 from ..schemas.pack import TailoredCV
 from ..sources.greenhouse import fetch_questions
 from .store import Store
 
-# ATSC-03: re-tailor with missing-but-backed keywords, at most twice more.
-MAX_TAILOR_ATTEMPTS = 3
 
+def step_cv(session: Session, app_id: str, *, note: str | None) -> None:
+    """Select the lines, then cover the job's keywords from the CV's own skills (ATSC-02/03).
 
-def step_cv(session: Session, app_id: str, *, note: str | None, hints: list[str], attempt: int) -> None:
+    Reconciling here rather than in the ATS step is what makes the ATS report a *measurement*
+    again: by the time it runs, the skills line is already final.
+    """
     store = Store(session)
     inp = store.draft_input(app_id, note=note)
-    store.save_document(app_id, "cv", tailor_cv(session, inp, hints=hints, attempt=attempt))
+    doc = tailor_cv(session, inp)
+    doc = reconcile_skills(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, threshold=wera().ats_threshold)
+    store.save_document(app_id, "cv", doc)
 
 
 def step_letter(session: Session, app_id: str, *, note: str | None) -> None:
@@ -38,18 +43,14 @@ def step_letter(session: Session, app_id: str, *, note: str | None) -> None:
     store.save_document(app_id, "letter", write_letter(session, _with_doc(inp, doc), doc))
 
 
-def step_ats(session: Session, app_id: str, *, note: str | None, attempt: int) -> list[str]:
-    """Saves the ATS report and returns the keywords worth re-tailoring for, if any."""
-    from ..domain.scoring import should_retry_tailoring
-
+def step_ats(session: Session, app_id: str, *, note: str | None) -> None:
+    """Saves the ATS report. Purely a measurement now — `step_cv` has already done the covering,
+    so there is nothing here that can send the draft back for another pass."""
     store = Store(session)
     inp = store.draft_input(app_id, note=note)
     doc = store.load_document(app_id, "cv", TailoredCV)
-    report = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, attempt=attempt)
+    report = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, attempt=1)
     store.save_document(app_id, "ats", report)
-    if should_retry_tailoring(report) and attempt < MAX_TAILOR_ATTEMPTS:
-        return [k.term for k in report.keywords if not k.matched and k.in_master_cv]
-    return []
 
 
 def step_answers(session: Session, app_id: str, *, note: str | None) -> None:
@@ -76,20 +77,16 @@ def _questions(store: Store, job) -> list[str]:  # noqa: ANN001 — a Job
 
 
 def draft_pack(session: Session, app_id: str, *, note: str | None = None, ready: bool = True) -> None:
-    """All four steps in order, including the ATS retry loop. Used by the demo seed; the graph
-    runs the same steps one node at a time."""
-    attempt, hints = 1, []
+    """All four steps in order. Used by the demo seed; the graph runs the same steps one node at
+    a time. Straight through — the ATS retry loop that used to wrap this is gone (see
+    `nodes.ats.reconcile_skills`)."""
     store = Store(session)
-    while True:
-        store.set_draft_step(app_id, "cv")
-        step_cv(session, app_id, note=note, hints=hints, attempt=attempt)
-        store.set_draft_step(app_id, "letter")
-        step_letter(session, app_id, note=note)
-        store.set_draft_step(app_id, "ats")
-        hints = step_ats(session, app_id, note=note, attempt=attempt)
-        if not hints:
-            break
-        attempt += 1
+    store.set_draft_step(app_id, "cv")
+    step_cv(session, app_id, note=note)
+    store.set_draft_step(app_id, "letter")
+    step_letter(session, app_id, note=note)
+    store.set_draft_step(app_id, "ats")
+    step_ats(session, app_id, note=note)
     store.set_draft_step(app_id, "answers")
     step_answers(session, app_id, note=note)
     if ready:

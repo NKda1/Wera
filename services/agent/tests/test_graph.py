@@ -157,16 +157,24 @@ class TestRestartRecovery:
 
 
 class TestCitationGuard:
-    def test_a_fabricated_skill_is_dropped_and_flagged(self, client, approved, monkeypatch):
-        """T-05: a line the CV can't back doesn't reach the review screen unmarked."""
+    def test_a_fabricated_cv_line_has_nowhere_to_arrive(self, client, approved, monkeypatch):
+        """T-05, now structural rather than caught.
+
+        This test used to fabricate a line by rewriting `out["experience"][0]["bullets"][0]
+        ["text"]`, and then assert the citation guard dropped it. Both halves have changed:
+        `cv.tailor` returns ids, so there is no text field to poison, and `nodes.tailor` copies
+        the wording from the master CV — so the same attempt is simply inert, and the guard has
+        nothing to drop. The stronger property is what's asserted here.
+        """
+        from wera_agent.domain.vocab import cv_line_index
+
         real = demo.respond
 
         def fabricate(task, variables, context, demo_input=None):
             out = real(task, variables, context, demo_input)
             if task == "cv.tailor":
-                # Cites a real CV line, but claims something it doesn't say.
-                first = out["experience"][0]["bullets"][0]
-                first["text"] = "Ran the Kubernetes platform for 40 teams."
+                # The old trick, against the new contract.
+                out["experience"][0]["text"] = "Ran the Kubernetes platform for 40 teams."
             return out
 
         monkeypatch.setattr(demo, "respond", fabricate)
@@ -174,12 +182,53 @@ class TestCitationGuard:
         run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
 
         with transaction() as session:
-            doc = Store(session).load_document(app_id, "cv", TailoredCV)
-        texts = [b.text for s in doc.sections for i in s.items for b in i.bullets]
-        assert "Ran the Kubernetes platform for 40 teams." not in texts
-        # The drop is shown, not swallowed.
-        assert doc.guard.violations
-        assert any("Left out" in v.detail for v in doc.guard.violations)
+            store = Store(session)
+            doc = store.load_document(app_id, "cv", TailoredCV)
+            lines = cv_line_index(store.cv())
+
+        bullets = [b for s in doc.sections for i in s.items for b in i.bullets]
+        assert bullets, "the draft produced no lines at all"
+        assert "Ran the Kubernetes platform for 40 teams." not in [b.text for b in bullets]
+        # Every line is its cited master-CV line, character for character.
+        for bullet in bullets:
+            assert bullet.text == lines[bullet.source_ids[0]]["text"]
+        # And so there was nothing for the guard to repair or drop.
+        assert doc.guard.pass_, [v.detail for v in doc.guard.violations]
+
+    def test_an_uncitable_paragraph_is_dropped_without_asking_a_model(self, client, approved, monkeypatch):
+        """A paragraph with no usable sources cannot be repaired *against* anything, and the
+        repair prompt's own instruction for that case is "return null". Asking spends a call to
+        be told what is already known — and since `Cites` began dropping invented ids rather than
+        rejecting whole letters, paragraphs arriving with no sources is a case that happens."""
+        from wera_agent.nodes.guard import guard_and_repair
+        from wera_agent.schemas.pack import Cited
+
+        asked: list[str] = []
+        real = demo.respond
+        monkeypatch.setattr(demo, "respond", lambda task, *a, **k: asked.append(task) or real(task, *a, **k))
+
+        with transaction() as session:
+            cv = Store(session).cv()
+            result, decisions = guard_and_repair(session, [("p0", Cited(text="An unbacked claim.", source_ids=[]))], cv, [])
+
+        assert decisions["p0"] is None, "an uncitable paragraph should be dropped"
+        assert "guard.repair" not in asked, "a model was asked to repair a line with nothing to repair against"
+        assert result.violations and result.violations[0].location == "p0"
+
+    def test_a_line_filed_under_the_wrong_role_fails_the_draft(self, client, approved, monkeypatch):
+        """A tailored CV would rather not exist than credit real work to the wrong employer."""
+        real = demo.respond
+
+        def misfile(task, variables, context, demo_input=None):
+            out = real(task, variables, context, demo_input)
+            if task == "cv.tailor" and len(out["experience"]) > 1:
+                out["experience"][0]["bulletIds"] = out["experience"][1]["bulletIds"]
+            return out
+
+        monkeypatch.setattr(demo, "respond", misfile)
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+        assert status_of(app_id) != "ready_for_review"
 
     def test_a_quote_from_the_job_post_is_not_treated_as_a_claim(self, client, approved):
         """LTR-03: the letter quotes the employer's own words, numbers and all. Those are not
@@ -278,21 +327,56 @@ class TestLetterRedraft:
         assert letter.guard.violations
 
 
-class TestAtsRetryCap:
-    def test_tailoring_is_not_retried_for_ever(self, client, approved, monkeypatch):
-        """ATSC-03: at most two extra attempts, however poor the coverage stays."""
-        attempts: list[int] = []
+class TestTheStoreRefusesADriftedCv:
+    """The no-drift property, enforced at the save rather than only by the code that currently
+    provides it. `cv.tailor` returning ids is what makes drift impossible today; this is what
+    makes it stay impossible after the next change to the tailor node."""
+
+    def test_a_rewritten_line_is_refused(self, client, approved):
+        from wera_agent.errors import ApiError
+
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+        with transaction() as session:
+            store = Store(session)
+            doc = store.load_document(app_id, "cv", TailoredCV)
+            doc.sections[0].items[0].bullets[0].text = "Ran the Kubernetes platform for 40 teams."
+            with pytest.raises(ApiError, match="doesn't match the master CV"):
+                store.save_document(app_id, "cv", doc)
+
+    def test_a_line_the_person_edited_themselves_is_allowed(self, client, approved):
+        """G2-02: the applicant is the authority on their own wording, so the check exempts it."""
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+        with transaction() as session:
+            store = Store(session)
+            doc = store.load_document(app_id, "cv", TailoredCV)
+            bullet = doc.sections[0].items[0].bullets[0]
+            bullet.text, bullet.edited_by_user = "My own wording, thanks.", True
+            store.save_document(app_id, "cv", doc)  # does not raise
+
+
+class TestAtsCoverage:
+    def test_poor_coverage_never_sends_the_draft_back_to_a_model(self, client, approved, monkeypatch):
+        """ATSC-02/03: coverage is reconciled in code, so it cannot cost a second pack.
+
+        This test used to assert the opposite — that `cv.tailor` ran three times and then
+        stopped. With mean coverage measured at 48% against a 0.75 threshold that loop was the
+        common path, not the cap: two extra `cv.tailor` calls *and* two extra `letter.write`
+        calls, on the tier that returned usable output 63.6% of the time. `reconcile_skills`
+        covers the same keywords from the CV's own skills, so one pass is now the whole story.
+        """
+        calls: list[str] = []
         real = demo.respond
 
         def count(task, variables, context, demo_input=None):
-            if task == "cv.tailor":
-                attempts.append(1)
+            calls.append(task)
             return real(task, variables, context, demo_input)
 
         monkeypatch.setattr(demo, "respond", count)
 
-        # The retry condition is coverage below the threshold *and* a missing keyword the CV
-        # does back (§8.3) — so both have to hold for the loop to run at all.
+        # Coverage pinned below the threshold with every keyword backed by the CV: the exact
+        # condition that used to trigger the loop.
         from wera_agent.nodes import ats as ats_node
 
         def stuck(doc, **kwargs):
@@ -306,7 +390,8 @@ class TestAtsRetryCap:
 
         app_id = approved()
         run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
-        assert len(attempts) == 3  # the first pass plus two retries, then it stops
+        assert calls.count("cv.tailor") == 1
+        assert calls.count("letter.write") == 1
         assert status_of(app_id) == "ready_for_review"
 
 

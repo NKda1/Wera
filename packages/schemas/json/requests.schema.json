@@ -246,12 +246,16 @@
         "scoring": {
           "type": "string"
         },
+        "select": {
+          "type": "string"
+        },
         "writing": {
           "type": "string"
         }
       },
       "required": [
         "fast",
+        "select",
         "scoring",
         "writing"
       ],

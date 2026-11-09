@@ -137,7 +137,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
         <Card className="mt-6 p-6">
           <h2 className="text-h2">Drafting your pack</h2>
           <p className="mt-1 text-ink-2">{app.changeNote ? `Redrafting with your note: “${app.changeNote}”` : "Tailored CV, then cover letter, then an ATS check against the job."}</p>
-          <div className="mt-4">{app.draft ? <DraftProgress step={app.draft.step} /> : null}</div>
+          <div className="mt-4">{app.draft ? <DraftProgress step={app.draft.step} progress={app.draft.progress} /> : null}</div>
         </Card>
       ) : (
         <>

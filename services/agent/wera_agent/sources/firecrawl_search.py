@@ -34,8 +34,10 @@ from ..domain.dedupe import canonical_url
 from ..http import DENY, host_of, is_denied
 from ..logging import redact
 from ..schemas.profile import SearchProfile
+from . import extract
 
 if TYPE_CHECKING:
+    from .browser import Fetcher
     from .crawl_cache import CrawlCache
 
 # SRCH-02: how "posted within" maps to a search-time filter.
@@ -107,6 +109,12 @@ class SearchOutcome:
     cached_queries: int = 0
     cached_cards: int = 0
     credits_saved: int = 0
+    # Pages read locally (`sources.extract`) against pages that still needed Firecrawl. The point
+    # of counting both is that "the local path works" stops being an assumption: the ratio is the
+    # only honest measure of whether the ladder is earning its keep, and a drift upwards in
+    # `fallback_pages` is a board changing shape, which is worth knowing before the invoice says so.
+    local_pages: int = 0
+    fallback_pages: int = 0
     errors: list[str] = field(default_factory=list)
     capped: str | None = None  # which cap ended the run, if any
 
@@ -127,12 +135,27 @@ class SearchOutcome:
 def usable_sites(profile: SearchProfile, sites: list[Site]) -> list[Site]:
     """The boards this search may actually ask (SRCH-03/04/11).
 
-    Three gates, in order of how non-negotiable they are: LinkedIn is never searched whatever
-    anything says; a site's terms must have been reviewed; and the board has to serve somewhere
-    the person is looking. A profile naming no countries passes the last gate for everything,
-    which is what keeps a profile written before SRCH-11 working.
+    Four gates, in order of how non-negotiable they are: LinkedIn is never searched whatever
+    anything says; a `direct` board is read by WERA itself and must never be paid for as a search
+    as well; a site's terms must have been reviewed; and the board has to serve somewhere the
+    person is looking. A profile naming no countries passes the last gate for everything, which
+    is what keeps a profile written before SRCH-11 working.
     """
-    return [s for s in sites if s.domain not in DENY and s.reviewed and s.domain in profile.sites and s.serves(profile.countries)]
+    return [
+        s
+        for s in sites
+        if s.domain not in DENY and not s.direct and s.reviewed and s.domain in profile.sites and s.serves(profile.countries)
+    ]
+
+
+def direct_sites(profile: SearchProfile, sites: list[Site]) -> list[Site]:
+    """The boards WERA reads itself: reviewed, serving a target country, and `direct`.
+
+    The same gates as `usable_sites` minus the one that sends a query to Firecrawl. Being in this
+    list is what makes a board free rather than what makes it allowed — `reviewed` still decides
+    that, and an unreviewed `direct` board is loaded, shown and never fetched.
+    """
+    return [s for s in sites if s.direct and s.reviewed and s.domain in profile.sites and s.serves(profile.countries)]
 
 
 def enabled_domains(profile: SearchProfile, sites: list[Site]) -> list[str]:
@@ -209,6 +232,13 @@ COUNTRY_NAMES = {
 }
 
 
+# Firecrawl's own scrape runs an LLM over the page, so it inherits LLM-grade latency — and the
+# client was built with no timeout at all, which meant `_retrying` could only ever catch a
+# timeout the SDK chose to raise. A page WERA is prepared to wait 20s for in a browser is not
+# worth more than this from a paid API.
+CLIENT_TIMEOUT_MS = 120_000
+
+
 def _client() -> Any:
     from firecrawl.v2 import FirecrawlClient
 
@@ -216,7 +246,13 @@ def _client() -> Any:
 
     env = get_settings()
     key = env.firecrawl_api_key.get_secret_value() if env.firecrawl_api_key else ""
-    return FirecrawlClient(api_key=key)
+    try:
+        return FirecrawlClient(api_key=key, timeout=CLIENT_TIMEOUT_MS)
+    except TypeError:
+        # The SDK's constructor signature is not something WERA controls. An unbounded client is
+        # worse than a warning, but it is much better than a channel that can't be built at all.
+        logfire.warn("Firecrawl client doesn't accept a timeout; requests are unbounded")
+        return FirecrawlClient(api_key=key)
 
 
 def _retrying(call: Any, what: str, errors: list[str]) -> Any | None:
@@ -271,13 +307,16 @@ def search(
     known_urls: set[str],
     *,
     cache: "CrawlCache | None" = None,
-    on_query: Callable[["SearchOutcome", int, int], None] | None = None,
+    on_query: Callable[["SearchOutcome", int, int, str], None] | None = None,
 ) -> SearchOutcome:
     """Runs the profile's queries and returns the results WERA hasn't seen before.
 
-    `on_query(outcome, answered, planned)` fires after every query, cached or paid. Twenty
-    queries is minutes of wall clock, and without this the screen had nothing to say for any of
-    it — a silent process holding a terminal is read as a hung one, and so is a frozen bar.
+    `on_query(outcome, answered, planned, domain)` fires after every query, cached or paid.
+    Twenty queries is minutes of wall clock, and without this the screen had nothing to say for
+    any of it — a silent process holding a terminal is read as a hung one, and so is a frozen bar.
+
+    `domain` is which board was just asked. It was in scope here from the start and discarded at
+    the callback boundary, which left "Searching boards…" standing for the whole of those minutes.
     """
     outcome = SearchOutcome()
     queries = queries_for(profile, sites)
@@ -365,7 +404,7 @@ def search(
             # Position in the plan, not `queries_answered`: a query refused by a cap advances the
             # loop without answering, so counting answers would leave the bar stuck short of the
             # end on exactly the runs a person most wants to watch.
-            on_query(outcome, position + 1, len(queries))
+            on_query(outcome, position + 1, len(queries), query.domain)
 
     logfire.info(
         "Board search answered {queries} query/queries ({cached} from cache) and found {new} new result(s)",
@@ -405,10 +444,17 @@ def scrape_card(
     caps: SearchCaps,
     *,
     cache: "CrawlCache | None" = None,
+    fetch_html: "Fetcher | None" = None,
+    parse: Callable[[str], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any] | None:
-    """SRCH-05: one scrape per new URL, asking for the job's fields as JSON.
+    """SRCH-05: one job read off one new URL, as cheaply as it can be read.
 
-    Returns None when a cap is reached or the page can't be read, so the caller treats it the
+    The ladder lives in `sources.extract` and is tried first; this function is what owns the
+    credit caps, so Firecrawl stays here as the last rung. `fetch_html` and `parse` are the two
+    rungs that need something from outside — a browser and a database session — and a caller that
+    supplies neither still gets the free JSON-LD and ATS-feed rungs.
+
+    Returns None when a cap is reached or no rung could read the page, so the caller treats it the
     same as a card it couldn't resolve.
     """
     # SRCH-03 comes first — ahead of the cache, because a denied page is read from nowhere, and
@@ -428,6 +474,18 @@ def scrape_card(
             outcome.credits_saved += JSON_SCRAPE_CREDITS
             return card
 
+    # The free rungs, before any cap is consulted: they cost no credits, so a run that has hit its
+    # page or credit cap can still read pages this way. That is the whole point of the cap moving
+    # from "stop reading" to "stop paying".
+    local, how = extract.card(url, fetch_html=fetch_html, parse=parse)
+    if local is not None:
+        outcome.local_pages += 1
+        outcome.credits_saved += JSON_SCRAPE_CREDITS
+        logfire.info("Read {url} with {how}, no credits spent", url=url, how=how)
+        if cache is not None:
+            cache.put_card(url, schema, _dated_card(local, cache.now))
+        return local
+
     if outcome.pages_scraped >= caps.max_pages:
         outcome.capped = outcome.capped or "pages"
         return None
@@ -435,6 +493,7 @@ def scrape_card(
         outcome.capped = outcome.capped or "credits"
         return None
 
+    outcome.fallback_pages += 1
     client = _client()
     document = _retrying(
         lambda: client.scrape(

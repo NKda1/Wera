@@ -245,6 +245,23 @@ class TestJobsWithNoFitReport:
         assert meta.awaiting_score >= 1
         assert meta.hidden_total >= 1
 
+    def test_it_is_listed_and_not_only_counted(self, store):
+        """A count told someone a job existed and gave them no way to look at it. These passed
+        the profile filters — they are jobs, just unranked."""
+        job_id = self.unscored_job(store)
+        meta = store.shortlist_meta()
+        assert job_id in {j.id for j in meta.awaiting}
+
+    def test_the_listed_sample_is_capped_but_the_count_is_true(self, store):
+        self.unscored_job(store)
+        assert len(store.list_awaiting_score(limit=1)) <= 1
+        assert store.shortlist_meta().awaiting_score >= 1
+
+    def test_a_scored_job_is_not_listed_as_awaiting(self, store):
+        scored = {j.id for j in store.list_jobs("new")}
+        assert scored
+        assert not (scored & {j.id for j in store.list_awaiting_score(limit=50)})
+
     def test_asking_for_it_directly_says_why_rather_than_500ing(self, store):
         from wera_agent.errors import ApiError
 
@@ -269,6 +286,78 @@ class TestJobsWithNoFitReport:
 
     def test_the_hidden_sample_is_capped(self, store):
         assert len(store.list_unscored("hidden", limit=2)) <= 2
+
+
+class TestANewCvReJudgesTheShortlist:
+    """CV-08 / SCH-02. `fit_reports` has always keyed on `cv_version`, but only the write path
+    read it — so saving a new CV left every job on the shortlist ranked against the old one, with
+    nothing to say so and nothing to recompute it."""
+
+    def save_a_new_cv(self, store) -> int:
+        """A real edit: a changed summary, which is what a tailored CV and a score both read."""
+        cv = store.cv()
+        cv.summary.text = f"{cv.summary.text} Now with a different professional profile."
+        return store.put_cv(cv, rescore=False)
+
+    def test_scores_from_an_older_cv_are_marked_stale(self, store):
+        assert not any(j.fit.stale for j in store.list_jobs("new")), "nothing should start stale"
+        self.save_a_new_cv(store)
+        jobs = store.list_jobs("new")
+        assert jobs
+        assert all(j.fit.stale for j in jobs)
+
+    def test_a_stale_score_is_still_shown_rather_than_hidden(self, store):
+        """An out-of-date score beats no score: it is the best evidence WERA has, and dropping
+        the jobs would read as the shortlist having been emptied by a CV edit."""
+        before = {j.id for j in store.list_jobs("new")}
+        self.save_a_new_cv(store)
+        assert {j.id for j in store.list_jobs("new")} == before
+
+    def test_every_job_is_then_queued_for_re_scoring(self, store):
+        model = store.scoring_model()
+        self.save_a_new_cv(store)
+        waiting = {j.id for j in store.jobs_needing_score(cv_version=store.cv().version, model=model)}
+        assert {j.id for j in store.list_jobs("new")} <= waiting
+
+    def test_a_score_is_not_stale_just_because_the_row_predates_the_cache_key(self, store):
+        """Restraint, not laziness: a row written before `cv_version` was recorded is one WERA
+        can't judge, and "can't tell" is a different claim from "out of date"."""
+        from wera_agent.db.models import FitReportRow
+
+        job = store.list_jobs("new")[0]
+        row = store.s.get(FitReportRow, job.id)
+        row.cv_version, row.job_hash = None, None
+        store.s.flush()
+        self.save_a_new_cv(store)
+        assert not store.get_job(job.id).fit.stale
+
+
+class TestJobsPastTheDailyCapAreNotForgotten:
+    """MATCH-05 left a job unscored, and a board search skips URLs it already knows (SRCH-05) —
+    so the job was never found again and never scored. `judge` asked only what the current run
+    had turned up; it now asks what still needs a score."""
+
+    def test_an_unscored_job_is_offered_for_scoring_without_being_re_found(self, store):
+        from wera_agent.db.models import FitReportRow
+
+        job_id = store.list_jobs("new")[0].id
+        store.s.delete(store.s.get(FitReportRow, job_id))
+        store.s.flush()
+        waiting = store.jobs_needing_score(cv_version=store.cv().version, model=store.scoring_model())
+        assert job_id in {j.id for j in waiting}
+
+    def test_a_valid_score_is_not_offered_again(self, store):
+        """COST-04: asked with `cached_evidence`'s own predicate, so it cannot disagree with the
+        thing that decides whether to pay."""
+        waiting = store.jobs_needing_score(cv_version=store.cv().version, model=store.scoring_model())
+        assert waiting == []
+
+    def test_hidden_jobs_are_never_queued(self, store):
+        """MATCH-01 filters them before any model call, so they aren't waiting for one."""
+        hidden = {j.id for j in store.list_unscored("hidden", limit=50)}
+        assert hidden
+        waiting = {j.id for j in store.jobs_needing_score(cv_version=0, model="nothing-matches-this")}
+        assert not (hidden & waiting)
 
 
 class TestAPartiallyDraftedPack:

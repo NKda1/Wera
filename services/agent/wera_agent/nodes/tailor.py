@@ -12,11 +12,13 @@ import logfire
 from sqlalchemy.orm import Session
 
 from ..config import wera
+from ..domain.vocab import cv_line_index
+from ..errors import ApiError
 from ..llm.demo import PackInput, words
 from ..llm.gateway import structured
 from ..llm.prompts import cv_text, untrusted
 from ..schemas.cv import MasterCV
-from ..schemas.llm_outputs import LetterOutput, TailorOutput
+from ..schemas.llm_outputs import LetterOutput, SummaryDraft, TailorSelection
 from ..schemas.pack import Cited, CompanyFact, CoverLetter, CvItem, CvSection, TailoredCV
 from .guard import guard_and_repair
 
@@ -31,10 +33,21 @@ MAX_LETTER_ATTEMPTS = 2
 
 
 def job_block(inp: PackInput) -> str:
-    """The job as the model sees it: facts WERA parsed, then the post itself as data."""
+    """The job as the model sees it: facts WERA parsed, then the post itself as data.
+
+    Truncated to `job_description_limit`. The first part of an ad is the job and the rest is
+    benefits, boilerplate and legal text, and these are the prompts that also carry the whole CV
+    — `prefilter.job_text` has always clipped at 2,000 characters while the three writing prompts
+    sent everything, so the uncapped calls were the expensive ones.
+
+    Safe for `_guard_letter`'s quote check, which tests `company_quote` against the *full*
+    description: the model only ever sees a prefix, so a quote it takes from what it saw is still
+    a substring of the whole.
+    """
     job = inp.job
     header = f"Job: {job.title} at {job.company} ({job.location.raw})"
-    return f"{header}\n{untrusted('job post', job.description_md or '')}"
+    description = (job.description_md or "")[: wera().job_description_limit]
+    return f"{header}\n{untrusted('job post', description)}"
 
 
 def _keywords(inp: PackInput) -> str:
@@ -43,22 +56,22 @@ def _keywords(inp: PackInput) -> str:
     return f"required — {', '.join(required) or 'none'}; nice to have — {', '.join(nice) or 'none'}"
 
 
-def tailor(session: Session, inp: PackInput, *, hints: list[str], attempt: int) -> TailoredCV:
-    """TAIL-01: selects and orders master-CV lines for this job. `hints` are keywords a previous
-    ATS check found missing but backed by the CV (ATSC-03)."""
+def tailor(session: Session, inp: PackInput) -> TailoredCV:
+    """TAIL-01: selects and orders master-CV lines for this job.
+
+    The model returns ids; the text is copied here. That is what makes the result the same twice
+    for the same inputs — see `TailorSelection` for why it used to vary.
+    """
     cv = inp.cv
-    note = inp.note or ""
-    if hints:
-        note = f"{note}\nCover these if the CV supports them: {', '.join(hints)}".strip()
     out = structured(
         session,
         "cv.tailor",
-        TailorOutput,
+        TailorSelection,
         {
             "cv": cv_text(cv),
             "job": job_block(inp),
             "keywords": _keywords(inp),
-            "note": note or "nothing in particular",
+            "note": inp.note or "nothing in particular",
             "pages": str(inp.cv_pages),
             "budget": str(inp.cv_pages * LINES_PER_PAGE),
         },
@@ -66,15 +79,25 @@ def tailor(session: Session, inp: PackInput, *, hints: list[str], attempt: int) 
         demo_input=inp,
     )
 
+    lines = cv_line_index(cv)
     sections = [
-        CvSection(kind=kind, items=[CvItem(role_id=i.role_id, bullets=[_cited(b) for b in i.bullets]) for i in items])
-        for kind, items in (("experience", out.experience), ("projects", out.projects))
-        if items
+        section
+        for kind, picks in (("experience", out.experience), ("projects", out.projects))
+        if (
+            section := CvSection(
+                kind=kind,
+                items=[item for p in picks if (item := _item(lines, p)) is not None],
+            )
+        ).items
     ]
     doc = TailoredCV(
         job_id=inp.job.id,
         cv_version=cv.version,
-        summary=_cited(out.summary),
+        # TAIL-07: the profile is not optional. Preference order, strongest claim first: the
+        # applicant's own summary (their words, cites itself, cannot fail the guard), then one
+        # composed from their cited CV lines, then nothing. `cv.tailor` may only ever *select*,
+        # which is why composing is a separate call rather than a field it could have filled.
+        summary=(_from_master(lines, out.summary_id) if out.summary_id else None) or _profile(session, inp),
         sections=sections,
         skills=out.skills,
         omitted_bullet_ids=out.omitted_bullet_ids,
@@ -83,7 +106,63 @@ def tailor(session: Session, inp: PackInput, *, hints: list[str], attempt: int) 
     return _guard_cv(session, doc, inp)
 
 
+def _profile(session: Session, inp: PackInput) -> Cited:
+    """The profile for a CV whose master has none (TAIL-07).
+
+    Composed rather than selected, and the only CV prose a model writes here — see
+    `prompts.SUMMARY_WRITE` for why the exception is drawn this narrowly. It is guarded with the
+    rest of the document by `_guard_cv`, so nothing skips a check by arriving through this path.
+
+    A composition that fails outright leaves the profile empty, which is where the old behaviour
+    started: a CV with no summary. That is the honest floor, not the target — `cv.parse` now asks
+    for the profile explicitly, so the usual answer is that there is a master summary to select.
+    """
+    own = master_summary(inp.cv)
+    if own.text.strip():
+        return own
+    try:
+        out = structured(
+            session,
+            "summary.write",
+            SummaryDraft,
+            {"cv": cv_text(inp.cv), "job": job_block(inp), "keywords": _keywords(inp)},
+            context={"cv": inp.cv},
+            demo_input=inp,
+        )
+    except ApiError:
+        logfire.info("No profile for {job_id}: the CV has no summary and composing one failed", job_id=inp.job.id)
+        return Cited(text="", source_ids=[])
+    # `composed=True` is what lets this line through `Store._assert_verbatim`, which requires a
+    # cited line to equal the master line it names — true of every *selected* line and never of
+    # this one. See `Cited.composed`; it changes no other check.
+    return Cited(text=out.text, source_ids=out.source_ids, composed=True)
+
+
+def _from_master(lines: dict[str, dict[str, str]], bullet_id: str) -> Cited | None:
+    """One master-CV line, verbatim, citing itself.
+
+    This is where "selection, not writing" stops being a request in a prompt and becomes a
+    property of the data: the text *is* the cited line, so it cannot have drifted from it, and
+    `check_cited` passes without a single `guard.repair` call.
+
+    `None` only when the id isn't in the index. `RolePick` already rejects that, so this is the
+    belt to its braces — and it matters because validation context is optional, so a caller that
+    forgot `context={"cv": cv}` would otherwise reach here with an unchecked id.
+    """
+    line = lines.get(bullet_id)
+    return Cited(text=line["text"], source_ids=[bullet_id]) if line else None
+
+
+def _item(lines: dict[str, dict[str, str]], pick) -> CvItem | None:  # noqa: ANN001 — a RolePick
+    """One role's selected lines. `None` when none of them resolved, so an empty role is dropped
+    rather than rendered as a heading with nothing under it."""
+    bullets = [b for b in (_from_master(lines, i) for i in pick.bullet_ids) if b is not None]
+    return CvItem(role_id=pick.role_id, bullets=bullets) if bullets else None
+
+
 def _cited(item) -> Cited:  # noqa: ANN001 — a Cites from llm_outputs
+    """A model-written line, kept as written. Only the letter needs this: it is the one document
+    here whose prose the model actually composes, so its text can't be copied from anywhere."""
     return Cited(text=item.text, source_ids=item.source_ids)
 
 
@@ -113,6 +192,10 @@ def _guard_cv(session: Session, doc: TailoredCV, inp: PackInput) -> TailoredCV:
             # So a rejected summary falls back to the applicant's own master summary rather than
             # to nothing. That text is theirs, already in the CV, and cites itself — it cannot
             # fail the guard, and it cannot claim anything they haven't already written down.
+            #
+            # When there is no master summary either, this is the composed profile from `_profile`
+            # being rejected, and an empty profile is the right floor: it had its repair pass and
+            # still couldn't be vouched for.
             doc.summary = decisions["summary"] or master_summary(inp.cv)
         for si, section in enumerate(doc.sections):
             for ii, item in enumerate(section.items):

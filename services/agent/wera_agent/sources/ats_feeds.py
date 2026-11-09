@@ -58,7 +58,7 @@ class FeedResult:
     answered: set[str] = field(default_factory=set)
 
 
-def _text(raw: str | None) -> str:
+def html_to_text(raw: str | None) -> str:
     """Board descriptions arrive as HTML or as text; both end up as readable plain text.
 
     Unescaping comes first. Greenhouse sends its HTML escaped, so stripping tags before
@@ -91,7 +91,7 @@ def _location(raw: str | None) -> Location:
     return Location(city=city, country=country, raw=value)
 
 
-def _remote(*hints: Any) -> str | None:
+def remote_mode(*hints: Any) -> str | None:
     blob = " ".join(str(h) for h in hints if h).lower()
     if "remote" in blob:
         return "remote"
@@ -115,9 +115,9 @@ def _greenhouse(company: Company, body: dict[str, Any]) -> list[FeedJob]:
                 company=job.get("company_name") or company.name,
                 location=_location(where),
                 apply_url=job.get("absolute_url") or "",
-                description=_text(job.get("content")),
+                description=html_to_text(job.get("content")),
                 posted_at=job.get("first_published") or job.get("updated_at"),
-                remote=_remote(where),
+                remote=remote_mode(where),
             )
         )
     return out
@@ -139,9 +139,9 @@ def _lever(company: Company, body: list[dict[str, Any]]) -> list[FeedJob]:
                 company=company.name,
                 location=_location(categories.get("location")),
                 apply_url=job.get("hostedUrl") or job.get("applyUrl") or "",
-                description=_text(job.get("descriptionPlain") or job.get("description")),
+                description=html_to_text(job.get("descriptionPlain") or job.get("description")),
                 posted_at=iso(int(created)) if isinstance(created, int | float) else None,
-                remote=_remote(job.get("workplaceType"), categories.get("location")),
+                remote=remote_mode(job.get("workplaceType"), categories.get("location")),
             )
         )
     return out
@@ -161,9 +161,9 @@ def _ashby(company: Company, body: dict[str, Any]) -> list[FeedJob]:
                 company=company.name,
                 location=_location(job.get("location")),
                 apply_url=job.get("jobUrl") or job.get("applyUrl") or "",
-                description=_text(job.get("descriptionPlain") or job.get("descriptionHtml")),
+                description=html_to_text(job.get("descriptionPlain") or job.get("descriptionHtml")),
                 posted_at=job.get("publishedAt"),
-                remote="remote" if job.get("isRemote") else _remote(job.get("workplaceType"), job.get("location")),
+                remote="remote" if job.get("isRemote") else remote_mode(job.get("workplaceType"), job.get("location")),
             )
         )
     return out

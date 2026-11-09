@@ -30,6 +30,12 @@
 max_sites: 12
 discover_every_days: 7
 sites:
+- domain: careers.google.com
+  name: Google Careers
+  terms_reviewed_on: null
+  countries:
+  - GB
+  region: europe
 - domain: brightnetwork.co.uk
   name: Bright Network
   terms_reviewed_on: '2026-10-10'
@@ -87,3 +93,12 @@ sites:
   examples:
   - https://www.milkround.com/jobs/software-engineer
   - https://www.milkround.com/jobs/junior-software-developer/in-london
+- domain: www.itjobswatch.co.uk
+  name: www.itjobswatch.co.uk
+  terms_reviewed_on: null
+  discovered_on: '2026-11-05'
+  matched: Graduate Software Engineer
+  robots_ok: true
+  examples:
+  - https://www.itjobswatch.co.uk/find/Graduate-Software-Engineer-jobs-in-London
+  - https://www.itjobswatch.co.uk/jobs/uk/junior%20software%20engineer.do

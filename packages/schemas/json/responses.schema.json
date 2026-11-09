@@ -340,6 +340,10 @@
         "attempt": {
           "type": "integer"
         },
+        "backedCoverage": {
+          "default": -1.0,
+          "type": "number"
+        },
         "coverage": {
           "type": "number"
         },
@@ -362,6 +366,7 @@
       "required": [
         "keywords",
         "coverage",
+        "backedCoverage",
         "formatChecks",
         "pages",
         "attempt"
@@ -404,7 +409,7 @@
     "ChannelSummary": {
       "properties": {
         "channel": {
-          "$ref": "#/$defs/IntakeChannel"
+          "$ref": "#/$defs/SearchChannel"
         },
         "detail": {
           "type": "string"
@@ -427,6 +432,9 @@
     },
     "Cited": {
       "properties": {
+        "composed": {
+          "type": "boolean"
+        },
         "editedByUser": {
           "type": "boolean"
         },
@@ -582,12 +590,17 @@
     },
     "CvVersion": {
       "properties": {
+        "clearedJobs": {
+          "default": 0,
+          "type": "integer"
+        },
         "version": {
           "type": "integer"
         }
       },
       "required": [
-        "version"
+        "version",
+        "clearedJobs"
       ],
       "title": "CvVersion",
       "type": "object"
@@ -798,6 +811,10 @@
         "roughOnly": {
           "type": "boolean"
         },
+        "stale": {
+          "default": false,
+          "type": "boolean"
+        },
         "total": {
           "type": "number"
         }
@@ -815,7 +832,8 @@
         "jobId",
         "freshness",
         "total",
-        "roughOnly"
+        "roughOnly",
+        "stale"
       ],
       "title": "FitReport",
       "type": "object"
@@ -957,12 +975,18 @@
       "enum": [
         "board_search",
         "email_alert",
-        "watchlist"
+        "watchlist",
+        "rescore",
+        "score_more"
       ],
       "type": "string"
     },
     "IntakeRun": {
       "properties": {
+        "batchSize": {
+          "default": 0,
+          "type": "integer"
+        },
         "channel": {
           "$ref": "#/$defs/IntakeChannel"
         },
@@ -973,6 +997,16 @@
         "creditsUsed": {
           "type": "integer"
         },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "done": {
           "type": "integer"
         },
@@ -982,22 +1016,25 @@
           },
           "type": "array"
         },
+        "fallbackPages": {
+          "default": 0,
+          "type": "integer"
+        },
         "finishedAt": {
           "type": "string"
         },
         "id": {
           "type": "string"
         },
+        "localPages": {
+          "default": 0,
+          "type": "integer"
+        },
         "newJobs": {
           "type": "integer"
         },
         "phase": {
-          "enum": [
-            "searching",
-            "scoring",
-            "done"
-          ],
-          "type": "string"
+          "$ref": "#/$defs/RunPhase"
         },
         "progress": {
           "type": "number"
@@ -1033,6 +1070,7 @@
         "startedAt",
         "progress",
         "phase",
+        "detail",
         "done",
         "total",
         "queries",
@@ -1040,6 +1078,9 @@
         "newJobs",
         "creditsUsed",
         "creditsSaved",
+        "localPages",
+        "fallbackPages",
+        "batchSize",
         "errors"
       ],
       "title": "IntakeRun",
@@ -1610,6 +1651,22 @@
       "title": "RunIds",
       "type": "object"
     },
+    "RunPhase": {
+      "enum": [
+        "queued",
+        "discovering",
+        "searching",
+        "scraping",
+        "feeds",
+        "reading",
+        "collapsing",
+        "filtering",
+        "scoring",
+        "closing",
+        "done"
+      ],
+      "type": "string"
+    },
     "Salary": {
       "properties": {
         "currency": {
@@ -1790,6 +1847,14 @@
       ],
       "title": "ScoredJob",
       "type": "object"
+    },
+    "SearchChannel": {
+      "enum": [
+        "board_search",
+        "email_alert",
+        "watchlist"
+      ],
+      "type": "string"
     },
     "SearchProfile": {
       "properties": {
@@ -2030,6 +2095,13 @@
           },
           "type": "array"
         },
+        "awaiting": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Job"
+          },
+          "type": "array"
+        },
         "awaitingScore": {
           "type": "integer"
         },
@@ -2060,6 +2132,10 @@
         "rejected": {
           "type": "integer"
         },
+        "scoringBatchSize": {
+          "default": 8,
+          "type": "integer"
+        },
         "snoozed": {
           "type": "integer"
         }
@@ -2071,6 +2147,8 @@
         "hidden",
         "hiddenTotal",
         "awaitingScore",
+        "awaiting",
+        "scoringBatchSize",
         "snoozed",
         "rejected",
         "activeRunIds"
@@ -2278,12 +2356,16 @@
         "scoring": {
           "type": "string"
         },
+        "select": {
+          "type": "string"
+        },
         "writing": {
           "type": "string"
         }
       },
       "required": [
         "fast",
+        "select",
         "scoring",
         "writing"
       ],

@@ -15,20 +15,29 @@ us nothing about the vacancy. That is ATS-03's `answered` discipline (`ats_feeds
 HTTP, and it is the difference between a shortlist that prunes itself and one that quietly deletes
 live jobs.
 
-What this honestly cannot do: a great many boards answer `200` with a "no longer accepting
-applications" page. `CLOSED_PHRASES` catches the common wordings and will be defeated by any board
-that renders the closure client-side — most React boards — or that words it in German or French.
-So the phrase list yields `likely_gone`, which **never closes anything**; those postings are
-caught by NORM-07's 30-day sweep instead. Detecting them properly needs a rendered scrape at 5
-credits a job, which is out of scope by design. Do not mistake this list for a reliable signal.
+A great many boards answer `200` with a "no longer accepting applications" page. `CLOSED_PHRASES`
+catches the common wordings; it is still defeated by a board that words the closure in German or
+French. So the phrase list yields `likely_gone`, which **never closes anything**; those postings
+are caught by NORM-07's 30-day sweep instead. Do not mistake the list for a reliable signal.
+
+**What used to defeat it entirely was a board that renders the closure client-side** — most React
+boards — because plain HTTP sees a shell with no words in it at all. This file said that
+"detecting them properly needs a rendered scrape at 5 credits a job, which is out of scope by
+design", and that was true right up until `sources.extract` made rendering free. A page that comes
+back with too little text to judge is now rendered and re-read (`fetch_html`), still for no
+credits and still closing only on positive evidence. The rung is optional: without a browser
+installed the verdict is the `unknown` it always was.
 """
 
 import re
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import logfire
 
 from ..http import is_denied, request
+
+if TYPE_CHECKING:
+    from .browser import Fetcher
 
 # `gone` closes a job. `likely_gone` and `unknown` only ever flag one.
 type Verdict = Literal["open", "gone", "likely_gone", "unknown"]
@@ -96,12 +105,23 @@ def _path_of(url: str) -> str | None:
         return None
 
 
-def check(url: str | None) -> Verdict:
+# Below this many characters of readable text, a 200 has told us nothing: it is a shell waiting
+# for JavaScript, and calling it `open` is a guess dressed as a fact. Generous enough that a
+# genuinely terse posting isn't re-rendered for no reason.
+MIN_READABLE_CHARS = 400
+
+
+def check(url: str | None, *, fetch_html: "Fetcher | None" = None) -> Verdict:
     """Ask one URL whether it is still a job. Never raises, never spends a credit.
 
     `follow_redirects` stays off (the `http.request` default) — that is what makes the redirect
     rule above possible, and following one would mean re-running `http.check` on a target an
     employer controls.
+
+    `fetch_html` is the render rung, and it is only reached for a page that answered 200 with too
+    little text to read. That is exactly the blind spot this file used to document as out of
+    scope: a client-rendered board serves an empty shell, the phrase check finds nothing to match,
+    and a withdrawn job looked open for ever.
     """
     if not url or is_denied(url):
         return "unknown"  # SRCH-03: LinkedIn is never fetched, so it is never confirmed either
@@ -114,6 +134,25 @@ def check(url: str | None) -> Verdict:
     except Exception:  # noqa: BLE001 — an undecodable body is not a closed job
         head = ""
     verdict = classify(response.status_code, response.headers.get("location"), head)
+
+    # A 200 whose body carries no words is the one case where "open" is not an answer. Rendering
+    # it can only ever move the verdict to `likely_gone`, never to `gone` — a closure phrase is
+    # still a phrase, however it got onto the page.
+    if verdict == "open" and fetch_html is not None and not _readable(head):
+        rendered = fetch_html(url)
+        if rendered:
+            verdict = classify(200, None, rendered[:BODY_HEAD_BYTES])
+            logfire.info("Rendered a shell page to read it: {verdict}", verdict=verdict)
+        else:
+            # Asked and couldn't tell, which is not the same as asked and found a job.
+            verdict = "unknown"
+
     if verdict != "open":
         logfire.info("Liveness {verdict} for {status}", verdict=verdict, status=response.status_code)
     return verdict
+
+
+def _readable(html: str) -> bool:
+    """Whether a page has enough words on it for the phrase check to mean anything."""
+    stripped = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    return len(" ".join(re.sub(r"<[^>]+>", " ", stripped).split())) >= MIN_READABLE_CHARS

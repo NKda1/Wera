@@ -14,8 +14,11 @@ export type ApplicationStatus =
   | "withdrawn";
 export type DraftStep = "cv" | "letter" | "ats" | "answers";
 export type Channel = "board_search" | "email_alert" | "watchlist" | "manual";
-export type IntakeChannel = "board_search" | "email_alert" | "watchlist";
+export type SearchChannel = "board_search" | "email_alert" | "watchlist";
 export type YearMonth = string;
+export type IntakeChannel = "board_search" | "email_alert" | "watchlist" | "rescore" | "score_more";
+export type RunPhase =
+  "queued" | "discovering" | "searching" | "scraping" | "feeds" | "reading" | "collapsing" | "filtering" | "scoring" | "closing" | "done";
 export type Seniority = "intern" | "graduate" | "junior" | "entry" | "mid" | "senior" | "lead" | "principal";
 export type JobStatus = "new" | "shortlisted" | "in_application" | "snoozed" | "rejected" | "hidden" | "closed" | "archived";
 export type Liveness = "open" | "unverified" | "unreachable" | "gone";
@@ -63,6 +66,7 @@ export interface Pack {
 }
 export interface AtsReport {
   attempt: number;
+  backedCoverage: number;
   coverage: number;
   formatChecks: FormatCheck[];
   keywords: AtsKeyword[];
@@ -107,6 +111,7 @@ export interface CvItem {
   roleId: string;
 }
 export interface Cited {
+  composed?: boolean;
   editedByUser?: boolean;
   sourceIds: string[];
   text: string;
@@ -188,7 +193,7 @@ export interface Bullet {
   text: string;
 }
 export interface ChannelSummary {
-  channel: IntakeChannel;
+  channel: SearchChannel;
   detail: string;
   enabled: boolean;
   stats: string;
@@ -206,6 +211,7 @@ export interface CvLine {
   where: string;
 }
 export interface CvVersion {
+  clearedJobs: number;
   version: number;
 }
 export interface Education {
@@ -260,6 +266,7 @@ export interface FitReport {
   model: string;
   reason: string;
   roughOnly: boolean;
+  stale: boolean;
   total: number;
 }
 export interface FitWeights {
@@ -283,15 +290,19 @@ export interface InboxSettings {
   senders: string[];
 }
 export interface IntakeRun {
+  batchSize: number;
   channel: IntakeChannel;
   creditsSaved: number;
   creditsUsed: number;
+  detail: string | null;
   done: number;
   errors: RunError[];
+  fallbackPages: number;
   finishedAt?: string;
   id: string;
+  localPages: number;
   newJobs: number;
-  phase: "searching" | "scoring" | "done";
+  phase: RunPhase;
   progress: number;
   queries: number;
   results: number;
@@ -485,6 +496,7 @@ export interface Settings {
 export interface TierModels {
   fast: string;
   scoring: string;
+  select: string;
   writing: string;
 }
 export interface SettingsResponse {
@@ -503,6 +515,7 @@ export interface SettingsResponse {
 }
 export interface ShortlistMeta {
   activeRunIds: string[];
+  awaiting: Job[];
   awaitingScore: number;
   channels: ChannelSummary[];
   found: FoundCounts;
@@ -510,6 +523,7 @@ export interface ShortlistMeta {
   hiddenTotal: number;
   newJobIds: string[];
   rejected: number;
+  scoringBatchSize: number;
   snoozed: number;
 }
 export interface SiteOption {

@@ -47,12 +47,20 @@ class HashEmbedder:
 
 class FastEmbedder:
     """`bge-small-en-v1.5` through fastembed. The model is downloaded on first use and cached by
-    fastembed itself, so only a real (non-demo) run ever pays for it."""
+    fastembed itself, so only a real (non-demo) run ever pays for it.
+
+    That first use is a ~130 MB download inside a worker thread with nothing watching it, which
+    is why it is announced: before this, the first real run simply stopped for however long the
+    download took, at the one moment a person is most likely to think WERA has hung. The log line
+    is cheap insurance — it costs one line on the first run of an install's life and nothing after.
+    """
 
     def __init__(self) -> None:
         from fastembed import TextEmbedding
 
+        logfire.info("Loading the local embedding model ({model}); the first run downloads it", model=MODEL_NAME)
         self._model = TextEmbedding(model_name=MODEL_NAME)
+        logfire.info("Embedding model ready")
 
     def embed(self, texts: list[str]) -> np.ndarray:
         return np.array(list(self._model.embed(texts)), dtype=np.float32)

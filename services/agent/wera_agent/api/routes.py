@@ -9,7 +9,7 @@ from fastapi import APIRouter, Body, Depends, Query, status
 from ..db.session import transaction
 from ..errors import ApiError
 from ..graphs.application import advance
-from ..graphs.intake import run_intake
+from ..graphs.intake import run_intake, run_rescore
 from ..llm.gateway import flush_unrecorded
 from ..schemas.api import (
     ApplicationList,
@@ -29,6 +29,7 @@ from ..schemas.api import (
     ShortlistMeta,
     SiteOption,
     SiteReviewIn,
+    Started,
     TestResult,
 )
 from ..schemas.applications import ApplicationWithJob
@@ -65,8 +66,8 @@ def store() -> Iterator[Store]:
         flush_unrecorded()
     # Committed by now, so background work sees the decision it is acting on and doesn't
     # contend with this request for the write lock (see wera_agent/tasks.py).
-    for coro, name in deferred:
-        spawn(coro, name=name)
+    for make, name in deferred:
+        spawn(make(), name=name)
 
 
 S = Annotated[Store, Depends(store)]
@@ -146,10 +147,8 @@ def decide(s: S, job_id: str, body: DecisionIn) -> ScoredJob:
     """
     job = s.decide(job_id, body)
     if body.action != "unhide":
-        s.defer(
-            advance(job_id, {"action": body.action, "applicationId": s.started_application_id, "note": body.reason}),
-            name=f"gate1:{job_id}",
-        )
+        resume = {"action": body.action, "applicationId": s.started_application_id, "note": body.reason}
+        s.defer(lambda: advance(job_id, resume), name=f"gate1:{job_id}")
     return job
 
 
@@ -173,7 +172,7 @@ def patch_application(s: S, app_id: str, body: ApplicationPatchIn) -> Applicatio
     out = s.patch_application(app_id, body)
     if body.status == "discarded":
         # Gate 2, the third option: the thread ends rather than being left waiting.
-        s.defer(advance(job_id, {"action": "discard"}), name=f"gate2:{job_id}")
+        s.defer(lambda: advance(job_id, {"action": "discard"}), name=f"gate2:{job_id}")
     return out
 
 
@@ -183,7 +182,7 @@ def regenerate(s: S, app_id: str, body: RegenerateIn) -> ApplicationWithJob:
     note = body.note[:1000]
     job_id = s.application_job_id(app_id)
     out = s.regenerate(app_id, note)
-    s.defer(advance(job_id, {"action": "request_changes", "note": note}), name=f"gate2:{job_id}")
+    s.defer(lambda: advance(job_id, {"action": "request_changes", "note": note}), name=f"gate2:{job_id}")
     return out
 
 
@@ -192,7 +191,7 @@ def approve(s: S, app_id: str) -> ApplicationWithJob:
     """Gate 2 approval. Only a person can move an application to approved (§7.2)."""
     job_id = s.application_job_id(app_id)
     out = s.approve_pack(app_id)
-    s.defer(advance(job_id, {"action": "approve"}), name=f"gate2:{job_id}")
+    s.defer(lambda: advance(job_id, {"action": "approve"}), name=f"gate2:{job_id}")
     return out
 
 
@@ -225,8 +224,44 @@ def start_run(s: S, body: RunIn) -> RunIds:
     ids = s.start_runs(chosen)
     if not environment().wera_demo_mode:
         # DEMO-02: demo runs are simulated against the fixtures and make no outbound request.
-        s.defer(run_intake(chosen, ids), name=f"intake:{','.join(chosen)}")
+        s.defer(lambda: run_intake(chosen, ids), name=f"intake:{','.join(chosen)}")
     return RunIds(run_ids=list(ids.values()))
+
+
+@router.post("/jobs/recheck")
+def recheck_jobs(s: S) -> Started:
+    """SRCH-13: ask whether the shortlist's postings still exist, now rather than at 07:00.
+
+    Spends no Firecrawl credits and makes no model calls — employers' own feeds, plain HTTP, and
+    a headless browser for the pages that render their closure client-side. So there is no budget
+    to check and no reason to make anyone wait for it: it runs in the background and the Jobs
+    screen shows what the last sweep found.
+
+    `force`, because a person pressing this has decided it is worth doing whatever the
+    twenty-hour rule thinks.
+    """
+    from ..graphs import recheck
+
+    if environment().wera_demo_mode:
+        # DEMO-02: the demo makes no outbound request, so there is nothing honest to check.
+        raise ApiError(409, "DEMO_MODE", "Demo mode makes no outbound requests, so there's nothing to check.")
+    s.defer(lambda: recheck.run_async(force=True), name="recheck:manual")
+    return Started()
+
+
+@router.post("/intake/score-more")
+def score_more(s: S) -> RunIds:
+    """MATCH-05: call up the next batch from the broad search's pool.
+
+    No channels and no fetching — the jobs are already stored, they just have no score yet. Like
+    `/intake/run`, the row exists before the response so the screen can poll it immediately.
+    """
+    ids = s.start_score_more()
+    run_id = ids.run_ids[0]
+    if not environment().wera_demo_mode:
+        # DEMO-02: a demo run is animated by `settle()` against the fixtures instead.
+        s.defer(lambda: run_rescore(run_id, "score_more"), name=f"score_more:{run_id}")
+    return ids
 
 
 @router.get("/intake/runs/{run_id}")
@@ -250,7 +285,8 @@ def get_cv(s: S) -> MasterCV:
 
 @router.put("/cv")
 def put_cv(s: S, body: MasterCV) -> CvVersion:
-    return CvVersion(version=s.put_cv(body))
+    version = s.put_cv(body)
+    return CvVersion(version=version, cleared_jobs=s.cleared_jobs)
 
 
 @router.get("/cv/lines")
