@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { api, ApiRequestError, type Decision } from "@/lib/api";
-import { formatDate, formatLocation, formatPostedAge, URGENCY_GROUPS } from "@/lib/format";
+import { formatDate, formatLocation, formatPostedAge, isNew, URGENCY_GROUPS } from "@/lib/format";
 import type { IntakeChannel, IntakeRun, ScoredJob, SearchProfile, ShortlistMeta } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -108,6 +108,26 @@ function facetsFor(jobs: ScoredJob[]): Facet[] {
 
 const REJECT_REASONS = ["Wrong level", "Wrong location", "Not my field", "Pay too low", "Already applied elsewhere"];
 
+const NEW_FROM: Record<string, string> = {
+  board_search: "the search",
+  email_alert: "alert emails",
+  watchlist: "employer feeds",
+  manual: "jobs you added",
+};
+
+/** SRCH-25: "12 new from the search on 11 Nov", or "12 new since 9 Nov" when they came from more
+ *  than one place. Empty when nothing is new. */
+function newSummary(jobs: ScoredJob[]): string {
+  const found = jobs.flatMap((j) => (j.foundBy ? [j.foundBy] : []));
+  if (!found.length) return "";
+  const channels = new Set(found.map((f) => f.channel));
+  const dates = found.map((f) => f.at).sort();
+  if (channels.size === 1) {
+    return `${found.length} new from ${NEW_FROM[found[0].channel] ?? "a search"} on ${formatDate(dates[dates.length - 1])}`;
+  }
+  return `${found.length} new since ${formatDate(dates[0])}`;
+}
+
 export function JobsScreen({
   jobs,
   meta,
@@ -141,8 +161,14 @@ export function JobsScreen({
   const [showAwaiting, setShowAwaiting] = useState(false);
   const [scoringMore, setScoringMore] = useState(false);
   const [rechecking, setRechecking] = useState(false);
+  // SRCH-25: opened in this session. The tag goes at once; the order doesn't change until the next
+  // load, because a card that jumped down the list the moment it was clicked would be worse.
+  const [seen, setSeen] = useState<Set<string>>(new Set());
+  const [newOnly, setNewOnly] = useState(false);
 
   const live = jobs.filter((j) => !removed.has(j.id));
+  const fresh = (j: ScoredJob) => isNew(j) && !seen.has(j.id);
+  const freshJobs = live.filter(fresh);
   // Rank is the fit position in the whole shortlist, so it stays stable under filters.
   const rankOf = useMemo(() => new Map([...live].sort((a, b) => b.fit.total - a.fit.total).map((j, i) => [j.id, i + 1])), [live]);
   const facets = useMemo(() => facetsFor(live), [live]);
@@ -154,16 +180,41 @@ export function JobsScreen({
     for (const f of facets.filter((f) => filters.includes(f.id))) {
       chosen.set(f.group, [...(chosen.get(f.group) ?? []), f]);
     }
-    const list = live.filter((j) => [...chosen.values()].every((group) => group.some((f) => f.test(j))));
+    const list = live.filter(
+      (j) => (!newOnly || (isNew(j) && !seen.has(j.id))) && [...chosen.values()].every((group) => group.some((f) => f.test(j))),
+    );
     return sort === "date" ? [...list].sort((a, b) => (b.postedAt ?? "").localeCompare(a.postedAt ?? "")) : list;
-  }, [live, facets, filters, sort]);
-  // "By urgency" groups rather than re-sorts: inside a group the best match still comes first,
-  // because once you've decided what to look at today you still want the best of it at the top.
+  }, [live, facets, filters, sort, newOnly, seen]);
+  // "By urgency" groups rather than re-sorts: inside a group the new jobs come first (SRCH-25) and
+  // then the best match, because once you've decided what to look at today you want what you
+  // haven't seen, and the best of it, at the top. New is read from the server's answer, not from
+  // this session's opens, so opening a card never moves it.
   const groups = useMemo(() => {
     if (sort !== "urgency") return null;
-    return URGENCY_GROUPS.map((group) => ({ ...group, jobs: visible.filter((j) => j.urgency === group.id) })).filter((g) => g.jobs.length);
+    return URGENCY_GROUPS.map((group) => ({
+      ...group,
+      jobs: visible.filter((j) => j.urgency === group.id).sort((a, b) => Number(isNew(b)) - Number(isNew(a))),
+    })).filter((g) => g.jobs.length);
   }, [visible, sort]);
   const top = [...visible].sort((a, b) => b.fit.total - a.fit.total).slice(0, 3);
+
+  const markSeen = (job: ScoredJob) => {
+    if (!fresh(job)) return;
+    setSeen((s) => new Set(s).add(job.id));
+    // Best effort: a lost request means the tag comes back on the next load, nothing worse.
+    api.markSeen(job.id).catch(() => undefined);
+  };
+
+  const markAllSeen = async () => {
+    try {
+      await api.markAllSeen();
+      setSeen((s) => new Set([...s, ...freshJobs.map((j) => j.id)]));
+      setNewOnly(false);
+      router.refresh();
+    } catch (err) {
+      toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't mark them seen." });
+    }
+  };
 
   const hide = (id: string) => setRemoved((s) => new Set(s).add(id));
   const unhideLocal = (id: string) =>
@@ -245,15 +296,15 @@ export function JobsScreen({
     }
   };
 
-  // MATCH-05: the broad search leaves a pool, and a run scores two batches of it. This calls up
-  // the next batch — the jobs are already stored, so nothing is fetched and no credits are spent.
-  const scoreMore = async () => {
+  // SRCH-26: a search stops at 8–12 and leaves the rest. This brings the next 8–12: jobs already
+  // saved but not scored first, then the postings the search queued, then searches it hadn't sent.
+  const findMore = async () => {
     setScoringMore(true);
     try {
       const { runIds: ids } = await api.scoreMore();
       setRunIds(ids);
     } catch (err) {
-      toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't score more jobs." });
+      toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't find more jobs." });
     } finally {
       setScoringMore(false);
     }
@@ -284,6 +335,14 @@ export function JobsScreen({
             {today} · {counts.total} found from your CV · {counts.board} board search · {counts.inbox} alert emails · {counts.watchlist} watchlist ·{" "}
             {live.length} strong {live.length === 1 ? "match" : "matches"}
           </p>
+          {freshJobs.length ? (
+            <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-small">
+              <span className="font-semibold text-forest-900">{newSummary(freshJobs)}</span>
+              <button type="button" onClick={markAllSeen} className="font-semibold text-forest-700 underline underline-offset-2 hover:text-forest-900">
+                Mark all seen
+              </button>
+            </p>
+          ) : null}
         </div>
         <div className="flex shrink-0 gap-2">
           <Button variant="secondary" onClick={() => setSearching(true)} disabled={runIds.length > 0}>
@@ -308,9 +367,20 @@ export function JobsScreen({
             usable: a chip that says "Bristol 12" is a decision you can make before clicking. */}
         <div className="flex flex-col gap-2">
           <div className="scrollbar-none -mx-4 flex gap-2 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:px-0" role="group" aria-label="Filter jobs">
-            <FilterChip active={filters.length === 0} onClick={() => setFilters([])}>
+            <FilterChip
+              active={filters.length === 0 && !newOnly}
+              onClick={() => {
+                setFilters([]);
+                setNewOnly(false);
+              }}
+            >
               All {live.length}
             </FilterChip>
+            {freshJobs.length ? (
+              <FilterChip active={newOnly} onClick={() => setNewOnly((n) => !n)}>
+                New only {freshJobs.length}
+              </FilterChip>
+            ) : null}
           </div>
           {(Object.keys(GROUP_LABELS) as FacetGroup[]).map((group) => {
             const options = facets.filter((f) => f.group === group);
@@ -362,8 +432,9 @@ export function JobsScreen({
                     key={job.id}
                     job={job}
                     rank={rankOf.get(job.id) ?? 0}
-                    isNew={meta.newJobIds.includes(job.id)}
+                    isNew={fresh(job)}
                     busy={busyId === job.id}
+                    onOpen={() => markSeen(job)}
                     onApprove={() => decide(job, { action: "approve" })}
                     onSnooze={(days) => decide(job, { action: "snooze", days })}
                     onReject={() => setRejecting(job)}
@@ -376,13 +447,22 @@ export function JobsScreen({
                 key={job.id}
                 job={job}
                 rank={rankOf.get(job.id) ?? 0}
-                isNew={meta.newJobIds.includes(job.id)}
+                isNew={fresh(job)}
                 busy={busyId === job.id}
+                onOpen={() => markSeen(job)}
                 onApprove={() => decide(job, { action: "approve" })}
                 onSnooze={(days) => decide(job, { action: "snooze", days })}
                 onReject={() => setRejecting(job)}
               />
             ))}
+        {live.length > 0 ? (
+          <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 py-2">
+            <Button variant="secondary" onClick={findMore} busy={scoringMore} disabled={runIds.length > 0}>
+              Find up to {meta.findMoreSize} more
+            </Button>
+            <span className="text-small text-ink-2">Waiting jobs first, then what your last search queued, then new searches.</span>
+          </div>
+        ) : null}
         {visible.length === 0 ? (
           <Card className="px-6 py-10 text-center">
             <p className="text-h2">{live.length ? "No jobs match these filters" : "You're all caught up"}</p>
@@ -393,7 +473,13 @@ export function JobsScreen({
             </p>
             <div className="mt-5 flex justify-center gap-2">
               {live.length ? (
-                <Button variant="secondary" onClick={() => setFilters([])}>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    setFilters([]);
+                    setNewOnly(false);
+                  }}
+                >
                   Clear filters
                 </Button>
               ) : (
@@ -449,18 +535,7 @@ export function JobsScreen({
             >
               {meta.awaitingScore} more {meta.awaitingScore === 1 ? "job is" : "jobs are"} waiting to be scored
             </button>{" "}
-            — best match first.{" "}
-            {/* MATCH-05: a run scores two batches and leaves the rest. These jobs are already
-                stored, so this fetches nothing and spends no Firecrawl credits — only the
-                scoring tier, which is why it is a click rather than something that just happens. */}
-            <button
-              type="button"
-              onClick={scoreMore}
-              disabled={scoringMore || runIds.length > 0}
-              className="font-semibold text-forest-700 underline underline-offset-2 disabled:text-ink-2 disabled:no-underline"
-            >
-              {scoringMore ? "Starting…" : `Score ${Math.min(meta.awaitingScore, meta.scoringBatchSize)} more now`}
-            </button>
+            — best match first. &ldquo;Find more&rdquo; scores these before it searches.
           </p>
         ) : null}
         {showAwaiting ? (

@@ -5,6 +5,8 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from .base import Model, Opt
+from .jobs import KeywordCategory
+from .profile import Seniority
 
 
 class Cited(Model):
@@ -67,14 +69,34 @@ class CompanyFact(Model):
     policy_quote: str = ""
 
 
+# The four segments of WERA's ATS letter template, in order. A three-paragraph letter folds the
+# alignment into the close, which is why the close may follow either of the two before it.
+type LetterSection = Literal[
+    "opening_hook", "core_value_proposition", "strategic_alignment_and_culture", "call_to_action_and_close"
+]
+type HookType = Literal["Core-Metric", "Company-Mission", "Industry-Problem", "Referral"]
+
+
+class Paragraph(Cited):
+    """A letter paragraph, and which part of the template it is doing.
+
+    Both optional, because a letter drafted before the template has no sections to report. A
+    paragraph the person rewrites keeps its section: it is still the opening, or still the close.
+    """
+
+    section: Opt[LetterSection] = None
+    theme: Opt[str] = None  # the competency a proof paragraph argues ("Shipping under constraint")
+
+
 class CoverLetter(Model):
     job_id: str
     greeting: str
-    paragraphs: list[Cited]
+    paragraphs: list[Paragraph]
     signoff: str
     company_fact: CompanyFact
     word_count: int
     guard: GuardResult
+    hook_type: Opt[HookType] = None
 
 
 class AtsKeyword(Model):
@@ -82,6 +104,54 @@ class AtsKeyword(Model):
     weight: Literal["required", "nice"]
     matched: bool
     in_master_cv: bool
+    category: Opt[KeywordCategory] = None
+    # Whether the cover letter carries the term too. Absent on reports from before the letter was
+    # measured. A parser reads the letter as well as the CV, and a letter written to the template
+    # is meant to place the post's keywords — so whether it did is a measurement, not a hope.
+    in_letter: Opt[bool] = None
+
+
+class RoleProfile(Model):
+    target_role_title: str
+    department: str | None
+    company_name: str
+    industry_name: str | None
+    experience_level: Seniority | None
+
+
+class KeywordMatrix(Model):
+    """The post's terms, grouped. The first three are the checkable keywords coverage measures;
+    `soft_skills_and_culture` is display and letter context, and never counted."""
+
+    hard_skills: list[str]
+    methodologies_and_frameworks: list[str]
+    tools_and_software: list[str]
+    soft_skills_and_culture: list[str]
+
+
+class StrategicContext(Model):
+    """Why this hire exists, in the post's own words. Every field is a verbatim excerpt of the
+    post or null — see `llm_outputs.QuotedContext`, which is what enforces it."""
+
+    primary_job_requirement: str | None
+    company_initiative_or_market: str | None
+    company_problem_to_solve: str | None
+    upcoming_company_goal: str | None
+    company_value_or_pillar: str | None
+
+
+class JobAnalysis(Model):
+    """The job-description rubric, filled in for the job a pack is written for.
+
+    Assembled in `nodes.analyse` from three sources so that each part comes from the one that can
+    be trusted with it: the role title and company are WERA's own record of the job, the matrix
+    is `keywords.extract`'s (already held to the post), and only the department, industry,
+    seniority and strategic context are read by `job.analyse`.
+    """
+
+    role_profile: RoleProfile
+    ats_keyword_matrix: KeywordMatrix
+    strategic_context: StrategicContext
 
 
 class FormatCheck(Model):
@@ -105,9 +175,11 @@ class AtsReport(Model):
     # the gap between them is the applicant's to close, and `AtsKeyword.in_master_cv` says which
     # terms are in it.
     backed_coverage: float = -1.0
+    # The same sum over the letter's text, for the keywords the CV can back — the only ones the
+    # letter may use (`nodes.letter_plan`). Absent when there was no letter to measure.
+    letter_coverage: Opt[float] = None
     format_checks: list[FormatCheck]
     pages: float
-    attempt: int
 
     @model_validator(mode="after")
     def _default_backed(self) -> "AtsReport":
@@ -129,3 +201,6 @@ class Pack(Model):
     letter: CoverLetter
     ats: AtsReport
     answers: list[AnswerItem]
+    # Absent on packs drafted before the rubric existed, and on any whose `job.analyse` call
+    # failed: the analysis informs the letter, so its absence weakens a pack rather than breaking it.
+    analysis: Opt[JobAnalysis] = None

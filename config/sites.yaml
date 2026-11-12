@@ -36,18 +36,26 @@ sites:
   countries:
   - GB
   region: europe
+  direct: true
 - domain: brightnetwork.co.uk
   name: Bright Network
   terms_reviewed_on: '2026-10-10'
   countries:
   - GB
   region: europe
+  posting_pattern: ^/graduate-jobs/(?!in-)[^/]+/(?!in-)[^/?#]+/?$
 - domain: gradcracker.com
   name: Gradcracker
   terms_reviewed_on: '2026-10-10'
   countries:
   - GB
   region: europe
+  languages:
+  - en
+  sectors:
+  - graduate
+  - stem
+  posting_pattern: ^/hub/\d+/[^/]+/(?:graduate-job|work-placement-internship|degree-apprenticeship|apprenticeship)/\d{4,}
 - domain: welcometothejungle.com
   name: Welcome to the Jungle
   terms_reviewed_on: '2026-10-11'
@@ -60,12 +68,18 @@ sites:
   - GB
   - CZ
   region: europe
+  posting_pattern: ^/(?:[a-z]{2}/companies/[^/]+/jobs/[^/?#]+|jobs/[A-Za-z0-9_-]{6,}/?$)
 - domain: builtinlondon.uk
   name: Built In London
   terms_reviewed_on: '2026-10-11'
   countries:
   - GB
   region: europe
+  languages:
+  - en
+  sectors:
+  - tech
+  posting_pattern: ^/job/[^/]+/\d+
 - domain: otta.com
   name: Otta
   terms_reviewed_on: null

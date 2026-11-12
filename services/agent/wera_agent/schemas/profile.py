@@ -10,7 +10,10 @@ from .base import Model, count, fail, required
 # something to honour: before they did, every level in this list was below every word the filter
 # hides, so the setting could not widen a search even in principle.
 type Seniority = Literal["intern", "graduate", "junior", "entry", "mid", "senior", "lead", "principal"]
-type Recency = Literal["24h", "7d", "30d"]
+# How recent a posting must be. 21 days at most (SRCH-24): a board's month-old posting has usually
+# been filled or is about to be, and the search spent credits finding it. A profile saved with the
+# old "30d" reads as "21d" (`SearchProfile._recency`), so no stored row needs rewriting.
+type Recency = Literal["24h", "7d", "21d"]
 Term = Annotated[str, required("This can't be empty")]
 
 # ISO 3166-1 alpha-2. Upper-cased on the way in so "gb" and "GB" are the same country.
@@ -45,6 +48,11 @@ class SearchProfile(Model):
     channels: ProfileChannels
     generated_from_cv_version: int
     updated_at: str
+
+    @field_validator("recency", mode="before")
+    @classmethod
+    def _recency(cls, v: object) -> object:
+        return "21d" if v == "30d" else v
 
     @field_validator("countries")
     @classmethod

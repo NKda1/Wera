@@ -67,7 +67,7 @@ flowchart TD
         end
 
         CP[("LangGraph checkpointer<br/>gates survive a restart")]
-        DB[("SQLite by default<br/>Postgres + pgvector for real use")]
+        DB[("Postgres 17 + pgvector<br/>SQLite for unit tests only")]
         SCHED --> INTAKE
         API --> INTAKE
         API --> APP
@@ -166,7 +166,7 @@ Fallbacks are per tier and prefer a different vendor first, so a provider outage
 - **The provider is configurable:** OpenRouter by default, or any OpenAI-compatible endpoint via `LLM_BASE_URL` — including a local model, or the Phase 3 PII gateway via `LLM_PROXY_URL`.
 - **Prices in config are a copy of a published price and go stale silently.** When OpenRouter reports a call's own cost it is preferred over the table; the table is used for the pre-flight budget estimate, where there is no reply to read a price from yet.
 
-`config/wera.yaml` also lists `job.normalise`, `match.verdict` and `outreach.draft`. Nothing calls them yet: Firecrawl's own JSON extraction covers NORM-04 for scraped pages, quick match was replaced by fit scoring, and outreach is Phase 3. They cost nothing and are kept because the contracts are written.
+`match.verdict` and `outreach.draft` are not implemented. Quick match was replaced by fit scoring, so its task was removed; outreach is Phase 3 and gets its prompt, schema and config entry when it is built. `job.normalise` is the last rung of the extract ladder (`sources/extract.py`), after the ATS feed and JSON-LD rungs.
 
 ### 3.4 Job intake: three channels, one CV
 
@@ -271,10 +271,10 @@ those rather than from the eighty-eight.
 | Web app | Next.js (App Router, TypeScript), Tailwind with WERA tokens | same, now a pure UI | same |
 | Server code | Next.js route handlers, marked `server-only`, held the logic | route handlers are a **BFF only**; FastAPI (Python) owns the logic | same |
 | Orchestration | — | **LangGraph 1.2**, `interrupt()` at both gates | same |
-| Checkpointer | — | `langgraph-checkpoint-sqlite`, or `-postgres` with the `postgres` extra | same |
+| Checkpointer | — | `langgraph-checkpoint-postgres`, in the same database as the rows; `-sqlite` only under the unit tests | same |
 | Scheduling | "Search now" button | in-process **APScheduler** (SCH-01) | same |
 | LLM client | OpenAI SDK pointed at OpenRouter | **LangChain `ChatOpenAI`** → OpenRouter, `with_structured_output` + `with_fallbacks` | + PII gateway via `LLM_PROXY_URL` |
-| Storage | in-memory demo store | **SQLAlchemy 2 + Alembic**: SQLite by default, Postgres + pgvector via `DATABASE_URL` | Postgres with row-level security |
+| Storage | in-memory demo store | **SQLAlchemy 2 + Alembic on Postgres 17** (local; pgvector installed) since 12 Nov 2026 — SQLite only under the unit tests (REL-04) | Postgres with row-level security |
 | Embeddings | — | **fastembed** `bge-small-en-v1.5`, local; hash embedder in demo mode | pgvector-backed |
 | Documents | `@react-pdf/renderer` (PDF), `docx` (DOCX) | same — the one piece of logic still in TypeScript | same |
 | Validation | hand-written contracts + Zod | **Pydantic 2 is canonical**; JSON Schema exported to `packages/schemas/json/`, TS types generated from it (SCH-03) | same |
@@ -283,7 +283,7 @@ those rather than from the eighty-eight.
 | Parsing | — | **selectolax** (alert emails), **rapidfuzz** (resolve) | same |
 | Tracing | — | **Logfire**, redacting; off without a project token | per-tenant dashboards |
 | Browser (stretch) | — | — | Playwright, headed, local only |
-| Tests | Vitest + Playwright e2e on demo mode | **pytest** (SQLite and Postgres in CI) + **golden eval set**, 20 hand-scored ads | + fill tests on ATS sandboxes |
+| Tests | Vitest + Playwright e2e on demo mode | **pytest** on SQLite files by default and the whole suite on Postgres before each sign-off and in CI + **golden eval set**, 20 hand-scored ads | + fill tests on ATS sandboxes |
 
 Python 3.12 with `uv`; Node 24 with `pnpm`. Every dependency is pinned exactly, in `uv.lock` and `pnpm-lock.yaml`.
 
@@ -309,6 +309,45 @@ The job lifecycle fields (`lastCheckedAt`, `lastConfirmedAt`, `closedAt`) live i
 | `fit_reports` | job_id, core, adjacent, experience, eligibility, freshness, evidence (JSON), total, model | 2 |
 | `outreach` | application_id, draft, sent_at, follow_up_at | 3 |
 | `users`, `subscriptions`, `usage_events` | hosted only; every row scoped by `user_id` with row-level security | 3 |
+
+### 5.1 Where the data lives (REL-04, REL-05)
+
+WERA moved from SQLite to Postgres on 12 Nov 2026, ahead of the data growing: a local Postgres 17 (Homebrew), the same schema `wera supabase` exports, so a hosted move later is a `pg_dump` and a restore. SQLite is kept for one thing — the unit tests, which make a fresh file per test — and the whole suite also runs on Postgres (`WERA_TEST_DATABASE_URL`) before a milestone is signed off and in CI's `agent-postgres` job.
+
+| Database | Holds | Notes |
+|---|---|---|
+| `wera` | the app (`public`, Alembic), LangGraph's checkpoint tables beside it | `DATABASE_URL` |
+| `wera_demo` | demo mode's seeded sample data | `DEMO_DATABASE_URL`; a demo can never write into `wera` |
+| `wera_eval` | `wera eval`'s scratch data, wiped before each run | made on demand; a sibling database, not a schema, so no `search_path` slip can reach `wera` |
+| `wera_test` | the Postgres test lane | wiped per test |
+
+Roles: `wera_app` owns the databases and is what the app connects as; `wera_readonly` may only `SELECT`, and is the one to give a viewer or a notebook. Nightly at 03:00 `pg_dump -Fc` writes `data/backups/wera-<date>-<time>.dump` and keeps fourteen days (`wera db backup` on demand; `pg_restore --dbname=<new db> --no-owner <file>` to restore). An old SQLite install moves in with `wera db import-sqlite <file>`, which opens the source read-only, refuses a target that isn't empty, replays the gate threads as well as the rows, and compares both before it reports success.
+
+Postgres refuses a NUL character in `text` and `jsonb`, and a scraped page can carry one, so the JSON columns and the scraped text columns strip it on the way in (`db/models.py`). Queries stay dialect-neutral — the JSON column's own operators, never a dialect's functions such as SQLite's `json_extract`.
+
+### 5.2 Telemetry you keep, and the analytics layer (OBS-01…04)
+
+`wera` has two schemas beside `public`, both created by migration 0011 and both Postgres-only:
+
+| Schema | Holds | Written by |
+|---|---|---|
+| `telemetry` | `records`: every span and log Logfire holds, with its attributes as `jsonb`, keyed `(trace_id, span_id)`; `archive_state`: the watermark | `services/telemetry_archive.py`: nightly at 03:15, on startup when the last run is over a day old, and `wera telemetry archive [--since 7d]` |
+| `analytics` | views over `public` with the JSON flattened (`jobs`, `runs`, `funnel`, `spend_daily`, `model_calls`), and one table, `fit_totals` | the views are the migration; `fit_totals` is copied in after each scoring pass and by `wera analytics refresh` |
+
+Logfire keeps thirty days; the archive keeps everything after that, and `pg_dump` backs it up with the rest. It reads through Logfire's query API with a **project read token** (`LOGFIRE_READ_TOKEN`) — the write token in `.logfire/` can't read, and an organisation API key isn't accepted — in windows of up to a day that halve while they come back full, re-reading the hour behind the watermark each run because Logfire files a span under when it started and writes it when it ends. `wera telemetry status` says what is held. `llm_calls.trace_id` joins a model call to the spans around it.
+
+`fit_totals` is a table rather than a view because a total is computed in code (MATCH-04): SQL that re-implemented the weights would disagree with the Jobs screen the first time a weight changed. Each row is stamped `refreshed_at`, since freshness makes a total true only for the day it was computed.
+
+**Monitoring the server.** `scripts/otel-collector.sh` runs the OpenTelemetry Collector's `postgresql` receiver (`infra/otel/postgresql.yaml`) once a minute and sends `wera`'s statistics and the server's to the same Logfire project as `service_name = 'postgresql'`. It logs in as `logfire_monitor`, which holds `pg_monitor` and can read no table. The binary is `otelcol-contrib` 0.164.0 (darwin arm64, checksum-verified, in `~/.local/bin`); neither Homebrew nor Docker carries it here. `scripts/otel-collector.sh install` keeps it running as a launchd agent (`com.wera.otel-collector`, started at login, restarted if it stops, logs in `~/Library/Logs/wera-otel-collector.log`); `uninstall` removes it.
+
+It is sized for Logfire's bill, which counts each metric point as a record against the same 10M a month as WERA's spans. Logfire's template (every database, every 10 s, per-table and per-index series) sent 32,757 points in six minutes here — about 7.8M a day. The config here sends **27 points a minute, about 1.2M a month**, measured from the collector's own `otelcol_exporter_sent_metric_points`. Per-table figures are a query away instead: `pg_stat_user_tables`.
+
+**Looking at the data.** Connect as `wera_readonly` (`WERA_READONLY_URL`), which can read `public`, `telemetry` and `analytics` and write nothing:
+
+- `psql wera`, then `\dn`, `\dt public.*`, `\dv analytics.*`, `\d+ jobs`.
+- A GUI: Postico 2, TablePlus, DBeaver Community (ER diagrams and exports) or pgAdmin 4; in VS Code, Microsoft's PostgreSQL extension.
+- Notebooks: pandas or polars over SQLAlchemy with the read-only URL; DuckDB `ATTACH 'dbname=wera user=wera_readonly' AS pg (TYPE postgres)` for fast scans and one-line Parquet exports.
+- Standing dashboards: Grafana or Metabase over `analytics.*` (Metabase needs Java or Docker).
 
 ---
 
@@ -342,7 +381,7 @@ wera/
 │       │   ├── sources/          # firecrawl_search, inbox, ats_feeds, resolve, normalise, manual
 │       │   ├── services/         # store.py (SPEC §9.1 behaviour), seed, drafting, demo_data
 │       │   └── api/              # routes.py, scheduler.py, cli.py
-│       ├── migrations/           # Alembic (SQLite + Postgres from one schema)
+│       ├── migrations/           # Alembic (Postgres; SQLite under the unit tests)
 │       └── tests/
 ├── packages/schemas/json/        # JSON Schema, generated from Pydantic and committed
 ├── config/                       # wera.yaml (tiers, prices, weights, caps) · sites · senders · companies
@@ -476,7 +515,7 @@ Goal: a usable WERA you can run locally that finds roles from your CV and turns 
 Goal: WERA finds and ranks jobs for you every morning.
 
 - [x] Python agent service (FastAPI) with Pydantic as the canonical schema; the web app becomes a BFF
-- [x] LangGraph graph with a SQLite/Postgres checkpointer; Gate 1 and Gate 2 as `interrupt()`
+- [x] LangGraph graph with a Postgres checkpointer (SQLite under the unit tests); Gate 1 and Gate 2 as `interrupt()`
 - [x] PDF and DOCX export, and a database that survives a restart (the two Phase 1 gaps)
 - [x] LLM gateway: LangChain → OpenRouter → Pydantic, with per-tier fallbacks, a weekly budget and `llm_calls` accounting
 - [x] Scheduled intake: board search and `companies.yaml` watchlist daily, inbox every three hours

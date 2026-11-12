@@ -1,25 +1,19 @@
-"""Board search through Firecrawl (SRCH-01…11).
+"""Firecrawl: the last resort for reading a posting, and the engine behind board discovery.
 
-**One query per target title × board** (SRCH-01/11), with LinkedIn excluded from every call
-whatever the config says (SRCH-03). One board per query is a correction, not a detail: a single
-query carrying four `include_domains` and `limit: 10` lets the search engine's ranking decide how
-the ten slots are shared, and it does not share them — a real run came back almost entirely from
-the one board with the best SEO while three reviewed boards went unread and still cost their part
-of the bill. Ten slots each, or it isn't coverage.
+Board search used to start here — one Firecrawl search per title × board, every result paid for
+and read — and a diagnosis of the real database (11 Nov) found it reading results pages, category
+pages and blog posts as jobs, and storing Firecrawl's summary of the real ones instead of their
+text. Discovery now belongs to the Strategist (Serper, SRCH-20) and reading to the Harvester, so
+two things are left here:
 
-Which boards those are comes from the countries the profile targets (SRCH-11), because most
-boards are national and asking a UK graduate board about Berlin spends credits it cannot answer.
-Cities are named in the query text rather than multiplied into the grid, and what a job's
-location is actually allowed to be is decided afterwards by `filters.wrong_location`, which reads
-the posting instead of trusting a search engine to have honoured a word.
+* **`scrape_card`** — one posting read as cheaply as it can be: the free rungs in
+  `sources.extract` first, and a paid Firecrawl scrape only when none of them could (SRCH-05).
+  A paid read keeps the page's own text as the description, never Firecrawl's summary of it.
+* **Site discovery's searches** (SRCH-12, `sources.site_discovery`), which still use Firecrawl
+  search and borrow `_client`, `_retrying` and `_where` from here.
 
-Results WERA already knows are skipped before anything is scraped (SRCH-05), and what the last
-crawl paid for is remembered for a few hours (SRCH-10) — together, that is what makes a repeat
-run nearly free.
-
-The caps are the point of this module as much as the searching is. Firecrawl charges per credit,
-so a run carries a budget for queries, pages and credits, and stops cleanly as `partial` when it
-reaches one (SRCH-06). A run that can't finish is better than a bill nobody expected.
+The caps are the point as much as the reading is. Firecrawl charges per credit, so a run carries a
+budget for pages and credits, and stops paying cleanly as `partial` when it reaches one (SRCH-06).
 """
 
 import time
@@ -30,8 +24,8 @@ from typing import TYPE_CHECKING, Any
 import logfire
 
 from ..config import Site
-from ..domain.dedupe import canonical_url
-from ..http import DENY, host_of, is_denied
+from ..config import usable_sites as config_usable_sites
+from ..http import is_denied
 from ..logging import redact
 from ..schemas.profile import SearchProfile
 from . import extract
@@ -41,7 +35,9 @@ if TYPE_CHECKING:
     from .crawl_cache import CrawlCache
 
 # SRCH-02: how "posted within" maps to a search-time filter.
-TBS = {"24h": "qdr:d", "7d": "qdr:w", "30d": "qdr:m"}
+# Firecrawl's search windows are a day, a week or a month, so 21 days asks for the month and
+# `filters.too_old` cuts at three weeks on the way in.
+TBS = {"24h": "qdr:d", "7d": "qdr:w", "21d": "qdr:m"}
 
 LIMIT_PER_QUERY = 10  # SRCH-02
 MAX_TRIES = 3  # SRCH-07
@@ -60,6 +56,10 @@ BACKOFF_SECONDS = (1.0, 3.0)
 SEARCH_CREDITS = 2
 JSON_SCRAPE_CREDITS = 5
 
+# How much of a paid read's markdown is kept as the description. A posting is a few thousand
+# characters; this leaves room for a long one and cuts a page that went on into footers.
+MAX_DESCRIPTION = 20_000
+
 
 @dataclass
 class SearchCaps:
@@ -68,6 +68,8 @@ class SearchCaps:
     max_queries: int = 20
     max_pages: int = 30
     max_credits: int = 100
+    # SRCH-20: Serper's own unit, one per query, bounded separately from Firecrawl's credits.
+    max_serper_queries: int = 30
 
 
 # SRCH-05: the shape asked of a scraped page. Shared with the manual import (ATS-04), which
@@ -87,18 +89,7 @@ CARD_SCHEMA: dict[str, Any] = {
 
 
 @dataclass
-class Hit:
-    """A search result, before anything is scraped."""
-
-    url: str
-    title: str
-    snippet: str
-    site: str
-
-
-@dataclass
 class SearchOutcome:
-    hits: list[Hit] = field(default_factory=list)
     # Work actually sent to Firecrawl. These two are what the caps are checked against, which is
     # why they stay "sent" rather than "answered": a cached answer cost nothing, so it must never
     # be the thing that stops a run (SRCH-10, rule 1).
@@ -117,6 +108,10 @@ class SearchOutcome:
     fallback_pages: int = 0
     errors: list[str] = field(default_factory=list)
     capped: str | None = None  # which cap ended the run, if any
+    # How the last `scrape_card` answered: "cache", a free rung ("json-ld", "model", …),
+    # "firecrawl", or why it read nothing ("listing", "closed", "not-a-job", "capped", "unread").
+    # The Harvester records it per posting, so "read for free" is a count, not a hope.
+    last_how: str = ""
 
     @property
     def partial(self) -> bool:
@@ -132,20 +127,9 @@ class SearchOutcome:
         return self.queries_run + self.cached_queries
 
 
-def usable_sites(profile: SearchProfile, sites: list[Site]) -> list[Site]:
-    """The boards this search may actually ask (SRCH-03/04/11).
-
-    Four gates, in order of how non-negotiable they are: LinkedIn is never searched whatever
-    anything says; a `direct` board is read by WERA itself and must never be paid for as a search
-    as well; a site's terms must have been reviewed; and the board has to serve somewhere the
-    person is looking. A profile naming no countries passes the last gate for everything, which
-    is what keeps a profile written before SRCH-11 working.
-    """
-    return [
-        s
-        for s in sites
-        if s.domain not in DENY and not s.direct and s.reviewed and s.domain in profile.sites and s.serves(profile.countries)
-    ]
+# Moved to `config` so the Strategist can ask the same question without importing this module;
+# kept under its old name here for the callers that already use it.
+usable_sites = config_usable_sites
 
 
 def direct_sites(profile: SearchProfile, sites: list[Site]) -> list[Site]:
@@ -156,46 +140,6 @@ def direct_sites(profile: SearchProfile, sites: list[Site]) -> list[Site]:
     that, and an unreviewed `direct` board is loaded, shown and never fetched.
     """
     return [s for s in sites if s.direct and s.reviewed and s.domain in profile.sites and s.serves(profile.countries)]
-
-
-def enabled_domains(profile: SearchProfile, sites: list[Site]) -> list[str]:
-    """Only sites whose terms the person has reviewed, that serve a target country, and never
-    LinkedIn (SRCH-03/04/11)."""
-    return [s.domain for s in usable_sites(profile, sites)]
-
-
-@dataclass
-class Query:
-    """One search: the text to ask, and the single board to ask it of."""
-
-    text: str
-    domain: str
-
-
-def queries_for(profile: SearchProfile, sites: list[Site]) -> list[Query]:
-    """SRCH-01/11: one query per title × board, with the places named in the text.
-
-    **One board per query, which is the whole change here.** Sending one query with four
-    `include_domains` and `limit: 10` meant the search engine's ranking decided the split, and
-    it does not split — in a real run nearly every result came back from the single board with
-    the best SEO, while three reviewed boards went unread and still cost their share of the
-    credits. A board with its own query gets its own ten slots and cannot be crowded out.
-
-    It is also *cheaper* than what it replaces, because the location grid collapses into the
-    query text: four titles × five locations was twenty queries, and four titles × four boards
-    is sixteen. Where a job is allowed to be is enforced afterwards by `filters.wrong_location`,
-    which reads the posting rather than trusting a search engine to have honoured a city name.
-
-    The places go in as a bare `OR` group rather than one query each. A board search is a
-    keyword match, not a database query, so naming the cities is a hint either way — and the
-    filter behind it is the thing that actually decides.
-    """
-    boards = usable_sites(profile, sites)
-    titles = [t.strip() for t in profile.titles if t.strip()]
-    if not boards or not titles:
-        return []
-    where = _where(profile)
-    return [Query(text=f'"{title}"{where}', domain=s.domain) for title in titles for s in boards]
 
 
 def _where(profile: SearchProfile) -> str:
@@ -276,167 +220,6 @@ def _retrying(call: Any, what: str, errors: list[str]) -> Any | None:
     return None
 
 
-def _hits_from(result: Any, allowed: list[str]) -> list[Hit]:
-    """Firecrawl returns its own objects; only web results with an allowed host are kept."""
-    out: list[Hit] = []
-    for item in getattr(result, "web", None) or []:
-        url = getattr(item, "url", None) or ""
-        host = host_of(url)
-        if not url or not host:
-            continue
-        # Belt and braces: the exclude list is sent too, but a result from LinkedIn is dropped
-        # here as well, because SRCH-03 is not a preference.
-        if any(host == d or host.endswith(f".{d}") for d in DENY):
-            continue
-        site = next((d for d in allowed if host == d or host.endswith(f".{d}")), host)
-        out.append(
-            Hit(
-                url=url,
-                title=(getattr(item, "title", None) or "").strip(),
-                snippet=(getattr(item, "description", None) or "").strip(),
-                site=site,
-            )
-        )
-    return out
-
-
-def search(
-    profile: SearchProfile,
-    sites: list[Site],
-    caps: SearchCaps,
-    known_urls: set[str],
-    *,
-    cache: "CrawlCache | None" = None,
-    on_query: Callable[["SearchOutcome", int, int, str], None] | None = None,
-) -> SearchOutcome:
-    """Runs the profile's queries and returns the results WERA hasn't seen before.
-
-    `on_query(outcome, answered, planned, domain)` fires after every query, cached or paid.
-    Twenty queries is minutes of wall clock, and without this the screen had nothing to say for
-    any of it — a silent process holding a terminal is read as a hung one, and so is a frozen bar.
-
-    `domain` is which board was just asked. It was in scope here from the start and discarded at
-    the callback boundary, which left "Searching boards…" standing for the whole of those minutes.
-    """
-    outcome = SearchOutcome()
-    queries = queries_for(profile, sites)
-    if not queries:
-        return outcome
-
-    tbs = TBS.get(profile.recency)
-    # Canonicalised on the way in as well as on the way out, so the comparison is right whether
-    # the caller handed over canonical URLs or raw ones. `Store.known_apply_urls` canonicalises,
-    # but a set of URLs is the kind of argument that acquires a second caller.
-    known = {canonical_url(u) or u for u in known_urls}
-    # Built on the first query that is actually sent. A fully-cached run shouldn't construct a
-    # client it never uses — with no key that can raise and take the whole channel down.
-    client: Any | None = None
-    seen: set[str] = set()
-
-    for position, query in enumerate(queries):
-        # One board per query (SRCH-11), so the allow-list is a list of one. The cache key is
-        # built from the same list, which means re-pointing a query at another board is a miss
-        # rather than a stale hit.
-        domains = [query.domain]
-        cached = cache.hits(query.text, domains, tbs, LIMIT_PER_QUERY) if cache is not None else None
-        if cached is not None:
-            # `[]` is an answer — "nothing matched this query" — so a miss has to be `None`.
-            outcome.cached_queries += 1
-            outcome.credits_saved += SEARCH_CREDITS
-            hits = _hits_from_cache(cached)
-        else:
-            # The caps are checked here and nowhere else: only a request about to be *sent* can
-            # be stopped by one (SRCH-06). And a cap no longer ends the loop — the queries after
-            # it may be free, and declining a free answer buys nobody anything.
-            if outcome.queries_run >= caps.max_queries:
-                outcome.capped = outcome.capped or "queries"
-                continue
-            if outcome.credits_used >= caps.max_credits:
-                outcome.capped = outcome.capped or "credits"
-                continue
-
-            if client is None:
-                client = _client()
-            result = _retrying(
-                # SRCH-03 is not enforced here: Firecrawl refuses a request carrying both an
-                # include list and an exclude list, and sending both failed *every* query. An
-                # allow-list is the stronger of the two anyway — nothing outside it can come back —
-                # and the deny list is still applied by `usable_sites` (which never puts a denied
-                # domain in a query), `_hits_from` (which drops a denied host from the results)
-                # and `scrape_card` (which refuses to fetch one).
-                lambda q=query.text, d=domains, c=client: c.search(
-                    q,
-                    sources=["web"],
-                    include_domains=d,
-                    limit=LIMIT_PER_QUERY,
-                    tbs=tbs,
-                ),
-                f"search {query.text}",
-                outcome.errors,
-            )
-            outcome.queries_run += 1
-            outcome.credits_used += SEARCH_CREDITS
-            if result is None:
-                # Nothing was learnt about this query, so nothing is cached: remembering a rate
-                # limit would turn one bad minute into six hours of empty runs.
-                continue
-            hits = _hits_from(result, domains)
-            if cache is not None:
-                # After the `result is None` guard, deliberately. `_hits_from` returns `[]` both
-                # for a genuinely empty result and for a reply missing `.web`, and that guard is
-                # the only thing telling "nothing matched" from "the SDK returned something odd".
-                cache.put_hits(query.text, domains, tbs, LIMIT_PER_QUERY, [vars(h) for h in hits])
-
-        for hit in hits:
-            # SRCH-05, applied *after* the cache: `known_urls` changes between runs, so what gets
-            # remembered is the search's answer, not this run's filtering of it.
-            #
-            # Compared canonically, matching `Store.known_apply_urls` and `dedupe.dedupe_key`: a
-            # posting that comes back with a tracking tag is the same posting, and treating it as
-            # new costs 5 credits and backdates the job's `last_seen`.
-            identity = canonical_url(hit.url) or hit.url
-            if identity in known or identity in seen:
-                continue
-            seen.add(identity)
-            outcome.hits.append(hit)
-
-        if on_query is not None:
-            # Position in the plan, not `queries_answered`: a query refused by a cap advances the
-            # loop without answering, so counting answers would leave the bar stuck short of the
-            # end on exactly the runs a person most wants to watch.
-            on_query(outcome, position + 1, len(queries), query.domain)
-
-    logfire.info(
-        "Board search answered {queries} query/queries ({cached} from cache) and found {new} new result(s)",
-        queries=outcome.queries_answered,
-        cached=outcome.cached_queries,
-        new=len(outcome.hits),
-    )
-    return outcome
-
-
-def _hits_from_cache(rows: list[dict[str, Any]]) -> list[Hit]:
-    """Rehydrate stored hits. A payload written by an older build must never raise.
-
-    Field by field rather than `Hit(**row)`: a cache is not a contract, and a `TypeError` here
-    would take down a channel over an entry that could simply have been ignored.
-    """
-    out: list[Hit] = []
-    for row in rows:
-        url = str(row.get("url") or "")
-        if not url:
-            continue
-        out.append(
-            Hit(
-                url=url,
-                title=str(row.get("title") or ""),
-                snippet=str(row.get("snippet") or ""),
-                site=str(row.get("site") or host_of(url)),
-            )
-        )
-    return out
-
-
 def scrape_card(
     url: str,
     schema: dict[str, Any],
@@ -462,6 +245,7 @@ def scrape_card(
     # or mark the run partial. (It used to sit last, so asking for a LinkedIn URL while at the
     # page cap set `capped="pages"` on a run that had done nothing wrong.)
     if is_denied(url):
+        outcome.last_how = "unread"
         return None
 
     if cache is not None:
@@ -472,33 +256,51 @@ def scrape_card(
             # confusing the two is how the 5 credits get spent twice.
             outcome.cached_cards += 1
             outcome.credits_saved += JSON_SCRAPE_CREDITS
+            outcome.last_how = "cache"
             return card
 
     # The free rungs, before any cap is consulted: they cost no credits, so a run that has hit its
     # page or credit cap can still read pages this way. That is the whole point of the cap moving
     # from "stop reading" to "stop paying".
     local, how = extract.card(url, fetch_html=fetch_html, parse=parse)
+    if how in extract.NOT_JOB_ANSWERS:
+        # Read and understood: an advert slot, a listing, a closed page. Paying Firecrawl to read
+        # it again would buy the same answer, so it stops here — and is remembered on the
+        # unreadable TTL, so the next run doesn't ask the model either.
+        logfire.info("{url} isn't an open job posting ({how}); not paying to read it again", url=url, how=how)
+        if cache is not None:
+            cache.put_card(url, schema, None)
+        outcome.last_how = how
+        return None
     if local is not None:
         outcome.local_pages += 1
         outcome.credits_saved += JSON_SCRAPE_CREDITS
         logfire.info("Read {url} with {how}, no credits spent", url=url, how=how)
         if cache is not None:
             cache.put_card(url, schema, _dated_card(local, cache.now))
+        outcome.last_how = how
         return local
 
     if outcome.pages_scraped >= caps.max_pages:
         outcome.capped = outcome.capped or "pages"
+        outcome.last_how = "capped"
         return None
     if outcome.credits_used >= caps.max_credits:
         outcome.capped = outcome.capped or "credits"
+        outcome.last_how = "capped"
         return None
 
     outcome.fallback_pages += 1
+    outcome.last_how = "firecrawl"
     client = _client()
     document = _retrying(
         lambda: client.scrape(
             url,
-            formats=[{"type": "json", "schema": schema, "prompt": "Extract this job posting's fields."}],
+            # Markdown as well as the fields, at no extra credit: the JSON format's `description`
+            # is Firecrawl's summary of the posting (a median 1,231 characters across the jobs
+            # read this way, against 5,994 for the same boards read directly), and every later
+            # prompt quotes the description as the employer's own words (LTR-02).
+            formats=["markdown", {"type": "json", "schema": schema, "prompt": "Extract this job posting's fields."}],
             only_main_content=True,
         ),
         f"scrape {url}",
@@ -510,6 +312,9 @@ def scrape_card(
         return None  # a transport failure is never cached: nothing was learnt about the page
     data = getattr(document, "json", None)
     card = data if isinstance(data, dict) else None
+    markdown = getattr(document, "markdown", None)
+    if card is not None and isinstance(markdown, str) and markdown.strip():
+        card = {**card, "description": markdown.strip()[:MAX_DESCRIPTION]}
     # Remembered either way, and this is the half that closes the expensive leak. Three cases end
     # up here: a good card; a page whose JSON wasn't a dict (stored as `None`, on the unreadable
     # TTL); and — the common one — a dict that `normalise.from_scrape` will reject for want of a
@@ -552,14 +357,3 @@ def credits_remaining() -> int | None:
         return None
     value = getattr(usage, "remaining_credits", None)
     return int(value) if isinstance(value, int | float) else None
-
-
-def estimate(profile: SearchProfile, sites: list[Site]) -> tuple[int, int]:
-    """(queries, credits) a run would use, before it runs (PRF-05).
-
-    One new page per query is the assumption. It is a guess either way — a first run scrapes
-    almost everything it finds and a tenth run scrapes almost nothing, because a known URL is
-    never scraped twice and SRCH-10 remembers the rest — so the estimate deliberately errs high.
-    """
-    queries = len(queries_for(profile, sites))
-    return queries, queries * (SEARCH_CREDITS + JSON_SCRAPE_CREDITS)

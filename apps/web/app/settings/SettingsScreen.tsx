@@ -4,9 +4,9 @@ import { Plus, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiRequestError } from "@/lib/api";
-import { formatAgo } from "@/lib/format";
+import { formatAgo, formatDate, formatTime } from "@/lib/format";
 import { DEFAULT_WEIGHTS, normaliseWeights } from "@/lib/scoring";
-import type { FitWeights, SecretStatus, SettingsResponse } from "@/lib/types";
+import type { FitWeights, JobsCleared, SecretStatus, SettingsResponse } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card, CardHeader } from "@/lib/ui/Card";
 import { cn } from "@/lib/ui/cn";
@@ -32,7 +32,12 @@ const WEIGHT_LABELS: { key: keyof FitWeights; label: string; hint: string }[] = 
   { key: "freshness", label: "Freshness", hint: "From the posting date, computed in code" },
 ];
 
-type Draft = Pick<SettingsResponse, "redactContact" | "weeklyBudgetUsd" | "cvPages" | "baseUrl" | "models" | "weights"> & { senders: string[] };
+type Schedule = { enabled: boolean; cron: string };
+
+type Draft = Pick<SettingsResponse, "redactContact" | "weeklyBudgetUsd" | "cvPages" | "baseUrl" | "models" | "weights"> & {
+  senders: string[];
+  searchSchedule: Schedule;
+};
 
 const toDraft = (s: SettingsResponse): Draft => ({
   redactContact: s.redactContact,
@@ -42,7 +47,18 @@ const toDraft = (s: SettingsResponse): Draft => ({
   models: { ...s.models },
   weights: { ...s.weights },
   senders: [...s.inbox.senders],
+  // Only what the person sets: the next-run time and the credit figures are the server's to say.
+  searchSchedule: { enabled: s.searchSchedule.enabled, cron: s.searchSchedule.cron },
 });
+
+// Schedules a person can pick without knowing cron. Each is at least six hours apart, which the
+// agent enforces (`schemas.settings.MIN_SEARCH_HOURS`); "Custom" takes any schedule that is.
+const SCHEDULE_PRESETS: { cron: string; label: string }[] = [
+  { cron: "0 8 * * 1-5", label: "Weekday mornings, 08:00" },
+  { cron: "0 8 * * *", label: "Every morning, 08:00" },
+  { cron: "0 8,18 * * *", label: "Twice a day, 08:00 and 18:00" },
+  { cron: "0 8 * * 1", label: "Monday mornings, 08:00" },
+];
 
 export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
   const router = useRouter();
@@ -86,6 +102,7 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
       <div className="mt-6 flex flex-col gap-4">
         <KeysCard settings={settings} />
         <InboxCard settings={settings} senders={draft.senders} onSenders={(s) => set("senders", s)} onChecked={(at) => setSettings((s) => ({ ...s, inbox: { ...s.inbox, lastCheckedAt: at } }))} />
+        <ScheduleCard settings={settings} value={draft.searchSchedule} onChange={(v) => set("searchSchedule", v)} error={errors["searchSchedule.cron"]} />
 
         <Card className="p-5 sm:p-6" aria-labelledby="models-title">
           <CardHeader id="models-title" title="Models" description="Any OpenAI-compatible endpoint. Pin dated model ids so results stay stable." />
@@ -167,6 +184,7 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
             <FieldError>{errors.weeklyBudgetUsd}</FieldError>
           </div>
         </Card>
+        {settings.allowClearJobs ? <ClearJobsCard /> : null}
       </div>
 
       <div className="sticky bottom-0 z-10 -mx-4 mt-6 flex items-center justify-end gap-3 border-t border-line bg-mint-50/95 px-4 py-3 backdrop-blur sm:mx-0 sm:rounded-card sm:border sm:bg-white/95 sm:px-4">
@@ -212,6 +230,78 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
         }
       />
     </div>
+  );
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const clearedText = (c: JobsCleared) =>
+  `${plural(c.jobs, "job")}, ${plural(c.applications, "application")} and ${plural(c.documents, "document")}`;
+
+/** SRCH-27: the testing control that empties the job list, so a search can be judged from
+ *  nothing. Only rendered when `allow_clear_jobs` is on in config; the confirm names exactly what
+ *  will go, read from the agent rather than guessed, before anything does. */
+function ClearJobsCard() {
+  const router = useRouter();
+  const toast = useToast();
+  const [preview, setPreview] = useState<JobsCleared>();
+  const [busy, setBusy] = useState(false);
+
+  const ask = async () => {
+    setBusy(true);
+    try {
+      setPreview(await api.clearPreview());
+    } catch (err) {
+      toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't count the jobs." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    try {
+      const cleared = await api.clearJobs();
+      setPreview(undefined);
+      toast({ tone: "ok", message: `Cleared ${clearedText(cleared)}. The next search starts from an empty list.` });
+      router.refresh();
+    } catch (err) {
+      toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't clear the jobs." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="p-5 sm:p-6" aria-labelledby="testing-title">
+      <CardHeader
+        id="testing-title"
+        title="Testing"
+        description="Start a search from an empty list. Your CV, search profile, settings and spending records stay."
+      />
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="max-w-md text-small text-ink-2">Deletes every job, application and pack. Turn this control off in config/wera.yaml before anyone else uses WERA.</p>
+        <Button variant="danger" onClick={ask} busy={busy && !preview}>
+          Clear jobs
+        </Button>
+      </div>
+      <Dialog
+        open={!!preview}
+        onClose={() => setPreview(undefined)}
+        size="sm"
+        title="Clear every job?"
+        description={preview ? `This deletes ${clearedText(preview)}. It can't be undone.` : undefined}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setPreview(undefined)}>
+              Keep them
+            </Button>
+            <Button variant="danger" onClick={clear} busy={busy}>
+              Clear jobs
+            </Button>
+          </>
+        }
+      />
+    </Card>
   );
 }
 
@@ -263,8 +353,21 @@ function KeysCard({ settings }: { settings: SettingsResponse }) {
         <KeyRow
           name="FIRECRAWL_API_KEY"
           status={settings.secrets.firecrawl}
-          detail={settings.secrets.firecrawl === "set" ? "Set on server · job-board discovery is on." : "Not set · job-board discovery is off. Greenhouse, Lever and Ashby imports still work."}
+          detail={
+            settings.secrets.firecrawl === "set"
+              ? "Set on server · the last resort for postings WERA can't read itself, and for finding new boards."
+              : "Not set · postings no free reader can open are skipped. Greenhouse, Lever and Ashby imports still work."
+          }
           action={settings.secrets.firecrawl === "set" ? <TestConnection provider="firecrawl" /> : undefined}
+        />
+        <KeyRow
+          name="SERPER_API_KEY"
+          status={settings.secrets.serper ?? "missing"}
+          detail={
+            settings.secrets.serper === "set"
+              ? "Set on server · job discovery asks Google through Serper."
+              : "Not set · job discovery through Google is off."
+          }
         />
         <KeyRow
           name="ALERTS_IMAP_APP_PASSWORD"
@@ -283,6 +386,7 @@ function KeysCard({ settings }: { settings: SettingsResponse }) {
           {"\n"}
           {settings.secrets.llm !== "set" ? "LLM_API_KEY=…\n" : ""}
           {settings.secrets.firecrawl !== "set" ? "FIRECRAWL_API_KEY=…\n" : ""}
+          {settings.secrets.serper !== "set" ? "SERPER_API_KEY=…\n" : ""}
           {settings.secrets.inbox !== "set" ? "ALERTS_IMAP_APP_PASSWORD=…" : ""}
         </pre>
       ) : null}
@@ -417,6 +521,80 @@ function InboxCard({
       <p className="mt-4 rounded-control bg-mint-50 px-4 py-3 text-small leading-relaxed text-ink">
         Email text is treated as data. WERA only extracts job cards: it never follows instructions or opens attachments in an email, never opens LinkedIn links, and discards the message once the jobs are saved.
       </p>
+    </Card>
+  );
+}
+
+/** SCH-01's opt-in search: the Strategist plans, the Harvester reads the boards, on a schedule
+ *  the person chose. Off until they turn it on, because it spends Firecrawl credits. */
+function ScheduleCard({ settings, value, onChange, error }: { settings: SettingsResponse; value: Schedule; onChange: (v: Schedule) => void; error?: string }) {
+  const preset = SCHEDULE_PRESETS.find((p) => p.cron === value.cron);
+  const [custom, setCustom] = useState(!preset);
+  const saved = settings.searchSchedule;
+  const credits = saved.weeklyCreditCap != null ? `${saved.creditsThisWeek ?? 0} of ${saved.weeklyCreditCap}` : null;
+  return (
+    <Card className="p-5 sm:p-6" aria-labelledby="schedule-title">
+      <CardHeader
+        id="schedule-title"
+        title="Scheduled job search"
+        description="WERA plans where to look from your CV and profile, reads the job boards, and scores what's new — without you pressing Search."
+      />
+      <div className="mt-4 space-y-4">
+        <Checkbox
+          label="Search for jobs on a schedule"
+          checked={value.enabled}
+          onChange={(e) => onChange({ ...value, enabled: e.target.checked })}
+          description="Uses Serper searches, and Firecrawl credits only for postings WERA can't read itself. Off by default."
+        />
+        <div>
+          <Label htmlFor="schedule-when">When</Label>
+          <Select
+            id="schedule-when"
+            className="text-[14px]"
+            value={custom ? "custom" : value.cron}
+            disabled={!value.enabled}
+            onChange={(e) => {
+              if (e.target.value === "custom") return setCustom(true);
+              setCustom(false);
+              onChange({ ...value, cron: e.target.value });
+            }}
+          >
+            {SCHEDULE_PRESETS.map((p) => (
+              <option key={p.cron} value={p.cron}>
+                {p.label}
+              </option>
+            ))}
+            <option value="custom">Custom schedule…</option>
+          </Select>
+        </div>
+        {custom ? (
+          <div>
+            <Label htmlFor="schedule-cron">Custom schedule (cron)</Label>
+            <Input
+              id="schedule-cron"
+              className="max-w-64 font-mono text-mono"
+              value={value.cron}
+              disabled={!value.enabled}
+              onChange={(e) => onChange({ ...value, cron: e.target.value })}
+              invalid={!!error}
+              spellCheck={false}
+              aria-describedby="schedule-cron-help"
+            />
+            <Help id="schedule-cron-help">Five fields — minute hour day month weekday — in this machine&apos;s time, at least 6 hours apart.</Help>
+            <FieldError>{error}</FieldError>
+          </div>
+        ) : error ? (
+          <FieldError>{error}</FieldError>
+        ) : null}
+        <p className="text-small text-ink-2">
+          {settings.demoMode
+            ? "Demo mode schedules nothing."
+            : saved.enabled && saved.nextRunAt
+              ? `Next search ${formatDate(saved.nextRunAt, { weekday: "short", day: "numeric", month: "short" })}, ${formatTime(saved.nextRunAt)}.`
+              : "No search scheduled."}
+          {credits ? ` ${credits} Firecrawl credits used this week; at the limit, runs stop paying and postings WERA can read for free are still read.` : ""}
+        </p>
+      </div>
     </Card>
   );
 }

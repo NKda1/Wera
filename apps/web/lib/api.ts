@@ -6,8 +6,10 @@ import type {
   ApplicationWithJob,
   Contact,
   Estimate,
+  FormatCheck,
   IntakeChannel,
   IntakeRun,
+  JobsCleared,
   MasterCV,
   ProfileProposalResult,
   ScoredJob,
@@ -71,6 +73,12 @@ export type Decision = { action: "approve" | "snooze" | "reject" | "unhide"; day
 
 export const api = {
   decide: (jobId: string, d: Decision) => call<ScoredJob>(`/api/jobs/${jobId}/decision`, { method: "POST", body: d }),
+  /** SRCH-25: the person opened this job, so its New tag goes. */
+  markSeen: (jobId: string) => call<{ seen: boolean }>(`/api/jobs/${encodeURIComponent(jobId)}/seen`, { method: "POST", body: {} }),
+  markAllSeen: () => call<{ marked: number }>("/api/jobs/seen", { method: "POST", body: {} }),
+  /** SRCH-27: what "Clear jobs" would remove, and then removing it. A testing control. */
+  clearPreview: () => call<JobsCleared>("/api/jobs/clear"),
+  clearJobs: () => call<JobsCleared>("/api/jobs/clear", { method: "POST", body: {} }),
   importJob: (body: { url: string } | { text: string }) => call<ScoredJob>("/api/jobs/import", { method: "POST", body }),
 
   estimate: (channels: IntakeChannel[]) => call<Estimate>(`/api/intake/estimate?channels=${channels.join(",")}`),
@@ -102,6 +110,8 @@ export const api = {
   editDocument: (docId: string, patch: { target: string; text?: string; bulletId?: string }) =>
     call<ApplicationWithJob>(`/api/documents/${docId}`, { method: "PATCH", body: patch }),
   // Exports are plain <a download> links to /api/documents/:id/export (EXP-01).
+  /** ATSC-05/06: the format lint, run on the PDF as it renders now. Works before approval. */
+  getFormatChecks: (docId: string) => call<{ checks: FormatCheck[] }>(`/api/documents/${docId}/checks`),
 
   putCv: (cv: MasterCV) => call<{ version: number; clearedJobs: number }>("/api/cv", { method: "PUT", body: cv }),
   putContact: (c: Contact) => call<Contact>("/api/cv/contact", { method: "PUT", body: c }),

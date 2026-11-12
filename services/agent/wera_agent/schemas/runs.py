@@ -37,8 +37,10 @@ type RunPhase = Literal[
     "queued",
     # Finding *boards* rather than jobs: ATS-05 weekly, and SRCH-12's site proposals.
     "discovering",
-    "searching",  # board-search queries
-    "scraping",  # reading the pages those queries found
+    "planning",  # SRCH-20 stage 1: the Strategist's plan and its queries
+    "harvesting",  # SRCH-20 stage 3: the Harvester reading queued postings, free rungs first
+    "searching",  # SRCH-20 stage 2: Serper queries, and reading pages of results for their links
+    "scraping",  # reading pages a search found — no longer a board-search stage, kept for old rows
     "feeds",  # employers' own ATS feeds, free and daily
     "reading",  # the alert mailbox
     "collapsing",  # NORM-05/06 dedupe, so a job found three ways is scored once
@@ -53,7 +55,9 @@ type RunPhase = Literal[
 PHASE_ORDER: tuple[str, ...] = (
     "queued",
     "discovering",
+    "planning",
     "searching",
+    "harvesting",
     "scraping",
     "feeds",
     "reading",
@@ -99,9 +103,12 @@ class IntakeRun(Model):
     # opposite stories.
     local_pages: int = 0
     fallback_pages: int = 0
-    # MATCH-05: how many jobs a batch is, so the screen knows when one has landed and can show
-    # the first eight without waiting for the second. A fact about how the run is handing out
-    # scoring, which is why it travels with the run rather than being a constant the UI repeats.
+    # SRCH-26: postings found and left waiting for "Find more", so "12 new jobs · 18 more queued"
+    # can say there is more without anything having been paid for it yet.
+    queued: int = 0
+    # How many jobs a batch is, so the screen knows when one has landed and can show it without
+    # waiting for the rest. A fact about how the run is handing out scoring, which is why it
+    # travels with the run rather than being a constant the UI repeats.
     batch_size: int = 0
     errors: list[RunError]
 

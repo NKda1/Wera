@@ -16,25 +16,21 @@ dependencies = [
   "langchain-core==1.6.11",
   "langchain-openai==1.7.2",
   "langgraph==1.2.15",
-  "langgraph-checkpoint-sqlite==3.1.2",
+  "langgraph-checkpoint-postgres==3.2.0",
   "logfire[fastapi]==5.2.0",
   "numpy==2.5.4",
+  "psycopg[binary]==3.3.6",
   "pydantic==2.14.1",
   "pydantic-settings==2.16.0",
   "pyyaml==6.0.3",
   "rapidfuzz==3.14.6",
+  "redis==8.1.0",
   "selectolax==1.0.1",
   "sqlalchemy==2.1.4",
   "uvicorn==0.54.0",
 ]
 
 [project.optional-dependencies]
-# What a Postgres install needs on top of the defaults: the driver, and the checkpointer
-# `graphs/checkpointer.py` imports when DATABASE_URL isn't SQLite. Without the second one a
-# Postgres install starts, migrates, and then fails at the first gate — the one thing the whole
-# checkpointer exists to survive (REL-03).
-postgres = ["psycopg[binary]==3.3.6", "langgraph-checkpoint-postgres==3.2.0"]
-
 # SRCH-05's browser rung. An extra, not a default, because the Python package is only half of it:
 # the Chromium it drives is a separate ~150 MB download (`playwright install chromium`), and
 # making every clone pay for that would be a poor trade for a rung the ladder can skip.
@@ -50,6 +46,10 @@ wera = "wera_agent.cli:main"
 
 [dependency-groups]
 dev = [
+  "fakeredis==2.40.0",
+  # SQLite is the unit tests' database and nothing else's (REL-04). The SQLite checkpointer goes
+  # with it — and `wera db import-sqlite` reads an old install's gate threads through it.
+  "langgraph-checkpoint-sqlite==3.1.2",
   "httpx==0.28.1",
   "pytest==9.1.1",
   "pytest-socket==0.8.1",

@@ -2,6 +2,7 @@
 Unexpected errors never echo internals."""
 
 import logging
+import re
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -26,11 +27,19 @@ def error_body(code: str, message: str, fields: dict[str, str] | None = None) ->
     return {"error": err}
 
 
+# Segments Pydantic adds to an error's location for the branch of a union it tried — `Opt[X]` is
+# `X | None`, so every optional field's errors arrived as "searchSchedule.SearchSchedulePatch.cron"
+# plus a sibling "Input should be None". Neither is a field the person can see.
+_BRANCH = re.compile(r"^(?:[A-Z]\w*|str|int|float|bool|list|dict|none|.*\[.*\])$")
+
+
 def validation_fields(errors: list[dict]) -> dict[str, str]:
     """Pydantic errors → {"titles": "Add at least 1 target title"}, first message per field."""
+    real = [e for e in errors if e.get("type") != "none_required"] or errors
     fields: dict[str, str] = {}
-    for e in errors:
+    for e in real:
         loc = [str(p) for p in e.get("loc", ()) if p not in ("body", "query", "path")]
+        loc = [p for p in loc if not _BRANCH.match(p)] or loc
         key = ".".join(loc) or "_"
         msg = str(e.get("msg", "Invalid value")).removeprefix("Value error, ")
         fields.setdefault(key, msg)

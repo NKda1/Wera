@@ -6,11 +6,51 @@ Pydantic model round-trips through one `data` column without a migration per fie
 
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text, TypeDecorator, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-Json = JSON().with_variant(JSONB(), "postgresql")
+
+def _without_nul(value: Any) -> Any:
+    """`value` with every NUL character taken out of every string in it.
+
+    Postgres refuses a NUL in `text` and a `\\u0000` in `jsonb`, and a scraped page can carry one;
+    SQLite stores either without complaint. Stripped on the way in, so one stray byte in a posting
+    can't fail the transaction that saves a whole search's jobs.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "") if "\x00" in value else value
+    if isinstance(value, dict):
+        return {_without_nul(k): _without_nul(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_without_nul(v) for v in value]
+    return value
+
+
+class _Json(TypeDecorator):
+    """JSON on SQLite, JSONB on Postgres, and never a NUL."""
+
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):  # noqa: ANN001, ANN201 — SQLAlchemy's signature
+        return dialect.type_descriptor(JSONB() if dialect.name == "postgresql" else JSON())
+
+    def process_bind_param(self, value, dialect):  # noqa: ANN001, ANN201
+        return _without_nul(value)
+
+
+class _Text(TypeDecorator):
+    """`text` that never holds a NUL, for the columns copied off other people's pages."""
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):  # noqa: ANN001, ANN201
+        return _without_nul(value)
+
+
+Json = _Json()
 Iso = String(32)  # ISO 8601 UTC timestamps, as JavaScript's toISOString() writes them
 
 
@@ -56,8 +96,8 @@ class JobRow(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     dedupe_key: Mapped[str] = mapped_column(String(512), unique=True)  # REL-02
     status: Mapped[str] = mapped_column(String(32), index=True)
-    title: Mapped[str] = mapped_column(Text)
-    company: Mapped[str] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(_Text)
+    company: Mapped[str] = mapped_column(_Text)
     posted_at: Mapped[str | None] = mapped_column(Iso)
     first_seen: Mapped[str] = mapped_column(Iso)
     snoozed_until: Mapped[str | None] = mapped_column(Iso)
@@ -152,6 +192,8 @@ class IntakeRunRow(Base):
     # earning its keep — see migration 0008.
     local_pages: Mapped[int] = mapped_column(Integer, default=0)
     fallback_pages: Mapped[int] = mapped_column(Integer, default=0)
+    # SRCH-26: postings found and left in the queue for "Find more" — migration 0010.
+    queued: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[list[Any]]
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)  # demo runs progress over time
     settled: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -182,6 +224,9 @@ class LlmCallRow(Base):
     detail: Mapped[str | None] = mapped_column(String(300))
     attempt: Mapped[int] = mapped_column(Integer, default=1)
     called_at: Mapped[str] = mapped_column(Iso, index=True)
+    # The trace the call was made in, as Logfire writes trace ids (32 hex characters), so a call
+    # joins the run or request around it — in Logfire, and in `telemetry.records` (OBS-02).
+    trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
 
 
 class KvRow(Base):

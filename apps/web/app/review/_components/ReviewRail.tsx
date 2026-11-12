@@ -1,7 +1,9 @@
 "use client";
 
 import { Check, Download, Lock } from "lucide-react";
-import type { AtsReport, Pack } from "@/lib/types";
+import { useEffect, useState } from "react";
+import { api } from "@/lib/api";
+import type { AtsReport, FormatCheck, Pack } from "@/lib/types";
 import { buttonClass } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { Chip, ChipList } from "@/lib/ui/Chip";
@@ -29,23 +31,7 @@ export function ReviewRail({
     <div className="flex flex-col gap-4">
       <AtsCard ats={pack.ats} />
 
-      <Card className="p-5">
-        <h2 className="text-[16px] font-bold">Format checks</h2>
-        <ul className="mt-2.5 space-y-1.5 text-[14px]">
-          {pack.ats.formatChecks.map((c) => (
-            <li key={c.id} className="flex items-start gap-2.5">
-              {c.pass ? (
-                <Check className="mt-0.5 size-4 shrink-0 text-forest-700" strokeWidth={2.6} aria-label="Pass" />
-              ) : (
-                <span className="mt-px w-4 shrink-0 text-center font-bold text-amber-500" aria-label="Needs a look">
-                  !
-                </span>
-              )}
-              <span className={cn("min-w-0 break-words", c.id === "file_name" && "font-mono text-[12.5px]")}>{c.message}</span>
-            </li>
-          ))}
-        </ul>
-      </Card>
+      <FormatChecksCard docId={`${appId}.cv`} cv={pack.cv} fallback={pack.ats.formatChecks} />
 
       {violations.length ? (
         <section className="rounded-card border border-amber-100 bg-amber-50 p-5 text-amber-700">
@@ -96,6 +82,58 @@ export function ReviewRail({
   );
 }
 
+/**
+ * ATSC-05/06, read off the PDF as it would render now — the same lint the download runs.
+ *
+ * Until that answers, the agent's own checks stand in, and they say so: the page count there is
+ * an estimate from line lengths. These used to be the only checks shown, alongside three more the
+ * agent simply asserted as passed for a PDF nobody had rendered.
+ */
+function FormatChecksCard({ docId, cv, fallback }: { docId: string; cv: Pack["cv"]; fallback: FormatCheck[] }) {
+  const [state, setState] = useState<{ checks: FormatCheck[] } | { error: string } | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setState(null);
+    api.getFormatChecks(docId).then(
+      (r) => live && setState({ checks: r.checks }),
+      (e: unknown) => live && setState({ error: e instanceof Error ? e.message : "Couldn't render the PDF." }),
+    );
+    return () => {
+      live = false;
+    };
+    // `cv` is the dependency that matters: an edit returns a new pack, and the PDF changes with it.
+  }, [docId, cv]);
+
+  const checks = state && "checks" in state ? state.checks : fallback;
+  return (
+    <Card className="p-5">
+      <h2 className="text-[16px] font-bold">Format checks</h2>
+      <p className="mt-1 text-small text-ink-2">
+        {state === null
+          ? "Rendering the PDF to check it…"
+          : "checks" in state
+            ? "Read from the PDF as it will download."
+            : `Couldn't check the rendered PDF (${state.error}). Showing estimates.`}
+      </p>
+      <ul className="mt-2.5 space-y-1.5 text-[14px]">
+        {checks.map((c) => (
+          <li key={c.id} className="flex items-start gap-2.5">
+            {c.pass ? (
+              <Check className="mt-0.5 size-4 shrink-0 text-forest-700" strokeWidth={2.6} aria-label="Pass" />
+            ) : (
+              <span className="mt-px w-4 shrink-0 text-center font-bold text-amber-500" aria-label="Needs a look">
+                !
+              </span>
+            )}
+            <span className={cn("min-w-0 break-words", c.id === "file_name" && "font-mono text-[12.5px]")}>{c.message}</span>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
 /** A real browser download, so the file is streamed rather than fetched into memory. */
 function DownloadLink({ docId, format, label, approved }: { docId: string; format: "pdf" | "docx"; label: string; approved: boolean }) {
   const name = format.toUpperCase();
@@ -142,7 +180,11 @@ function AtsCard({ ats }: { ats: AtsReport }) {
         {matched.length} of {ats.keywords.length} terms this post asks for are on your CV.
         {gaps.length ? ` ${coverable}% of what your CV can back is in this pack — the other ${gaps.length} aren't in your CV at all.` : " Everything your CV can back is in this pack."}
       </p>
-      {ats.attempt > 1 ? <p className="mt-2 text-small text-ink-2">Retailored {ats.attempt - 1}× to lift coverage with lines from your CV.</p> : null}
+      {ats.letterCoverage != null ? (
+        <p className="mt-1.5 text-small text-ink-2">
+          The cover letter carries {Math.round(ats.letterCoverage * 100)}% of the terms your CV can back. It never uses the ones it can&apos;t.
+        </p>
+      ) : null}
 
       <p className="mt-4 mb-1.5 text-small text-ink-2">Matched · {matched.length}</p>
       <ChipList>

@@ -31,10 +31,13 @@ ATS_HOSTS = {
     "ashby": ("ashbyhq.com", "jobs.ashbyhq.com"),
 }
 
+# A board token may carry a dot: Ashby boards are often named for the employer's domain
+# (`jobs.ashbyhq.com/partly.com/…`, which is on the watchlist). Without it those postings read as
+# no ATS at all, and `sources.postings` took them for the employer's board rather than one job.
 ATS_PATTERNS = (
-    ("greenhouse", re.compile(r"greenhouse\.io/(?:embed/job_app\?for=)?(?P<token>[\w-]+)(?:/jobs)?/(?P<job>\d+)", re.I)),
-    ("lever", re.compile(r"lever\.co/(?P<token>[\w-]+)/(?P<job>[0-9a-f-]{8,})", re.I)),
-    ("ashby", re.compile(r"ashbyhq\.com/(?P<token>[\w-]+)/(?P<job>[0-9a-f-]{8,})", re.I)),
+    ("greenhouse", re.compile(r"greenhouse\.io/(?:embed/job_app\?for=)?(?P<token>[\w.-]+)(?:/jobs)?/(?P<job>\d+)", re.I)),
+    ("lever", re.compile(r"lever\.co/(?P<token>[\w.-]+)/(?P<job>[0-9a-f-]{8,})", re.I)),
+    ("ashby", re.compile(r"ashbyhq\.com/(?P<token>[\w.-]+)/(?P<job>[0-9a-f-]{8,})", re.I)),
 )
 
 SEARCH_LIMIT = 5  # NORM-01

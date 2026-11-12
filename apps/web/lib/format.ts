@@ -31,8 +31,10 @@ export function formatAge(iso: string | undefined, now: Date = new Date()): stri
  * screen quietly overstates what WERA knows.
  */
 export function formatPostedAge(job: Pick<Job, "postedAt" | "postedPrecision">, now: Date = new Date()): string {
+  // SRCH-24: an undated posting is kept, and says so in the person's words rather than WERA's.
+  if (!job.postedAt) return "Date not given";
   const age = formatAge(job.postedAt, now);
-  if (!job.postedAt || job.postedPrecision !== "approximate") return age;
+  if (job.postedPrecision !== "approximate") return age;
   return age === "today" ? "posted today (approx.)" : `about ${age}`;
 }
 
@@ -57,6 +59,25 @@ export function formatLiveness(
     return when === "date unknown" ? "couldn't confirm this is still open" : `last confirmed open ${when}`;
   }
   return "";
+}
+
+/** SRCH-25: new from the moment a run adds it until the person opens it or decides on it. Jobs
+ *  saved before tagging existed have no `foundBy`, and none of them is new to anyone. */
+export function isNew(job: Pick<Job, "foundBy" | "seenAt">): boolean {
+  return Boolean(job.foundBy) && !job.seenAt;
+}
+
+const ORIGIN: Record<Channel, string> = {
+  board_search: "Search",
+  email_alert: "Email",
+  watchlist: "Employer feed",
+  manual: "Added",
+};
+
+/** Where a job came from and when: "Search 11 Nov". Empty for a job saved before tagging. */
+export function formatOrigin(job: Pick<Job, "foundBy">): string {
+  if (!job.foundBy) return "";
+  return `${ORIGIN[job.foundBy.channel] ?? "Found"} ${formatDate(job.foundBy.at)}`;
 }
 
 /** The urgency groups, in the order the Jobs screen shows them. Mirrors `domain.scoring.URGENCY`. */

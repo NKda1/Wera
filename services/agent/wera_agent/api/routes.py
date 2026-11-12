@@ -22,6 +22,7 @@ from ..schemas.api import (
     ImportTextIn,
     ImportUrlIn,
     JobList,
+    JobsCleared,
     NavCounts,
     ProfileProposalResult,
     RegenerateIn,
@@ -34,10 +35,12 @@ from ..schemas.api import (
 )
 from ..schemas.applications import ApplicationWithJob
 from ..schemas.cv import Contact, CvLine, MasterCV
+from ..schemas.cv_profile import CvProfile
 from ..schemas.jobs import ScoredJob
 from ..schemas.profile import SearchProfile
 from ..schemas.runs import Estimate, IntakeRun, RunIds
 from ..schemas.settings import SettingsPatch, SettingsResponse
+from ..schemas.strategy import TargetMatrix
 from ..services.store import Store
 
 # Aliased: this module already has a `get_settings` *route*, which would shadow it.
@@ -70,7 +73,11 @@ def store() -> Iterator[Store]:
         spawn(make(), name=name)
 
 
-S = Annotated[Store, Depends(store)]
+# `scope="function"`: the transaction commits **before** the response is sent. FastAPI's default
+# for a dependency with `yield` is the other way round — the response goes out and the commit
+# follows — so a screen that refreshed on the 200 could read the state from before its own
+# change (seen live: "Clear jobs" answered, and a read straight after still counted every job).
+S = Annotated[Store, Depends(store, scope="function")]
 
 
 # ---- shell ----
@@ -131,6 +138,21 @@ def import_job(s: S, body: Annotated[ImportUrlIn | ImportTextIn, Body()]) -> Sco
     if isinstance(body, ImportUrlIn):
         return s.import_job(url=body.url)
     return s.import_job(text=body.text)
+
+
+@router.get("/jobs/clear")
+def clear_preview(s: S) -> JobsCleared:
+    """SRCH-27: what "Clear jobs" would remove, for the confirm to name. Gated like the clear."""
+    return s.clear_preview()
+
+
+@router.post("/jobs/clear")
+def clear_jobs(s: S) -> JobsCleared:
+    """SRCH-27: delete every job, application and pack, so the next search starts from nothing.
+
+    A testing control (`allow_clear_jobs`). The CV, profile, settings and both spend ledgers stay.
+    """
+    return s.clear_jobs()
 
 
 @router.get("/jobs/{job_id}")
@@ -228,6 +250,23 @@ def start_run(s: S, body: RunIn) -> RunIds:
     return RunIds(run_ids=list(ids.values()))
 
 
+@router.post("/jobs/seen")
+def mark_all_seen(s: S) -> dict[str, int]:
+    """SRCH-25: "Mark all seen" — every job tagged New loses the tag."""
+    return {"marked": s.mark_all_seen()}
+
+
+@router.post("/jobs/{job_id}/seen")
+def mark_seen(s: S, job_id: str) -> dict[str, bool]:
+    """SRCH-25: the person opened this job's details, so it is no longer new.
+
+    A body rather than a 204: the web proxy passes responses through as text, and a 204 with a
+    body — even an empty string — is a response `fetch` refuses to construct.
+    """
+    s.mark_seen(job_id)
+    return {"seen": True}
+
+
 @router.post("/jobs/recheck")
 def recheck_jobs(s: S) -> Started:
     """SRCH-13: ask whether the shortlist's postings still exist, now rather than at 07:00.
@@ -292,6 +331,24 @@ def put_cv(s: S, body: MasterCV) -> CvVersion:
 @router.get("/cv/lines")
 def cv_lines(s: S) -> dict[str, CvLine]:
     return s.cv_lines()
+
+
+@router.get("/cv/profile")
+def cv_profile(s: S) -> CvProfile:
+    """The candidate rubric for the current CV. The first read after a save makes one model call."""
+    return s.cv_profile()
+
+
+@router.get("/strategy")
+def get_strategy(s: S) -> TargetMatrix | None:
+    """The Strategist's current matrix, or null when there is none for this CV and profile. Free."""
+    return s.strategy()
+
+
+@router.post("/strategy")
+def refresh_strategy(s: S) -> TargetMatrix:
+    """Run the Strategist: one scoring-tier call, plus a robots.txt fetch per board it proposes."""
+    return s.refresh_strategy()
 
 
 @router.post("/cv/import")

@@ -150,6 +150,19 @@ class TestRecencyIsEnforced:
         away every posting from a board that doesn't publish one."""
         assert filters.hidden_reason(job(posted_at=None), profile(recency="24h"), NOW) is None
 
+    def test_three_weeks_is_the_longest_window(self):
+        """SRCH-24: 21 days at most. A 22-day-old posting is hidden however wide the profile asks."""
+        assert filters.hidden_reason(self.old(20), profile(recency="21d"), NOW) is None
+        reason = filters.hidden_reason(self.old(22), profile(recency="21d"), NOW)
+        assert reason and "22 days old" in reason
+
+    def test_a_profile_saved_with_thirty_days_reads_as_twenty_one(self):
+        """The old widest setting. Stored profiles keep loading, and now mean three weeks."""
+        assert profile(recency="30d").recency == "21d"
+
+    def test_an_undated_job_is_kept_in_the_widest_window_too(self):
+        assert filters.hidden_reason(job(posted_at=None), profile(recency="21d"), NOW) is None
+
     def test_an_approximate_date_gets_a_day_of_slack(self):
         """MATCH-08: "about 7 days ago" shouldn't be hidden from a 7-day search by someone
         else's rounding."""
@@ -186,6 +199,21 @@ class TestCountryTargeting:
     def test_naming_neither_a_city_nor_a_country_hides_nothing_on_location(self):
         anywhere = job(location=Location(city="Lima", country="Peru", raw="Lima, Peru"), remote="onsite")
         assert filters.wrong_location(anywhere, profile(locations=[], countries=[])) is None
+
+
+class TestACityWrittenWithItsCountry:
+    """Found on the first live pipeline run: a profile reading "London, UK" hid twelve London jobs
+    of thirty, because the filter looked for the whole string and the postings said "London,
+    England, GBR"."""
+
+    @pytest.mark.parametrize("raw", ["London, England, GBR", "London, Greater London", "London", "Central London, UK"])
+    def test_the_city_is_what_matches(self, raw):
+        posting = job(location=Location(city=raw.split(",")[0], raw=raw), remote="onsite")
+        assert filters.wrong_location(posting, profile(locations=["London, UK"])) is None
+
+    def test_another_city_is_still_another_city(self):
+        melton = job(location=Location(city="Melton", raw="Melton"), remote="onsite")
+        assert filters.wrong_location(melton, profile(locations=["London, UK"])) == "Melton"
 
 
 class TestHardFiltersContinued:

@@ -79,7 +79,6 @@ def seed(session: Session, now: int) -> None:
         },
     )
     st.set_kv(session, "firstRunDelivered", False)
-    st.set_kv(session, "lastRunJobIds", [])
     st.set_kv(session, "counter", 0)
     session.flush()
 

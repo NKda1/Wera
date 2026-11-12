@@ -37,7 +37,6 @@ class FoundCounts(Model):
 class ShortlistMeta(Model):
     found: FoundCounts
     channels: list[ChannelSummary]
-    new_job_ids: list[str]
     # Plain `Job`, not `ScoredJob`: MATCH-01 hides these before any model call, so a hidden job
     # has a reason and never a fit. A sample, capped by `Store.HIDDEN_SHOWN` — `hidden_total` is
     # the real figure.
@@ -52,10 +51,9 @@ class ShortlistMeta(Model):
     # same reason as `hidden`: there is no fit report to show, and inventing a zero would read as
     # a verdict rather than a queue position.
     awaiting: list[Job] = []
-    # MATCH-05: how many of those a "score more" would take. From config, so the button can
-    # promise the number the run will actually deliver — and the screen needs it when no run is
-    # in flight, which is exactly when `IntakeRun.batchSize` isn't available.
-    scoring_batch_size: int = 8
+    # SRCH-26: the most "Find more" brings — the search's own 8–12 ceiling. From config, so the
+    # button promises what the run will deliver, and readable when no run is in flight.
+    find_more_size: int = 12
     snoozed: int
     rejected: int
     active_run_ids: list[str]
@@ -197,3 +195,12 @@ class CvParseIn(Model):
 
 class RunIn(Model):
     channels: Opt[list[str]] = None
+
+
+class JobsCleared(Model):
+    """SRCH-27: what "Clear jobs" removed — or, before it runs, what it would remove."""
+
+    jobs: int
+    applications: int
+    # Tailored CVs, cover letters and ATS reports: the packs, counted as documents.
+    documents: int

@@ -3,7 +3,9 @@
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from .base import Model, Opt, check, required
+from pydantic import AfterValidator, Field
+
+from .base import Model, Opt, check, fail, required
 from .jobs import FitWeights
 
 type SecretStatus = Literal["set", "missing", "invalid"]
@@ -30,6 +32,58 @@ class InboxSettings(Model):
     senders: list[str]
 
 
+# SCH-01's scheduled search: off until the person turns it on, and then weekday mornings unless
+# they choose otherwise. Local time, as the rest of the schedule is.
+DEFAULT_SEARCH_CRON = "0 8 * * 1-5"
+# The closest two scheduled searches may be. A board's results barely move in a few hours, so a
+# tighter schedule mostly finds what the last run found and still spends credits asking.
+MIN_SEARCH_HOURS = 6
+
+
+def check_search_cron(v: str) -> str:
+    """A 5-field crontab that APScheduler reads, firing no more often than every six hours."""
+    from datetime import datetime, timedelta
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    v = " ".join(v.split())
+    try:
+        trigger = CronTrigger.from_crontab(v)
+    except ValueError as exc:
+        raise fail(
+            "cron", f"That isn't a schedule WERA can read ({exc}). Use five fields: minute hour day month weekday."
+        ) from None
+    start = datetime.now().astimezone()
+    fires, at = [], start
+    for _ in range(40):
+        at = trigger.get_next_fire_time(at, at + timedelta(seconds=1))
+        if at is None:
+            break
+        fires.append(at)
+    if not fires:
+        raise fail("cron", "That schedule never runs.")
+    gaps = [b - a for a, b in zip(fires, fires[1:], strict=False)]
+    if gaps and min(gaps) < timedelta(hours=MIN_SEARCH_HOURS):
+        raise fail(
+            "cron",
+            f"Searches need at least {MIN_SEARCH_HOURS} hours between them — closer than that mostly finds the same jobs "
+            "and still spends credits.",
+        )
+    return v
+
+
+class SearchSchedule(Model):
+    """The scheduled job search: when the Strategist and the Harvester run without being asked."""
+
+    enabled: bool
+    cron: str
+    # In the response only, computed rather than stored: when it next runs (null when it's off),
+    # and the Firecrawl credits spent this week against the ceiling that bounds a schedule.
+    next_run_at: Opt[str] = None
+    credits_this_week: Opt[int] = None
+    weekly_credit_cap: Opt[int] = None
+
+
 class Settings(Model):
     demo_mode: bool
     redact_contact: bool
@@ -40,11 +94,17 @@ class Settings(Model):
     models: TierModels
     weights: FitWeights
     inbox: InboxSettings
+    # Defaulted so a settings blob written before scheduling existed still loads, as "off". A
+    # factory rather than an instance: an instance is written into the JSON Schema as a default,
+    # and the contract generator then emitted three copies of the type, one per use.
+    search_schedule: SearchSchedule = Field(default_factory=lambda: SearchSchedule(enabled=False, cron=DEFAULT_SEARCH_CRON))
 
 
 class SecretsStatus(Model):
     llm: SecretStatus
     firecrawl: SecretStatus
+    # Defaulted so a test or a caller building the status by hand needn't know about it.
+    serper: SecretStatus = "missing"
     inbox: SecretStatus
 
 
@@ -52,6 +112,9 @@ class SettingsResponse(Settings):
     secrets: SecretsStatus
     llm_provider: str
     llm_last_checked_at: Opt[str] = None
+    # SRCH-27: whether Settings offers "Clear jobs". From `config/wera.yaml`, never settable here:
+    # a control that deletes applications must not be one a request can switch on.
+    allow_clear_jobs: bool = False
 
 
 def _is_url(v: str) -> bool:
@@ -74,6 +137,11 @@ class InboxPatch(Model):
     senders: list[Annotated[str, required("This can't be empty")]]
 
 
+class SearchSchedulePatch(Model):
+    enabled: bool
+    cron: Annotated[str, AfterValidator(check_search_cron)]
+
+
 class SettingsPatch(Model):
     """Non-secret settings a person can change. Keys are set in the environment only (SET-07)."""
 
@@ -90,3 +158,4 @@ class SettingsPatch(Model):
     models: Opt[TierModels] = None
     weights: Opt[PatchWeights] = None
     inbox: Opt[InboxPatch] = None
+    search_schedule: Opt[SearchSchedulePatch] = None

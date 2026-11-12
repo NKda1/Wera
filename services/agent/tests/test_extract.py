@@ -5,7 +5,9 @@ credits a run spent. These tests cover the rungs that cost nothing, because thos
 that have to be right — a rung that silently stops answering doesn't fail, it just gets expensive.
 """
 
+import httpx
 import pytest
+import respx
 
 from wera_agent.sources import extract
 
@@ -152,3 +154,133 @@ class TestTheLadderOrder:
         card, how = extract.card("https://board.example/jobs/1", parse=lambda t: asked.append(t) or None)
         assert card is None and how == "unreadable"
         assert asked == []
+
+
+class TestAPageThatIsntAJob:
+    """Seen in Logfire on a live harvest: an advert slot ("featured graduate employer") reached the
+    model, which rightly found no title — that failed the schema twice and then fell through to a
+    paid Firecrawl scrape of the same non-job. "Not a job" is an answer now, and it ends the ladder."""
+
+    PAGE = "<html><body>" + ("Featured employer. Advertise with us. " * 20) + "</body></html>"
+
+    def test_the_model_can_say_so_without_failing_the_schema(self):
+        from wera_agent.schemas.llm_outputs import NormalisedJob
+
+        base = {"location": {"raw": "London"}, "remote": None, "language": "en"}
+        assert not NormalisedJob.model_validate({**base, "isJobPosting": False, "title": None, "company": None}).is_job_posting
+        with pytest.raises(Exception, match="isJobPosting"):
+            NormalisedJob.model_validate({**base, "isJobPosting": True, "title": None, "company": "Acme"})
+
+    def test_the_ladder_stops_with_its_own_verdict(self, monkeypatch):
+        monkeypatch.setattr(extract, "_get", lambda _url: self.PAGE)
+        card, how = extract.card("https://board.example/job/ad/1", parse=lambda _t: {extract.NOT_A_JOB: True})
+        assert card is None and how == "not-a-job"
+
+    def test_nothing_is_paid_for_it_and_it_is_remembered(self, monkeypatch):
+        from wera_agent.sources import firecrawl_search
+
+        monkeypatch.setattr(extract, "_get", lambda _url: self.PAGE)
+        monkeypatch.setattr(firecrawl_search, "_client", lambda: pytest.fail("Firecrawl was asked about a page already read"))
+        remembered: list = []
+
+        class Cache:
+            def card(self, *_a):
+                return False, None  # nothing cached yet
+
+            def put_card(self, url, _schema, card):
+                remembered.append((url, card))
+
+        outcome = firecrawl_search.SearchOutcome()
+        card = firecrawl_search.scrape_card(
+            "https://board.example/job/ad/1",
+            firecrawl_search.CARD_SCHEMA,
+            outcome,
+            firecrawl_search.SearchCaps(),
+            cache=Cache(),
+            parse=lambda _t: {extract.NOT_A_JOB: True},
+        )
+        assert card is None
+        assert (outcome.credits_used, outcome.fallback_pages) == (0, 0)
+        assert remembered == [("https://board.example/job/ad/1", None)]
+
+
+class TestAPageOfJobs:
+    """SRCH-21. A results page with several `JobPosting`s came back as its first job, saved with
+    the results page as its link. Several postings now means a listing, and the ladder stops."""
+
+    LISTING = """<html><head>
+<script type="application/ld+json">[
+ {"@type":"JobPosting","title":"Graduate Software Engineer","hiringOrganization":{"name":"Accenture"}},
+ {"@type":"JobPosting","title":"Systems Engineer","hiringOrganization":{"name":"BAE Systems"}}
+]</script></head><body></body></html>"""
+
+    def test_several_postings_is_a_listing(self, monkeypatch):
+        monkeypatch.setattr(extract, "_get", lambda _url: self.LISTING)
+        model = []
+        card, how = extract.card("https://www.gradcracker.com/hub/1/x/graduate-job/12345", parse=model.append)
+        assert (card, how) == (None, "listing")
+        assert model == []  # nothing asked the model to pick one
+
+    def test_the_same_posting_twice_is_still_one_job(self, monkeypatch):
+        twice = JSON_LD.replace("</script>", "</script>" + JSON_LD.split("<head>")[1].split("</head>")[0])
+        monkeypatch.setattr(extract, "_get", lambda _url: twice)
+        card, how = extract.card("https://board.example/job/x/1234567")
+        assert how == "json-ld" and card["company"] == "Fernhill AI"
+
+    def test_a_listing_found_after_rendering_too(self, monkeypatch):
+        monkeypatch.setattr(extract, "_get", lambda _url: "<html><body>a React shell</body></html>")
+        card, how = extract.card("https://board.example/job/x/1234567", fetch_html=lambda _url: self.LISTING)
+        assert (card, how) == (None, "listing")
+
+
+class TestAClosedPage:
+    def test_a_not_found_title(self, monkeypatch):
+        page = (
+            "<html><head><title>Job Posting Not Found</title></head><body>" + "Browse our other roles. " * 30 + "</body></html>"
+        )
+        monkeypatch.setattr(extract, "_get", lambda _url: page)
+        assert extract.card("https://board.example/job/x/1234567", parse=lambda _t: pytest.fail("model asked")) == (
+            None,
+            "closed",
+        )
+
+    def test_a_closure_banner(self, monkeypatch):
+        page = "<html><body><p>This vacancy has expired.</p>" + "<p>Role details follow.</p>" * 30 + "</body></html>"
+        monkeypatch.setattr(extract, "_get", lambda _url: page)
+        assert extract.card("https://board.example/job/x/1234567") == (None, "closed")
+
+    def test_neither_is_paid_for(self, monkeypatch):
+        from wera_agent.sources import firecrawl_search
+
+        page = "<html><head><title>Not Found</title></head><body></body></html>"
+        monkeypatch.setattr(extract, "_get", lambda _url: page)
+        monkeypatch.setattr(firecrawl_search, "_client", lambda: pytest.fail("Firecrawl was asked about a closed page"))
+        outcome = firecrawl_search.SearchOutcome()
+        card = firecrawl_search.scrape_card(
+            "https://board.example/job/x/1234567", firecrawl_search.CARD_SCHEMA, outcome, firecrawl_search.SearchCaps()
+        )
+        assert card is None and outcome.credits_used == 0
+
+
+class TestAPostingThatRedirectsAway:
+    """SRCH-23: a board that took a posting down often keeps the address and redirects to its
+    search page. That redirect is the closure, and nothing is paid to read the search page."""
+
+    @respx.mock
+    def test_a_redirect_to_a_results_page_is_closed(self, outbound):
+        respx.get("https://builtinlondon.uk/job/backend-engineer/12000001").mock(
+            return_value=httpx.Response(302, headers={"location": "https://builtinlondon.uk/jobs?search=backend"})
+        )
+        respx.get("https://builtinlondon.uk/jobs?search=backend").mock(return_value=httpx.Response(200, text="<html>jobs</html>"))
+        assert extract.card("https://builtinlondon.uk/job/backend-engineer/12000001") == (None, "closed")
+
+    @respx.mock
+    def test_a_posting_that_moved_to_another_posting_address_is_still_read(self, outbound):
+        respx.get("https://builtinlondon.uk/job/backend-engineer/12000001").mock(
+            return_value=httpx.Response(301, headers={"location": "https://builtinlondon.uk/job/backend-engineer-ii/12000001"})
+        )
+        respx.get("https://builtinlondon.uk/job/backend-engineer-ii/12000001").mock(
+            return_value=httpx.Response(200, text=JSON_LD)
+        )
+        card, how = extract.card("https://builtinlondon.uk/job/backend-engineer/12000001")
+        assert how == "json-ld" and card["title"] == "Graduate Software Engineer"

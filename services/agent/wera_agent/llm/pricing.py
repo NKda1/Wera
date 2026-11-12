@@ -21,11 +21,23 @@ def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens * price.input + output_tokens * price.output) / 1_000_000
 
 
+# Model calls this session has made but not yet written: `gateway._record` keeps them here and a
+# `before_commit` hook writes them, so a model call never takes SQLite's one write lock and then
+# holds it through the next call (see `gateway._write_pending_calls`). Anything that counts calls
+# inside an open unit of work has to count these too.
+PENDING = "wera.llm_calls"
+
+
+def pending_calls(session: Session) -> list[dict]:
+    return session.info.get(PENDING, [])
+
+
 def spent_this_week_usd(session: Session, now: int) -> float:
-    """Spend over the last seven days, from the rows the gateway writes."""
+    """Spend over the last seven days, from the rows the gateway writes — committed or pending."""
     since = iso(now - WEEK_MS)
     total = session.scalar(select(func.sum(LlmCallRow.cost_usd)).where(LlmCallRow.called_at >= since))
-    return round(float(total or 0), 6)
+    pending = sum(r["cost_usd"] for r in pending_calls(session) if r["called_at"] >= since)
+    return round(float(total or 0) + pending, 6)
 
 
 class Budget:

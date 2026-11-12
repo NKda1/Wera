@@ -13,7 +13,16 @@ COMMON_TECH = ["Docker", "Kubernetes", "AWS", "GCP", "Azure", "Rust", "Java", "R
 NUMBER = re.compile(r"\d+(?:[.,]\d+)?\s?%?")
 
 
-def check_cited(items: list[tuple[str, Cited]], cv: MasterCV, job_keywords: list[str] | None = None) -> GuardResult:
+def check_cited(
+    items: list[tuple[str, Cited]],
+    cv: MasterCV,
+    job_keywords: list[str] | None = None,
+    *,
+    unsourced_ok: frozenset[str] | set[str] = frozenset(),
+) -> GuardResult:
+    """`unsourced_ok` names lines allowed to cite nothing — a letter's closing courtesy, which
+    asks for a conversation and claims nothing. They are still checked: any number in one fails,
+    and any skill it names has to be in the CV's own facts, because there are no lines to carry it."""
     lines = cv_line_index(cv)
     backing = backing_text(cv)
     vocabulary = [*[t for s in cv.skills for t in [s.name, *(s.aliases or [])]], *(job_keywords or []), *COMMON_TECH]
@@ -22,7 +31,7 @@ def check_cited(items: list[tuple[str, Cited]], cv: MasterCV, job_keywords: list
     for location, item in items:
         if item.edited_by_user:
             continue  # G2-02: the user is the authority on their own edits
-        if not item.source_ids:
+        if not item.source_ids and location not in unsourced_ok:
             violations.append(Violation(location=location, rule="sources", detail="No master-CV source cited"))
             continue
         missing = [i for i in item.source_ids if i not in lines]

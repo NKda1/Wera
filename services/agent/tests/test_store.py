@@ -120,10 +120,10 @@ class TestIntake:
         assert board["creditsUsed"] > 0 and board["creditsSaved"] == 0
 
     def test_estimate_and_cancel(self, api):
-        # SRCH-11: the grid is title × board, so the demo profile's 4 titles across its 4
-        # enabled boards is 16 — and the dialog counts it with the same function the run uses
-        # (COST-05), rather than re-deriving it from titles × locations and drifting.
-        assert api.ok("GET", "/intake/estimate?channels=board_search")["queries"] == 16
+        # SRCH-20: the Serper searches a search always sends — tier 1 of the plan — counted from
+        # the same planned queries the run sends, and never more than `max_serper_queries`. The
+        # demo profile's five cities in five countries make tier 1 thirty-three, so the cap shows.
+        assert api.ok("GET", "/intake/estimate?channels=board_search")["queries"] == 30
         run = api.ok("POST", "/intake/run", {"channels": ["watchlist"]})["runIds"][0]
         assert api.ok("POST", f"/intake/runs/{run}/cancel")["status"] == "cancelled"
 

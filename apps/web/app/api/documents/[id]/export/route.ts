@@ -1,6 +1,7 @@
 import { agent } from "@/lib/server/agent";
 import { parseDocId, parseFormat, renderExport } from "@/lib/server/export";
 import { ApiError, type IdContext } from "@/lib/server/http";
+import { warn } from "@/lib/server/telemetry";
 
 /**
  * EXP-01/02: rendering happens here, on the server, and contact details are inserted at
@@ -17,8 +18,10 @@ export async function GET(req: Request, { params }: IdContext) {
 
     const failed = out.checks.filter((c) => !c.pass);
     if (failed.length) {
-      // The person still gets their file; the format lint is advice, not a gate.
+      // The person still gets their file; the format lint is advice, not a gate. In Logfire too,
+      // so a template change that breaks extraction shows up before someone sends a bad PDF.
       console.warn(`[export] ${out.fileName}: ${failed.map((c) => `${c.id} — ${c.message}`).join("; ")}`);
+      warn("Exported {kind} failed the format lint: {checks}", { kind, format, checks: failed.map((c) => c.id).join(",") });
     }
 
     return new Response(out.bytes as unknown as BodyInit, {

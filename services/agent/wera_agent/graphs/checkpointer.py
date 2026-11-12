@@ -52,7 +52,7 @@ async def checkpointer() -> AsyncIterator[BaseCheckpointSaver]:
             yield saver
         return
 
-    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # needs the `postgres` extra
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
     async with AsyncPostgresSaver.from_conn_string(target) as saver:
         await saver.setup()

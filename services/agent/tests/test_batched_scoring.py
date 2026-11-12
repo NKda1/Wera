@@ -1,9 +1,9 @@
-"""MATCH-05: scoring is handed out in batches, best first.
+"""MATCH-05 and SRCH-26: scoring is handed out a search's worth at a time, best first.
 
 A job takes about eleven seconds, so the forty a run used to work through was seven minutes
 during which the shortlist showed nothing new — the broad search finished in the first quarter of
-that and then sat unreadable. A run now scores two batches of eight and leaves the rest in the
-pool, where it is listed and waiting for "score more".
+that and then sat unreadable. A run now scores up to `surface.max` (12) and leaves the rest in the
+pool, where it is listed and waiting for "Find more".
 
 What these cover is the arithmetic, because that is where it can go quietly wrong: the batch
 boundary, the ordering across batches, and the day's cap — which only became load-bearing when
@@ -20,6 +20,7 @@ from wera_agent.db.session import transaction
 from wera_agent.graphs import intake
 from wera_agent.schemas.jobs import Job, JobSource, Location
 from wera_agent.services.store import Store
+from wera_agent.sources.harvest import BATCH
 
 NOW = now_ms()
 
@@ -171,11 +172,11 @@ class TestScoreMore:
             ids = Store(session, NOW).start_score_more()
         intake.rescore(ids.run_ids[0], "score_more")
 
-        assert awaiting() == before - wera().scoring_batch_size
+        assert awaiting() == before - wera().surface.max
 
-    def test_one_batch_per_click_not_two(self, client, pool):
-        """A run scores two batches because the second makes "more" feel instant. A click is
-        someone already waiting, so it scores one and returns."""
+    def test_find_more_brings_one_search_worth_and_stops(self, client, pool):
+        """SRCH-26: the backlog first, and no more than a search's 8–12 — and with that many
+        waiting, nothing is searched for at all."""
         pool(30)
         with transaction() as session:
             ids = Store(session, NOW).start_score_more()
@@ -183,7 +184,10 @@ class TestScoreMore:
         before = awaiting()
         intake.rescore(ids.run_ids[0], "score_more")
 
-        assert before - awaiting() == wera().scoring_batch_size
+        assert before - awaiting() == wera().surface.max
+        with transaction() as session:
+            row = session.get(IntakeRunRow, ids.run_ids[0])
+            assert (row.status, row.queries, row.total) == ("succeeded", 0, wera().surface.max)
 
     def test_it_refuses_when_there_is_nothing_waiting(self, client):
         from wera_agent.errors import ApiError
@@ -233,12 +237,12 @@ class TestTheScreenKnowsWhereABatchEnds:
         with transaction() as session:
             ids = Store(session, NOW).start_score_more()
         with transaction() as session:
-            assert Store(session, NOW).get_run(ids.run_ids[0]).batch_size == wera().scoring_batch_size
+            assert Store(session, NOW).get_run(ids.run_ids[0]).batch_size == BATCH
 
-    def test_the_meta_carries_it_too_for_when_no_run_is_in_flight(self, client, pool):
+    def test_the_meta_says_how_many_find_more_brings(self, client, pool):
         pool(30)
         with transaction() as session:
-            assert Store(session, NOW).shortlist_meta().scoring_batch_size == wera().scoring_batch_size
+            assert Store(session, NOW).shortlist_meta().find_more_size == wera().surface.max
 
 
 def test_scoring_calls_are_what_the_cap_counts(client, pool):
@@ -252,3 +256,15 @@ def test_scoring_calls_are_what_the_cap_counts(client, pool):
     with transaction() as session:
         rows = session.scalars(select(LlmCallRow).where(LlmCallRow.task == "fit.score")).all()
     assert len(rows) == judged.scored
+
+
+class TestTheSearchScoresOnlyWhatItRead:
+    def test_only_these_leaves_the_backlog_alone(self, client, pool):
+        """SRCH-20, stage 4. A round of the search pipeline scores the postings it just read, in
+        discovery's order — never the best few of a backlog of hundreds instead."""
+        pool(30)
+        before = awaiting()
+        fresh = [job(100), job(101)]
+        judged = intake.judge(fresh, now=NOW, run_ids={}, only_these=True, limit=12)
+        assert judged.surfaced == 2 and judged.new_ids == {"job-batch-100", "job-batch-101"}
+        assert awaiting() == before  # the 30 waiting are still waiting

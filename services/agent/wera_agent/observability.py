@@ -62,6 +62,11 @@ def configure(app: FastAPI | None = None) -> None:
             # stays readable. Without this a drafting failure was visible only in Logfire, which
             # is no help to someone running WERA with no token.
             console=logfire.ConsoleOptions(min_log_level="warn", span_style="simple"),
+            # Every message here uses `{placeholders}` with keyword arguments, never an f-string,
+            # so there is nothing for Logfire to recover by inspecting the call site — and the
+            # inspection itself failed on calls inside the gateway's retry loop, printing
+            # "Failed to introspect calling code" beside every warning that mattered.
+            inspect_arguments=False,
         )
         _configured = True
         if s.logfire_enabled:

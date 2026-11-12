@@ -1,14 +1,19 @@
 """config/*.yaml, loaded into Pydantic models (SPEC §9.2)."""
 
+import re
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from .http import is_denied
 from .paths import CONFIG_DIR
+
+if TYPE_CHECKING:
+    from .schemas.profile import SearchProfile
 
 # `select` is the fourth tier, for structured selection: a task that chooses between things the
 # CV already says, and returns ids rather than prose. Split out from `writing` because the two
@@ -60,6 +65,43 @@ class Site(BaseModel):
     # `careers.google.com` is the first of these: one employer with its own listing pages, read
     # through `sources.extract` on the free watchlist channel.
     direct: bool = False
+    # ISO 639-1 codes for the languages the board's postings are written in. What the Strategist
+    # localises search terms for (`nodes.strategist`): asking a German board for "Software
+    # Engineer" finds the English-language minority of its postings and misses the rest. Empty
+    # means "not recorded", which is searched in the profile's own titles, as before.
+    languages: list[str] = []
+    # The fields of work a board specialises in ("software", "law", "accounting", "graduate").
+    # Empty is a general board. Lets the Strategist rank a legal board above a graduate board for
+    # a trainee solicitor, from facts in this file rather than from what a model remembers.
+    sectors: list[str] = []
+    # SRCH-21: the path of one posting on this board, as a regular expression — what
+    # `sources.postings.classify` calls a posting here, so a results page, a category or a company
+    # profile is never read as a job. Taken from real URLs in the database, not guessed. Empty
+    # leaves the board to the generic rule, which wants an id in the path.
+    posting_pattern: str | None = None
+
+    @field_validator("posting_pattern")
+    @classmethod
+    def _posting_pattern(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        try:
+            re.compile(v)
+        except re.error as exc:
+            raise ValueError(f"posting_pattern isn't a regular expression WERA can read ({exc})") from None
+        return v
+
+    @property
+    def posting_segment(self) -> str | None:
+        """The first path segment every posting on this board sits under ("job", "hub",
+        "graduate-jobs"), read off `posting_pattern`. None when the pattern doesn't start with one.
+
+        What lets a `site:` search ask for postings only (`inurl:`): Google's index of a board is
+        mostly its own search and category pages, which can't be read as jobs."""
+        if not self.posting_pattern:
+            return None
+        found = re.match(r"\^?/([A-Za-z0-9_-]+)(?:/|$)", self.posting_pattern)
+        return found.group(1) if found else None
 
     @property
     def reviewed(self) -> bool:
@@ -82,6 +124,26 @@ class Site(BaseModel):
             return True
         mine = {c.strip().upper() for c in self.countries}
         return any(c.strip().upper() in mine for c in countries)
+
+
+def usable_sites(profile: "SearchProfile", sites: list[Site]) -> list[Site]:
+    """The boards this search may actually ask (SRCH-03/04/11).
+
+    Four gates, in order of how non-negotiable they are: LinkedIn is never searched whatever
+    anything says; a `direct` board is read by WERA itself and must never be paid for as a search
+    as well; a site's terms must have been reviewed; and the board has to serve somewhere the
+    person is looking. A profile naming no countries passes the last gate for everything, which
+    is what keeps a profile written before SRCH-11 working.
+    """
+    return [
+        s
+        for s in sites
+        if not is_denied(f"https://{s.domain}/")
+        and not s.direct
+        and s.reviewed
+        and s.domain in profile.sites
+        and s.serves(profile.countries)
+    ]
 
 
 class SitesFile(BaseModel):
@@ -175,6 +237,20 @@ class Task(BaseModel):
     reasoning: Effort
 
 
+class SurfaceConfig(BaseModel):
+    """SRCH-26: how many jobs one search puts in front of the person.
+
+    A search stops reading postings once `max` are scored, and if fewer than `min` are, it goes on
+    to the Strategist's next tier of queries until it reaches `min` or a cap. What it found and
+    didn't read waits in the queue for "Find more". Small on purpose: a shortlist someone reads
+    end to end beats forty jobs they skim, and every job past the twelfth is a read and a score
+    paid for before anyone wanted it.
+    """
+
+    min: int = 8
+    max: int = 12
+
+
 class CrawlCacheConfig(BaseModel):
     """SRCH-10: how long WERA may answer a crawl from what the last run already paid for.
 
@@ -234,17 +310,22 @@ class WeraConfig(BaseModel):
     max_queries: int = 20
     max_pages: int = 30
     max_credits_per_run: int = 100
+    # Firecrawl credits over any seven days, every run counted. A run that would cross it stops
+    # paying (`SearchCaps.max_credits`) and ends `partial`; the free paths — the Harvester, the
+    # watchlist, the local scrape rungs — carry on regardless.
+    max_credits_per_week: int = 600
     discovery_max_queries: int = 8
+    # SRCH-20: the most Serper queries one search may send, across every tier the 8–12 rule asks for.
+    max_serper_queries: int = 30
     max_scored_per_day: int = 40
-    # MATCH-05's batching. `max_scored_per_day` is still the day's ceiling; these decide how much
-    # of it one run spends before stopping and leaving the rest in the pool.
-    scoring_batch_size: int = 8
-    scoring_batches_per_run: int = 2
+    # SRCH-26: 8–12 jobs a search. Replaces MATCH-05's two batches of eight, which scored sixteen
+    # whether anyone wanted them or not; `max_scored_per_day` is still the day's ceiling.
+    surface: SurfaceConfig = SurfaceConfig()
 
     @property
     def scored_per_run(self) -> int:
-        """How many jobs one run scores — never more than the day allows."""
-        return min(self.scoring_batch_size * self.scoring_batches_per_run, self.max_scored_per_day)
+        """How many jobs one run scores — the surface's ceiling, never more than the day allows."""
+        return min(self.surface.max, self.max_scored_per_day)
 
     # LTR-04. Empty disables the check, which is why it's a config list rather than a constant:
     # the phrases that read as filler are a matter of taste and of language.
@@ -264,6 +345,10 @@ class WeraConfig(BaseModel):
     # cause it should be one a reader can find and switch off rather than a behaviour buried in
     # a save path.
     reset_on_cv_upload: bool = False
+    # SRCH-27: whether Settings offers "Clear jobs", which deletes every job, application and pack
+    # on demand (`Store.clear_jobs`). Off unless the config turns it on. **A testing control,
+    # like `reset_on_cv_upload`, and it must be off before accounts exist.**
+    allow_clear_jobs: bool = False
     # How much of a job posting the prompts that *write* may see. The ad's first part is the job;
     # the rest is benefits, boilerplate and legal. `prefilter.job_text` has always capped at
     # 2,000 characters, while `cv.tailor`, `letter.write` and `answers.draft` sent the whole
@@ -451,6 +536,16 @@ def write_sites(data: SitesFile) -> Path:
             entry["robots_ok"] = s.robots_ok
         if s.examples:
             entry["examples"] = s.examples
+        # `direct` was never written, so any rewrite of this file quietly turned a board WERA
+        # reads for free back into one it would pay to search the moment it was approved.
+        if s.direct:
+            entry["direct"] = True
+        if s.languages:
+            entry["languages"] = [lang.strip().lower() for lang in s.languages]
+        if s.sectors:
+            entry["sectors"] = s.sectors
+        if s.posting_pattern:
+            entry["posting_pattern"] = s.posting_pattern
         entries.append(entry)
 
     body = {"max_sites": data.max_sites, "discover_every_days": data.discover_every_days, "sites": entries}

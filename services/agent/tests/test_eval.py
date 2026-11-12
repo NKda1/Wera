@@ -96,6 +96,12 @@ class TestKeywordRecall:
         assert evaluate.keyword_hit("REST APIs", ["REST API"])
         assert evaluate.keyword_hit("FastAPI", ["fastapi"])
 
+    def test_the_posts_own_spelling_counts_as_found(self):
+        """`keywords.extract` writes the token the post uses. "Postgres" for an expected
+        "PostgreSQL" is the extractor doing what it was told, so recall must not punish it."""
+        assert evaluate.keyword_hit("PostgreSQL", ["Postgres"])
+        assert evaluate.keyword_hit("Version control", ["Git"])
+
     def test_a_different_requirement_is_not_a_match(self):
         assert not evaluate.keyword_hit("SQL", ["PostgreSQL"])
         assert not evaluate.keyword_hit("Python", ["TypeScript"])
@@ -135,6 +141,19 @@ class TestVerdict:
         assert r.passes
         r.rows.append(row(8.0, None, error="LLM_BAD_OUTPUT"))
         assert not r.passes
+
+    def test_a_live_run_that_misses_the_keywords_fails(self):
+        """Coverage divides by the extracted list, so low recall flatters every ATS score. It was
+        reported and never held to anything."""
+        r = report([row(8.0, 8.0, keyword_recall=0.5)])
+        assert r.agreement == 100.0
+        assert not r.passes
+        r.rows[0].keyword_recall = evaluate.PASS_RECALL
+        assert r.passes
+
+    def test_demo_recall_is_not_judged(self):
+        """Demo extraction starts from the CV's skills, so its recall measures the fixture."""
+        assert report([row(8.0, 8.0, keyword_recall=0.1)], demo_mode=True).passes
 
 
 class TestTheGoldenSetItself:
@@ -312,12 +331,23 @@ class TestThePackEval:
         """No tolerance, unlike the ±1.5 on agreement: a pack that failed is one the person
         cannot send, so 'most of them worked' is not a passing grade."""
         rows = [
-            evaluate.PackRow(id="a", title="t", company="c", bullets=5),
+            evaluate.PackRow(id="a", title="t", company="c", bullets=5, backed_coverage=1.0),
             evaluate.PackRow(id="b", title="t", company="c", bullets=0),
         ]
         report = evaluate.PackReport(model="m", cv_version=1, cv_source="x", ran_at="now", rows=rows)
         assert report.success_rate == 50.0
         assert not report.passed
+
+    def test_packs_that_miss_what_the_cv_can_back_fail(self):
+        """Coverage was recorded and never judged: a run at 48% passed exactly as one at 92% did.
+        Backed coverage is the share WERA is accountable for, so that is what is held to ATSC-03."""
+
+        def packs(backed: float) -> evaluate.PackReport:
+            rows = [evaluate.PackRow(id="a", title="t", company="c", bullets=5, backed_coverage=backed)]
+            return evaluate.PackReport(model="m", cv_version=1, cv_source="x", ran_at="now", rows=rows)
+
+        assert not packs(0.5).passed
+        assert packs(0.9).passed
 
     def test_the_report_names_what_went_wrong(self):
         rows = [evaluate.PackRow(id="a", title="t", company="c", error="LLM_BAD_OUTPUT")]

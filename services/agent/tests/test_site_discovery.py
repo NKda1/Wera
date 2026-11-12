@@ -195,7 +195,7 @@ class TestDiscoverProposesButNeverEnables:
         """The gate end to end: it is in the file, and `usable_sites` still won't ask it."""
         merged, _ = sd.discover(profile(), self.one_board(fake), today=TODAY)
         enabled = profile(sites=[s.domain for s in merged.sites])  # even if the profile lists it
-        assert "niche.example" not in board.enabled_domains(enabled, merged.sites)
+        assert "niche.example" not in {s.domain for s in board.usable_sites(enabled, merged.sites)}
 
     def test_a_proposal_claims_no_country(self, fake):
         """Tagging it from the profile's countries would look better-evidenced than it is: one

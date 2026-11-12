@@ -189,6 +189,22 @@
       "title": "RunIn",
       "type": "object"
     },
+    "SearchSchedulePatch": {
+      "properties": {
+        "cron": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled",
+        "cron"
+      ],
+      "title": "SearchSchedulePatch",
+      "type": "object"
+    },
     "SettingsPatch": {
       "description": "Non-secret settings a person can change. Keys are set in the environment only (SET-07).",
       "properties": {
@@ -210,6 +226,9 @@
         },
         "redactContact": {
           "type": "boolean"
+        },
+        "searchSchedule": {
+          "$ref": "#/$defs/SearchSchedulePatch"
         },
         "weeklyBudgetUsd": {
           "type": "number"

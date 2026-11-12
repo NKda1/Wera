@@ -97,6 +97,76 @@ class TestWordsThatAreAlsoOrdinaryEnglish:
         assert text_has_term("Built it in Golang", "Go")
 
 
+class TestOrdinaryWordsAreNotSkills:
+    """Each of these matched before, and each inflated coverage and let the guard's terms rule
+    pass a line it should have caught. WERA reads CVs from every trade, so a word that is a skill
+    in software is often just a word in someone else's."""
+
+    def test_the_rest_of_something_is_not_rest(self):
+        assert not text_has_term("Handled the rest of the migration", "REST APIs")
+        assert not text_has_term("Rest of the team was remote", "REST APIs")
+
+    def test_rest_written_as_the_architecture_still_counts(self):
+        assert text_has_term("Designed REST endpoints for billing", "REST APIs")
+        assert text_has_term("Built a RESTful service", "REST APIs")
+
+    def test_shipping_containers_are_not_docker(self):
+        assert not text_has_term("Moved shipping containers through the port", "Docker")
+
+    def test_blood_tests_are_not_testing(self):
+        assert not text_has_term("Ran blood tests on the ward", "Testing")
+
+    def test_a_post_that_literally_asks_for_the_word_still_matches_it(self):
+        """The word only stops counting as a *synonym*. A post asking for "tests" is answered by
+        a CV saying "tests", however that CV meant it."""
+        assert text_has_term("Wrote tests for the parser", "tests")
+
+    def test_said_in_jest_is_not_jest(self):
+        assert not text_has_term("Said in jest at the offsite", "Testing")
+        assert text_has_term("Covered the UI with Jest", "Testing")
+
+    def test_rag_needs_its_capitals(self):
+        assert not text_has_term("Wrote for the student rag", "RAG")
+        assert text_has_term("Shipped a RAG pipeline", "RAG")
+
+
+class TestKeywordsMustBeInThePost:
+    """`in_post` is what makes coverage a measurement of *this* post. A keyword it didn't ask
+    for becomes a gap the applicant is told to go and fill."""
+
+    def test_a_term_the_post_never_mentions_is_dropped(self):
+        from wera_agent.domain.vocab import in_post
+        from wera_agent.schemas.jobs import JobKeyword
+
+        post = "Integrate third-party APIs (Stripe, email, model providers). TypeScript and React."
+        kept = in_post([JobKeyword(term="TypeScript", weight="required"), JobKeyword(term="REST APIs", weight="required")], post)
+        assert [k.term for k in kept] == ["TypeScript"]
+
+    def test_a_different_spelling_of_what_the_post_says_is_kept(self):
+        from wera_agent.domain.vocab import in_post
+        from wera_agent.schemas.jobs import JobKeyword
+
+        assert in_post([JobKeyword(term="PostgreSQL", weight="nice")], "Postgres in production")
+
+    def test_no_post_means_nothing_to_cover(self):
+        from wera_agent.domain.vocab import in_post
+        from wera_agent.schemas.jobs import JobKeyword
+
+        assert in_post([JobKeyword(term="Python", weight="required")], None) == []
+
+    def test_the_extractor_drops_what_the_post_doesnt_say(self):
+        from wera_agent.schemas.llm_outputs import KeywordList
+
+        raw = {
+            "keywords": [
+                {"term": "Docker", "weight": "required", "category": "tool"},
+                {"term": "Kubernetes", "weight": "nice", "category": "tool"},
+            ]
+        }
+        out = KeywordList.model_validate(raw, context={"post": "Package services with Docker."})
+        assert [k.term for k in out.keywords] == ["Docker"]
+
+
 class TestWholeWordsOnly:
     def test_a_substring_is_not_a_match(self):
         assert not text_has_term("Recovered the archive", "R")

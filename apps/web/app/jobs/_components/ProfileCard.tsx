@@ -344,7 +344,7 @@ function ProfileDialog({ profile, sites, onClose }: { profile: SearchProfile; si
             <Select id="recency" value={draft.recency} onChange={(e) => set("recency", e.target.value as Recency)}>
               <option value="24h">The last 24 hours</option>
               <option value="7d">The last 7 days</option>
-              <option value="30d">The last 30 days</option>
+              <option value="21d">The last 3 weeks</option>
             </Select>
           </div>
         </div>
@@ -433,7 +433,7 @@ function ProfileDialog({ profile, sites, onClose }: { profile: SearchProfile; si
           <legend className="mb-1.5 text-[14px] font-semibold">Channels</legend>
           <Checkbox
             label="Board search"
-            description="Firecrawl search on the boards above"
+            description="Google searches (Serper) across the web and the boards above"
             checked={draft.channels.boardSearch}
             onChange={(e) => set("channels", { ...draft.channels, boardSearch: e.target.checked })}
           />

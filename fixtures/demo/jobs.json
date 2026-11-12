@@ -109,10 +109,6 @@
             "weight": "nice"
           },
           {
-            "term": "Next.js",
-            "weight": "nice"
-          },
-          {
             "term": "Prompting",
             "weight": "nice"
           },
@@ -204,10 +200,6 @@
           },
           {
             "term": "PostgreSQL",
-            "weight": "required"
-          },
-          {
-            "term": "REST APIs",
             "weight": "required"
           },
           {
@@ -414,10 +406,6 @@
           {
             "term": "CI/CD",
             "weight": "nice"
-          },
-          {
-            "term": "Stripe",
-            "weight": "nice"
           }
         ],
         "model": "qwen/qwen3.8-27b"
@@ -548,14 +536,6 @@
           {
             "term": "SQL",
             "weight": "required"
-          },
-          {
-            "term": "Pandas",
-            "weight": "nice"
-          },
-          {
-            "term": "Airflow",
-            "weight": "nice"
           }
         ],
         "model": "qwen/qwen3.8-27b"
@@ -644,14 +624,6 @@
           {
             "term": "Model evaluation",
             "weight": "required"
-          },
-          {
-            "term": "LangGraph",
-            "weight": "nice"
-          },
-          {
-            "term": "Docker",
-            "weight": "nice"
           }
         ],
         "model": "qwen/qwen3.8-27b"
@@ -734,10 +706,6 @@
           },
           {
             "term": "Python",
-            "weight": "nice"
-          },
-          {
-            "term": "Next.js",
             "weight": "nice"
           }
         ],
@@ -1123,16 +1091,7 @@
         "cvBulletIds": [
           "exp-idsu-01"
         ],
-        "keywords": [
-          {
-            "term": "Python",
-            "weight": "required"
-          },
-          {
-            "term": "LLMs",
-            "weight": "required"
-          }
-        ],
+        "keywords": [],
         "model": "qwen/qwen3.8-27b"
       }
     },
@@ -1177,12 +1136,7 @@
         "reason": "a staff-level role.",
         "jobQuote": "leading the platform team",
         "cvBulletIds": [],
-        "keywords": [
-          {
-            "term": "TypeScript",
-            "weight": "required"
-          }
-        ],
+        "keywords": [],
         "model": "qwen/qwen3.8-27b"
       }
     },
@@ -1229,16 +1183,7 @@
         "cvBulletIds": [
           "exp-idsu-02"
         ],
-        "keywords": [
-          {
-            "term": "Python",
-            "weight": "required"
-          },
-          {
-            "term": "LLMs",
-            "weight": "required"
-          }
-        ],
+        "keywords": [],
         "model": "qwen/qwen3.8-27b"
       }
     }
@@ -1618,10 +1563,6 @@
             },
             {
               "term": "Model evaluation",
-              "weight": "nice"
-            },
-            {
-              "term": "LangGraph",
               "weight": "nice"
             }
           ],

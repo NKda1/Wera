@@ -61,6 +61,21 @@ class JobSource(Model):
     seen_at: str
 
 
+class FoundBy(Model):
+    """SRCH-25: the run that first added a job — written once, when the job is inserted.
+
+    What the Jobs screen's "New" tag and its origin label ("Search 11 Nov") read. It replaces a
+    single list of the last run's job ids, which every run overwrote — so a job lost its "new"
+    mark the moment any other run finished, inbox and watchlist runs included, whether or not
+    anyone had looked at it.
+    """
+
+    # The intake run, when there was one. A pasted job has none.
+    run_id: Opt[str] = None
+    channel: Channel
+    at: str
+
+
 class Job(Model):
     id: str
     dedupe_key: str
@@ -100,6 +115,11 @@ class Job(Model):
     snoozed_until: Opt[str] = None
     hidden_reason: Opt[str] = None
     seniority: Opt[Seniority] = None
+    # SRCH-25. Absent on every job saved before tagging existed, which is right: none of those is
+    # new to the person. A job is new while it has `found_by` and no `seen_at`.
+    found_by: Opt[FoundBy] = None
+    # When the person first opened the job's details or decided on it.
+    seen_at: Opt[str] = None
 
 
 class SubScore(Model):
@@ -108,9 +128,17 @@ class SubScore(Model):
     cv_bullet_ids: list[str]
 
 
+# The checkable kinds of keyword — the ones a CV can name and coverage divides by. Soft skills
+# and culture are a fourth kind in the post, kept in `FitEvidence.culture` instead, so that no
+# reader of `keywords` (coverage, the skills line, the citation guard) can count them by mistake.
+type KeywordCategory = Literal["hard_skill", "methodology", "tool"]
+
+
 class JobKeyword(Model):
     term: str
     weight: Literal["required", "nice"]
+    # Absent on keywords extracted before categories existed; they are still matched and counted.
+    category: Opt[KeywordCategory] = None
 
 
 class FitEvidence(Model):
@@ -124,6 +152,10 @@ class FitEvidence(Model):
     job_quote: str
     cv_bullet_ids: list[str]
     keywords: list[JobKeyword]
+    # Soft skills and culture the post names, in its own words ("cross-functional", "ownership").
+    # Display and letter context only — never a keyword. They were once in the coverage
+    # denominator, twelve of fifteen terms, and coverage read 7%.
+    culture: list[str] = []
     model: str
 
 

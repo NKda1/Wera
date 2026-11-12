@@ -12,6 +12,7 @@ from .api import (
     ImportTextIn,
     ImportUrlIn,
     JobList,
+    JobsCleared,
     NavCounts,
     ProfileProposalResult,
     RegenerateIn,
@@ -23,11 +24,13 @@ from .api import (
 )
 from .applications import Application, ApplicationListItem, ApplicationWithJob
 from .cv import Contact, CvLine, MasterCV
+from .cv_profile import CvProfile
 from .jobs import FitEvidence, FitReport, FitWeights, Job, ScoredJob
-from .pack import AnswerItem, AtsReport, CoverLetter, Pack, TailoredCV
+from .pack import AnswerItem, AtsReport, CoverLetter, JobAnalysis, Pack, TailoredCV
 from .profile import SearchProfile
 from .runs import ChannelSummary, Estimate, IntakeRun, RunIds
 from .settings import Settings, SettingsPatch, SettingsResponse
+from .strategy import TargetMatrix
 
 # Responses describe what the web app receives; request bodies what it sends.
 RESPONSES = [
@@ -35,6 +38,8 @@ RESPONSES = [
     Contact,
     CvLine,
     CvVersion,
+    CvProfile,
+    TargetMatrix,
     SearchProfile,
     ProfileProposalResult,
     Job,
@@ -46,6 +51,7 @@ RESPONSES = [
     CoverLetter,
     AtsReport,
     AnswerItem,
+    JobAnalysis,
     Pack,
     Application,
     ApplicationWithJob,
@@ -62,6 +68,7 @@ RESPONSES = [
     JobList,
     ApplicationList,
     TestResult,
+    JobsCleared,
     ApiErrorBody,
 ]
 REQUESTS = [

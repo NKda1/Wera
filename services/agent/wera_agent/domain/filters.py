@@ -200,7 +200,10 @@ def wrong_location(job: Job, profile: SearchProfile) -> str | None:
     place = " ".join(filter(None, [job.location.city, job.location.country, job.location.raw])).lower()
     if not place.strip():
         return None
-    cities = [w.lower().strip() for w in profile.locations if w.strip()]
+    # The city part of each location: "London, UK" is London. Matching the whole string hid every
+    # posting that wrote the country another way — "London, England, GBR" doesn't contain
+    # "london, uk" — and found live, it had hidden twelve London jobs out of one search's thirty.
+    cities = [c for c in (w.split(",")[0].strip().lower() for w in profile.locations) if c]
     if any(c in place for c in cities):
         return None
     # SRCH-11: with no cities named, the countries are what "where" means, so a job is judged on
@@ -272,7 +275,7 @@ def too_old(job: Job, profile: SearchProfile, now: int) -> str | None:
 
 
 DAY_MS = 24 * 60 * 60 * 1000
-RECENCY_MS = {"24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_MS}
+RECENCY_MS = {"24h": DAY_MS, "7d": 7 * DAY_MS, "21d": 21 * DAY_MS}
 
 
 def hidden_reason(job: Job, profile: SearchProfile, now: int | None = None) -> str | None:

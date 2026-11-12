@@ -25,6 +25,8 @@ const NAMES: Record<IntakeChannel, string> = {
 const PHASE_LABELS: Record<RunPhase, string> = {
   queued: "Starting",
   discovering: "Finding boards",
+  planning: "Planning searches",
+  harvesting: "Reading postings",
   searching: "Searching",
   scraping: "Reading pages",
   feeds: "Checking feeds",
@@ -41,6 +43,7 @@ const PHASE_LABELS: Record<RunPhase, string> = {
  *  "queries" is what left the old panel reading "22 / 22 queries" through the scrape loop. */
 const PHASE_UNITS: Partial<Record<RunPhase, string>> = {
   searching: "queries",
+  harvesting: "jobs",
   scraping: "pages",
   feeds: "employers",
   scoring: "jobs",
@@ -49,11 +52,12 @@ const PHASE_UNITS: Partial<Record<RunPhase, string>> = {
 /** Which stages each kind of run actually passes through, in order. `discovering` is added by
  *  `stepsFor` only while it is happening, because it is weekly and most runs skip it. */
 const STEPS: Record<IntakeChannel, RunPhase[]> = {
-  board_search: ["searching", "scraping", "collapsing", "filtering", "scoring", "closing"],
+  // SRCH-20: plan, search, read, score — and read and score again until 8–12 are found.
+  board_search: ["planning", "searching", "harvesting", "scoring", "closing"],
   email_alert: ["reading", "collapsing", "filtering", "scoring", "closing"],
   watchlist: ["feeds", "collapsing", "filtering", "scoring", "closing"],
   rescore: ["scoring"],
-  score_more: ["scoring"],
+  score_more: ["scoring", "planning", "searching", "harvesting"],
 };
 
 /** PRF-05: show what a search will cost before it runs. */
@@ -119,7 +123,7 @@ export function SearchDialog({
           onChange={(e) => toggle("board_search", e.target.checked)}
           description={
             enabled.board_search
-              ? `${est?.queries ?? "…"} queries (${profile.titles.length} titles × ${profile.locations.length} locations) · up to ${est?.credits ?? "…"} Firecrawl credits`
+              ? `${est?.queries ?? "…"} Google searches to start · 8–12 jobs · up to ${est?.credits ?? "…"} Firecrawl credits for postings no free reader can open`
               : "Off in your search profile"
           }
         />
@@ -298,7 +302,7 @@ function runStatus(r: IntakeRun): string {
   // Neither of these *finds* anything, by design: they judge jobs WERA already has. "nothing
   // new" — true of every one of them ever — would read as a run that failed.
   if (r.channel === "rescore") return r.total ? `Done · ${r.total} re-scored` : "Done";
-  if (r.channel === "score_more") return r.total ? `Done · ${r.total} scored` : "Done";
+  if (r.channel === "score_more") return r.total ? `Done · ${r.total} found${queuedText(r)}` : `Done${queuedText(r)}`;
   const found = r.newJobs ? `${r.newJobs} new ${r.newJobs === 1 ? "job" : "jobs"}` : "nothing new";
   if (r.channel === "board_search") {
     // SRCH-10: what the crawl cache answered for free. Shown rather than netted off, because
@@ -309,9 +313,14 @@ function runStatus(r: IntakeRun): string {
     // is working; a rising `fallbackPages` is a board that has changed shape, and seeing it here
     // is cheaper than seeing it on the invoice.
     const pages = pagesRead(r);
-    return `Done · ${found} · ${r.creditsUsed} credits${saved}${pages}`;
+    return `Done · ${found}${queuedText(r)} · ${r.creditsUsed} credits${saved}${pages}`;
   }
   return `Done · ${found}`;
+}
+
+/** SRCH-26: what the search found and left for "Find more" — none of it paid for yet. */
+function queuedText(r: IntakeRun): string {
+  return r.queued ? ` · ${r.queued} more queued` : "";
 }
 
 function pagesRead(r: IntakeRun): string {

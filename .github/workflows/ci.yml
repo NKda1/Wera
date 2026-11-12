@@ -129,9 +129,9 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
-      # The `postgres` extra carries the driver and the Postgres checkpointer, so this also
-      # proves that a Postgres install's gates have something to persist into (REL-03).
-      - run: uv sync --frozen --extra postgres
+      # The driver and the Postgres checkpointer are default dependencies since Postgres became
+      # the only database outside the unit tests (REL-04).
+      - run: uv sync --frozen
       - name: pgvector extension is available
         run: |
           uv run python - <<'PY'

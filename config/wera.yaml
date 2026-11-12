@@ -54,8 +54,19 @@ tasks:
   cv.parse: { tier: writing, max_tokens: 6000, reasoning: "off" }
   job.normalise: { tier: fast, max_tokens: 1200, reasoning: "off" }
   email.extract: { tier: fast, max_tokens: 1500, reasoning: "off" }
-  keywords.extract: { tier: fast, max_tokens: 600, reasoning: "off" }
-  match.verdict: { tier: fast, max_tokens: 300, reasoning: "off" }
+  # 900, up from 600: each term now carries a category, and up to 8 soft skills ride along in
+  # their own bucket (`ExtractedKeyword`). 600 was sized for bare terms.
+  keywords.extract: { tier: fast, max_tokens: 900, reasoning: "off" }
+  # The job-description rubric, once per drafted pack (`nodes.analyse`). Short quotes and a few
+  # labels; no thinking, because what it does is find sentences, not reason about them.
+  job.analyse: { tier: fast, max_tokens: 900, reasoning: "off" }
+  # The CV rubric's judgement half, once per CV version (`Store.cv_profile`).
+  cv.profile: { tier: fast, max_tokens: 900, reasoning: "off" }
+  # The Strategist (`nodes.strategist`): which boards serve each target country for this field,
+  # and the titles as local postings write them. Scoring tier with a little thinking, because
+  # knowing that a German posting says "Softwareentwickler (m/w/d)" is recall, but choosing a
+  # board for a trainee solicitor over a graduate board is judgement. Once per CV × profile.
+  strategist.plan: { tier: scoring, max_tokens: 2400, reasoning: low }
   # Measured on qwen3.8-27b against real 6–10k-char postings: a reply takes 1,200–1,500 tokens
   # including its thinking, but how long it thinks swings call to call, and 1,200 + headroom cut
   # off seven of eight jobs. 2,400 clears the observed range, and a cut-off reply retries once
@@ -86,12 +97,15 @@ tasks:
   # model spends it, and the answer is what gets truncated. Off, 900 tokens is roughly fifteen
   # times the reply.
   summary.write: { tier: writing, max_tokens: 900, reasoning: "off" }
-  # Resized from `wera eval --packs`: this was cut off at its ceiling plus the old `reasoning`
-  # allowance (2,700), so the thinking was eating the answer it was meant to be preparing. The
-  # allowance is now 3,000 for `on` and 1,200 for `low` (gateway._HEADROOM), and the truncation
-  # retry scales it too, so this ceiling is for the reply alone. Only generated tokens are
-  # billed; a bigger ceiling only raises what the provider reserves for the one call.
-  letter.write: { tier: writing, max_tokens: 2500, reasoning: "on" }
+  # `off`. This was `on`, and it was the most expensive call in a pack: measured 2026-11-10 on
+  # qwen3.8-27b, about half of first attempts thought until stopped (5,500, then 11,000 tokens),
+  # on any host and whatever the effort or budget, at $0.01–0.025 a letter and 60–100 seconds.
+  # Without thinking the same letter came back first time every time, in ~600 tokens and a few
+  # seconds. What thinking was buying — planning the paragraphs — the template and the keyword
+  # plan (`nodes.letter_plan`) now provide, and what it was guarding against — a claim the CV
+  # doesn't carry — the claim check (`guard.claims`) catches. A cut-off `on` task still retries
+  # without thinking (gateway `cut_off`), should this go back to `on`.
+  letter.write: { tier: writing, max_tokens: 1500, reasoning: "off" }
   # `reasoning: off`, and the measurement that forced it: this task was given an average of 429
   # input tokens — one line, its source lines, and what failed — and emitted an average of **972
   # output tokens over 16.8 seconds** to rewrite a single sentence. The sentence is forty tokens.
@@ -107,7 +121,10 @@ tasks:
   # not in the CV and returning null is the whole point (ANS-02/03) — so this keeps a thinking
   # allowance, just not the largest one.
   answers.draft: { tier: writing, max_tokens: 1500, reasoning: low }
-  outreach.draft: { tier: fast, max_tokens: 400, reasoning: "off" }
+  # The claim check (`nodes.guard.claim_violations`): one call per letter, listing what a
+  # paragraph says about the applicant that its cited lines don't. Scoring tier, not fast: this
+  # is a judgement about meaning, and a false positive costs a paragraph a repair call.
+  guard.claims: { tier: scoring, max_tokens: 600, reasoning: "off" }
 
 # §8.2 fit weights. Normalised in code, so they needn't sum to 1.
 weights:
@@ -133,6 +150,14 @@ weights:
 max_queries: 20
 max_pages: 10
 max_credits_per_run: 150
+# Over any seven days, every run counted — what bounds a *schedule*, which the per-run cap can't:
+# four scheduled runs a day at 150 would be 4,200 a week. 600 is four full runs, and a run that
+# reaches it stops paying (ends `partial`) while the free paths — the Harvester included — go on.
+max_credits_per_week: 600
+# SRCH-20: Serper queries one search may send, across every tier (one Serper credit each). Tier 1
+# is the top three titles as an open search and against each reviewed board — about 15 queries on
+# a four-board profile — and later tiers are only sent when a search is short of 8 jobs.
+max_serper_queries: 30
 
 # SRCH-10: a short-term cache in front of Firecrawl, so a run doesn't pay for the last one's
 # answers again. `known_urls` (SRCH-05) already stops a job being re-scraped; this covers the two
@@ -171,21 +196,14 @@ discovery_max_queries: 8
 # every "score more" — batching below changes *when* a job is paid for, never how many are.
 max_scored_per_day: 40
 
-# How scoring is handed out. A job takes about eleven seconds, so forty of them is seven minutes
-# in which a run produced nothing anyone could look at — the shortlist only changed when the
-# whole thing finished.
-#
-# Eight at a time, two batches a run: the first batch is on screen in about a minute and a half,
-# the second is scored while it's being read, and then the run stops. The rest of the broad search
-# stays in the pool (`Store.jobs_needing_score`), listed and waiting, and "Score 8 more" calls up
-# the next batch when someone actually wants it.
-#
-# Two batches rather than one because the second is the one that makes "more" feel instant, and
-# rather than five because jobs scored past the point someone stopped reading are jobs nobody
-# asked for. The ordering is best-first (`prefilter.shortlist`), so a batch is always worse than
-# the one before it and stopping early costs the least.
-scoring_batch_size: 8
-scoring_batches_per_run: 2
+# SRCH-26: how many jobs one search surfaces. It stops reading postings once `max` are scored,
+# and below `min` it goes on to the Strategist's next tier of queries until it gets there or a cap
+# stops it. The postings it found and didn't read wait in the queue for "Find more", so the
+# twelfth job isn't paid for until someone has read the eleventh. Inbox and watchlist runs score
+# up to `max` of what they found, the same ceiling.
+surface:
+  min: 8
+  max: 12
 
 # LTR-04: phrases that make a cover letter read like a form. A hit triggers one rewrite, and the
 # phrase is quoted back so the model knows which words to lose rather than guessing at "be less
@@ -197,6 +215,10 @@ scoring_batches_per_run: 2
 letter_banned_phrases:
   - I am writing to express
   - I am writing to apply
+  # Measured in live letters written without thinking (2026-11-10).
+  - I am writing to you
+  - I am applying for
+  - my thesis
   - I would like to express my interest
   - I am passionate about
   - I am excited about the opportunity
@@ -252,6 +274,12 @@ cv_pages: 1
 # `llm_calls` ledger behind the weekly budget (COST-01), the CV itself, the contact details, the
 # search profile and the settings.
 reset_on_cv_upload: true
+
+# SRCH-27: a "Clear jobs" control in Settings (and `wera jobs clear`) that deletes every job,
+# application and pack so the next search starts from an empty screen. Kept: the CV, the profile,
+# the settings, and both ledgers (model spend and Firecrawl credits), so clearing never hands back
+# budget. **Testing only — turn this off before accounts exist**, as with `reset_on_cv_upload`.
+allow_clear_jobs: true
 
 # How much of a posting the prompts that write may see (see config.py for why).
 job_description_limit: 6000

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # `ignore_no_config` is set in pyproject.toml, but Logfire reads that from the *working
@@ -22,6 +23,21 @@ def main(argv: list[str] | None = None) -> int:
     reset = sub.add_parser("reset", help="delete this mode's database and seed it again (PRIV-05)")
     reset.add_argument("--yes", action="store_true", help="don't ask for confirmation")
     sub.add_parser("migrate", help="apply database migrations")
+    db = sub.add_parser("db", help="the Postgres database: move an SQLite install in, back it up (REL-04, REL-05)")
+    db_sub = db.add_subparsers(dest="db_cmd", required=True)
+    imp = db_sub.add_parser("import-sqlite", help="copy an SQLite install's rows and gate threads into Postgres")
+    imp.add_argument("path", type=Path, help="the SQLite database, e.g. data/wera.db")
+    imp.add_argument("--graph", type=Path, help="its gate threads (default: <path>.graph)")
+    imp.add_argument("--dry-run", action="store_true", help="count what would be copied and check the target; write nothing")
+    db_sub.add_parser("backup", help="pg_dump the database to data/backups/ and keep the last 14 days")
+    tel = sub.add_parser("telemetry", help="the Logfire archive in Postgres: telemetry.records (OBS-01)")
+    tel_sub = tel.add_subparsers(dest="telemetry_cmd", required=True)
+    tel_arc = tel_sub.add_parser("archive", help="copy what Logfire holds since the last archive into Postgres")
+    tel_arc.add_argument("--since", metavar="AGE", help="re-read this far back, e.g. 7d or 12h (Logfire keeps 30d)")
+    tel_sub.add_parser("status", help="how much is archived, from when, and when the archive last ran")
+    an = sub.add_parser("analytics", help="the read-only analytics schema (OBS-03)")
+    an_sub = an.add_subparsers(dest="analytics_cmd", required=True)
+    an_sub.add_parser("refresh", help="recompute analytics.fit_totals from the fit reports")
     schemas = sub.add_parser("schemas", help="export the Pydantic contracts to packages/schemas/json")
     schemas.add_argument("--check", action="store_true", help="fail if the committed files are stale")
     supabase = sub.add_parser("supabase", help="export the Postgres schema to supabase/schema.sql")
@@ -31,6 +47,21 @@ def main(argv: list[str] | None = None) -> int:
         "--title", action="append", metavar="TITLE", help="search for this title; repeatable (default: your search profile's)"
     )
     disc.add_argument("--dry-run", action="store_true", help="show what would change without writing companies.yaml")
+    jobs = sub.add_parser("jobs", help="look after the saved jobs")
+    jobs_sub = jobs.add_subparsers(dest="jobs_cmd", required=True)
+    clear = jobs_sub.add_parser("clear", help="delete every job, application and pack (SRCH-27, testing only)")
+    clear.add_argument("--yes", action="store_true", help="don't ask for confirmation")
+    audit = jobs_sub.add_parser("audit-listings", help="find saved jobs that are really results pages (SRCH-21)")
+    audit.add_argument("--apply", action="store_true", help="hide them (default: only list them)")
+    refilter = jobs_sub.add_parser("refilter", help="re-apply your filters to hidden jobs and bring back what they now keep")
+    refilter.add_argument("--apply", action="store_true", help="bring them back (default: only list them)")
+    tg = sub.add_parser("targets", help="the Strategist's job discovery: Serper searches into the Redis queue (SRCH-20)")
+    tg_sub = tg.add_subparsers(dest="targets_cmd", required=True)
+    tg_disc = tg_sub.add_parser("discover", help="send the planned queries and queue the postings they find")
+    tg_disc.add_argument("--tier", type=int, action="append", metavar="N", help="tiers to send; repeatable (default: 1)")
+    tg_disc.add_argument("--no-plan", action="store_true", help="don't refresh a stale Strategist plan (no model call)")
+    tg_sub.add_parser("queries", help="print the planned queries without sending any")
+    tg_sub.add_parser("list", help="print what is queued for the current plan")
     ev = sub.add_parser("eval", help="score the golden set and report agreement with the hand scores")
     ev.add_argument("--model", help="model id to score with (default: the configured scoring tier)")
     ev.add_argument("--cv", type=Path, help="CV to score against, as YAML or JSON (default: the seeded demo CV)")
@@ -92,6 +123,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         upgrade()
         print("Database is up to date.")
         return 0
+    if args.cmd == "db":
+        return _import_sqlite(args.path, args.graph, args.dry_run) if args.db_cmd == "import-sqlite" else _backup()
+    if args.cmd == "telemetry":
+        return _telemetry_archive(args.since) if args.telemetry_cmd == "archive" else _telemetry_status()
+    if args.cmd == "analytics":
+        return _analytics_refresh()
     if args.cmd == "schemas":
         from .schema_export import stale, write
 
@@ -118,11 +155,145 @@ def _dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.cmd == "discover":
         return _discover(args.title, args.dry_run)
+    if args.cmd == "targets":
+        return _targets(
+            args.targets_cmd,
+            tiers=args.tier if args.targets_cmd == "discover" else None,
+            plan=not getattr(args, "no_plan", False),
+        )
+    if args.cmd == "jobs":
+        if args.jobs_cmd == "clear":
+            return _clear_jobs(args.yes)
+        return _refilter(args.apply) if args.jobs_cmd == "refilter" else _audit_listings(args.apply)
     if args.cmd == "eval":
         if args.packs:
             return _eval_packs(args.model, args.cv, args.out, args.ads, args.strict)
         return _eval(args.model, args.cv, args.out, args.only, args.strict)
     return 2
+
+
+def _targets(cmd: str, *, tiers: list[int] | None, plan: bool) -> int:
+    """SRCH-20's first two stages on demand: what the Strategist would search for, sending it, and
+    what is waiting for the Harvester. `queries` spends nothing; `discover` spends Serper queries
+    (capped by `max_serper_queries`) and no Firecrawl credits."""
+    from .clock import now_ms
+    from .config import sites, wera
+    from .db.session import transaction
+    from .errors import ApiError
+    from .nodes import strategist
+    from .services.store import Store
+    from .sources import serper, targets
+
+    try:
+        with transaction() as session:
+            store = Store(session, now_ms())
+            planned, matrix = store.search_queries(refresh=plan and cmd == "discover")
+            profile = store.get_profile()
+            known = store.known_apply_urls()
+            key = store.plan_key()
+    except ApiError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+
+    if cmd == "queries":
+        for q in planned:
+            print(f"  tier {q.tier}  {q.source:5}  gl={q.gl or '-'} hl={q.hl}  {q.q}")
+        print(
+            f"\n{len(planned)} planned quer{'y' if len(planned) == 1 else 'ies'} for plan {key}"
+            f"{'' if matrix else ' (no Strategist plan: built from the CV and profile alone)'}."
+        )
+        return 0
+
+    try:
+        queue = targets.TargetQueue(targets.connect(), key)
+    except ApiError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+    if cmd == "list":
+        for t in queue.peek(100):
+            print(f"  #{t.rank:<3} {t.source:5} {t.title[:50]:50} {t.url}")
+        print(f"\n{queue.size()} posting(s) queued for plan {key}.")
+        return 0
+
+    queue.retire_others()
+    try:
+        client = serper.Serper(max_queries=wera().max_serper_queries)
+    except ApiError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+    chosen = sorted(set(tiers or [1]))
+    print(
+        f"Plan {key}: sending tier(s) {chosen} — {sum(1 for q in planned if q.tier in chosen)} queries, "
+        f"at most {client.max_queries}."
+    )
+    found = strategist.discover(planned, chosen, serper=client, queue=queue, known_urls=known, sites=sites(), profile=profile)
+    kinds = ", ".join(f"{n} {k}" for k, n in found.kinds.most_common()) or "nothing"
+    print(f"Serper:   {client.sent} sent, {client.answered} answered, window {client.window}")
+    print(f"Results:  {found.results} ({kinds})")
+    refused = f", refused by {', '.join(sorted(found.refused))}" if found.refused else ""
+    print(f"Listings: {found.listings_read} read for links, {found.listing_links} posting links found{refused}")
+    print(f"Skipped:  {found.known} already saved, {found.excluded} excluded by your profile, {found.blocked} on declined boards")
+    print(f"Queued:   {found.queued} new — {queue.size()} waiting for the Harvester")
+    for message in found.errors:
+        print(f"  ! {message}", file=sys.stderr)
+    return 0
+
+
+def _clear_jobs(yes: bool) -> int:
+    """SRCH-27 from the command line: the same operation as Settings' "Clear jobs"."""
+    from .db.session import transaction
+    from .errors import ApiError
+    from .services.store import Store
+
+    try:
+        with transaction() as session:
+            preview = Store(session).clear_preview()
+    except ApiError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+    what = f"{preview.jobs} job(s), {preview.applications} application(s) and {preview.documents} document(s)"
+    if not yes:
+        answer = input(f"This deletes {what}. Your CV, profile and settings stay. Type 'clear' to continue: ")
+        if answer.strip() != "clear":
+            print("Cancelled.")
+            return 1
+    with transaction() as session:
+        cleared = Store(session).clear_jobs()
+    print(f"Cleared {cleared.jobs} job(s), {cleared.applications} application(s) and {cleared.documents} document(s).")
+    return 0
+
+
+def _refilter(apply: bool) -> int:
+    """MATCH-01 over the hidden jobs. Lists by default; `--apply` brings them back, unscored."""
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        brought = Store(session).refilter_hidden(apply=apply)
+    for job in brought:
+        print(f"  {job.title[:52]:52} {job.company[:28]:28} {job.location.raw[:40]}")
+    verb = "brought back" if apply else "would come back"
+    print(f'\n{len(brought)} hidden job(s) {verb}. They join the backlog that "Find more" scores first.')
+    if not apply and brought:
+        print("Run again with --apply to bring them back.")
+    return 0
+
+
+def _audit_listings(apply: bool) -> int:
+    """SRCH-21 over the jobs already saved. Lists by default; `--apply` hides them."""
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        found = Store(session).audit_listings(apply=apply)
+    for item in found:
+        print(f"  {item['kind']:8} {item['action']:28} {item['title'][:48]:48} {item['url']}")
+    hidden = sum(1 for item in found if item["action"] in ("hidden", "would hide"))
+    flagged = sum(1 for item in found if item["action"].startswith("flagged"))
+    print(f"\n{len(found)} saved job(s) aren't postings: {hidden} {'hidden' if apply else 'to hide'}, {flagged} flagged.")
+    if not apply and hidden:
+        print("Run again with --apply to hide them. Nothing is deleted; each can be unhidden from the Jobs screen.")
+    return 0
 
 
 def _discover(titles: list[str] | None, dry_run: bool) -> int:
@@ -211,6 +382,7 @@ def _eval_packs(model: str | None, cv: Path | None, out: Path | None, ads: int, 
     person so far.
     """
     from . import evaluate
+    from .config import wera
     from .errors import ApiError
 
     try:
@@ -234,6 +406,7 @@ def _eval_packs(model: str | None, cv: Path | None, out: Path | None, ads: int, 
     print(f"Success rate:    {report.success_rate:.0f}%  (every pack must come back whole)")
     print(f"Guard pass:      {report.guard_pass_rate:.0f}%")
     print(f"Bullets/pack:    {report.mean_bullets:.1f}   ATS coverage: {report.mean_coverage:.0%}")
+    print(f"Backed coverage: {report.mean_backed_coverage:.0%}  (must reach the {wera().ats_threshold:.0%} ATS threshold)")
     print(f"Cost:            ${report.cost_usd:.4f} over {report.calls} call(s)")
     print(f"Report:          {path}")
     print(f"                 {data}")
@@ -261,13 +434,14 @@ def _eval(model: str | None, cv: Path | None, out: Path | None, only: list[str] 
         return 1
 
     path, data = evaluate.write_report(report, out or evaluate.default_out(report.model))
+    PASS_RECALL = evaluate.PASS_RECALL
     agreement = "—" if report.agreement is None else f"{report.agreement:.1f}%"
     recall = "—" if report.keyword_recall is None else f"{report.keyword_recall * 100:.1f}%"
     print(f"Model:           {report.model}{' (demo responders, no network)' if report.demo_mode else ''}")
     print(f"CV:              version {report.cv_version} — {report.cv_source}")
     print(f"Ads:             {len(report.rows)} ({len(report.compared)} hand-scored, {len(report.unscored)} awaiting a score)")
     print(f"Agreement ±1.5:  {agreement} (SPEC §12.2 wants ≥80%)")
-    print(f"Keyword recall:  {recall}")
+    print(f"Keyword recall:  {recall} (live runs must reach {PASS_RECALL:.0%})")
     print(f"Cost:            ${report.cost_usd:.4f} over {report.calls} call(s)")
     print(f"Report:          {path}")
     print(f"                 {data}")
@@ -301,6 +475,113 @@ def _serve(reload: bool) -> int:
     return 0
 
 
+def _import_sqlite(path: Path, graph: Path | None, dry_run: bool) -> int:
+    """REL-04: an SQLite install's data, into the configured Postgres. Read-only on the source."""
+    from sqlalchemy.engine import make_url
+
+    from .db.import_sqlite import ImportRefused, run
+    from .settings import get_settings
+
+    target = get_settings().db_url
+    shown = make_url(target).render_as_string(hide_password=True)
+    try:
+        report = run(path, target, graph=graph, dry_run=dry_run)
+    except ImportRefused as refused:
+        print(str(refused), file=sys.stderr)
+        return 1
+    print(f"{'Would copy' if dry_run else 'Copied'} into {shown}:")
+    for table, count in report.rows.items():
+        print(f"  {table:16} {count:7} rows")
+    print(f"  {'gate threads':16} {report.threads:7} ({report.checkpoints} checkpoints, {report.writes} pending writes)")
+    if dry_run:
+        print("\nThe target is empty and the source is current. Run again without --dry-run to copy.")
+        return 0
+    print(f"\nCompared {report.compared_jobs} sampled jobs, {report.compared_applications} applications and every thread.")
+    if report.problems:
+        print(f"{len(report.problems)} problem(s):", file=sys.stderr)
+        for problem in report.problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 1
+    print(f"Everything matches. {path} is untouched; keep it until you're happy, then delete it yourself.")
+    return 0
+
+
+def _backup() -> int:
+    from .db.backup import BackupFailed, backup
+
+    try:
+        out = backup()
+    except BackupFailed as failed:
+        print(str(failed), file=sys.stderr)
+        return 1
+    print(f"Backed up to {out} ({out.stat().st_size:,} bytes).")
+    return 0
+
+
+def _age(text: str) -> timedelta:
+    """`7d`, `12h` or `30m`, for `--since`."""
+    units = {"d": "days", "h": "hours", "m": "minutes"}
+    number, unit = text[:-1], text[-1:].lower()
+    if unit not in units or not number.isdigit():
+        raise ValueError(f"{text!r} isn't an age: use a number and d, h or m, like 7d.")
+    return timedelta(**{units[unit]: int(number)})
+
+
+def _utc(at: datetime | None) -> str:
+    """Postgres hands timestamps back in the session's zone; these lines say UTC, so convert."""
+    return f"{at.astimezone(UTC):%Y-%m-%d %H:%M}" if at else "never"
+
+
+def _telemetry_archive(since: str | None) -> int:
+    from .services import telemetry_archive
+
+    try:
+        report = telemetry_archive.archive(since=_age(since) if since else None)
+    except (telemetry_archive.ArchiveRefused, ValueError) as refused:
+        print(str(refused), file=sys.stderr)
+        return 1
+    queries = f"{report.queries} quer{'y' if report.queries == 1 else 'ies'}"
+    print(f"Read Logfire from {_utc(report.since)} to {_utc(report.until)} UTC in {queries}.")
+    print(f"{report.fetched:,} records read, {report.added:,} new.")
+    if report.truncated:
+        print(f"{len(report.truncated)} one-second window(s) held more than a page; see the warning in Logfire.", file=sys.stderr)
+    return 0
+
+
+def _telemetry_status() -> int:
+    from .services import telemetry_archive
+
+    if telemetry_archive.engine().dialect.name != "postgresql":
+        print("The archive is kept in Postgres; DATABASE_URL isn't one.", file=sys.stderr)
+        return 1
+    st = telemetry_archive.status()
+    if not st.records:
+        print("Nothing archived yet. Run `wera telemetry archive`.")
+    else:
+        print(f"{st.records:,} records ({st.size}), from {_utc(st.first)} to {_utc(st.last)} UTC.")
+        for service, count in st.by_service.items():
+            print(f"  {service:24} {count:9,}")
+    if st.last_run_at:
+        print(f"Last archive {_utc(st.last_run_at)} UTC added {st.last_added:,}; complete up to {_utc(st.archived_until)} UTC.")
+    reason = telemetry_archive.refusal()
+    if reason:
+        print(f"The archive can't run here: {reason}", file=sys.stderr)
+    return 0
+
+
+def _analytics_refresh() -> int:
+    from .db.session import transaction
+    from .services.analytics import refresh_fit_totals
+
+    with transaction() as session:
+        if session.get_bind().dialect.name != "postgresql":
+            print("The analytics schema is in Postgres; DATABASE_URL isn't one.", file=sys.stderr)
+            return 1
+        count = refresh_fit_totals(session)
+    print(f"analytics.fit_totals: {count} scored job(s).")
+    return 0
+
+
 def _reset(yes: bool) -> int:
     from sqlalchemy.engine import make_url
 
@@ -314,11 +595,19 @@ def _reset(yes: bool) -> int:
     label = "demo" if s.wera_demo_mode else "your real"
     if not yes and not s.wera_demo_mode:
         answer = input(
-            f"This deletes everything in {label} database ({url.render_as_string(hide_password=True)}). Type 'reset' to continue: "
+            f"This deletes everything in {label} database ({url.render_as_string(hide_password=True)}) apart from the "
+            "telemetry archive. Type 'reset' to continue: "
         )
         if answer.strip() != "reset":
             print("Cancelled.")
             return 1
+    if engine().dialect.name == "postgresql":
+        from .migrate import empty_analytics
+
+        # Derived from the tables about to go, and in the way of dropping them. `telemetry` stays:
+        # it is the archive of what Logfire holds (OBS-01), not data this command manages.
+        with engine().begin() as conn:
+            empty_analytics(conn)
     Base.metadata.drop_all(engine())
     with engine().begin() as conn:
         conn.exec_driver_sql("DROP TABLE IF EXISTS alembic_version")
@@ -339,6 +628,14 @@ def _drop_checkpoints() -> None:
     if kind == "sqlite" and target != ":memory:":
         for suffix in ("", "-wal", "-shm"):
             Path(f"{target}{suffix}").unlink(missing_ok=True)
+    elif kind == "postgres":
+        from .db.session import engine
+
+        # LangGraph's own tables, beside WERA's in the same database. `setup()` makes them again
+        # on the next start, migrations table included, so dropping all four is a clean slate.
+        with engine().begin() as conn:
+            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints", "checkpoint_migrations"):
+                conn.exec_driver_sql(f"DROP TABLE IF EXISTS {table}")
 
 
 if __name__ == "__main__":

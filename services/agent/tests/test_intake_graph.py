@@ -621,7 +621,12 @@ class TestRealRunFeedsTheScreens:
             stats = get_kv(session, "stats")
             assert (stats["board"]["queries"], stats["board"]["results"]) == (7, 1)
             assert stats["board"]["ranAt"] is not None
-            assert get_kv(session, "lastRunJobIds") == ["job-a"]
+            # SRCH-25: the new marker is the job's own tag, naming the run that found it.
+            store = Store(session)
+            found = store._job(store._job_row("job-a"))  # unscored here, so not `get_job`
+            assert found.found_by is not None
+            assert (found.found_by.run_id, found.found_by.channel) == (ids["board_search"], "board_search")
+            assert found.seen_at is None
 
 
 class TestFilteringBeforeScoring:

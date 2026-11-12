@@ -1,5 +1,29 @@
 {
   "$defs": {
+    "Achievement": {
+      "description": "A line that states a number, with the numbers isolated from it.",
+      "properties": {
+        "bulletId": {
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bulletId",
+        "text",
+        "metrics"
+      ],
+      "title": "Achievement",
+      "type": "object"
+    },
     "AnswerItem": {
       "properties": {
         "answer": {
@@ -309,6 +333,12 @@
     },
     "AtsKeyword": {
       "properties": {
+        "category": {
+          "$ref": "#/$defs/KeywordCategory"
+        },
+        "inLetter": {
+          "type": "boolean"
+        },
         "inMasterCv": {
           "type": "boolean"
         },
@@ -337,9 +367,6 @@
     },
     "AtsReport": {
       "properties": {
-        "attempt": {
-          "type": "integer"
-        },
         "backedCoverage": {
           "default": -1.0,
           "type": "number"
@@ -359,6 +386,9 @@
           },
           "type": "array"
         },
+        "letterCoverage": {
+          "type": "number"
+        },
         "pages": {
           "type": "number"
         }
@@ -368,8 +398,7 @@
         "coverage",
         "backedCoverage",
         "formatChecks",
-        "pages",
-        "attempt"
+        "pages"
       ],
       "title": "AtsReport",
       "type": "object"
@@ -491,6 +520,35 @@
       "title": "Contact",
       "type": "object"
     },
+    "CoreCompetencies": {
+      "properties": {
+        "methodologies": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "primaryDomains": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "technicalStack": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "primaryDomains",
+        "technicalStack",
+        "methodologies"
+      ],
+      "title": "CoreCompetencies",
+      "type": "object"
+    },
     "CoverLetter": {
       "properties": {
         "companyFact": {
@@ -502,12 +560,15 @@
         "guard": {
           "$ref": "#/$defs/GuardResult"
         },
+        "hookType": {
+          "$ref": "#/$defs/HookType"
+        },
         "jobId": {
           "type": "string"
         },
         "paragraphs": {
           "items": {
-            "$ref": "#/$defs/Cited"
+            "$ref": "#/$defs/Paragraph"
           },
           "type": "array"
         },
@@ -563,6 +624,41 @@
         "where"
       ],
       "title": "CvLine",
+      "type": "object"
+    },
+    "CvProfile": {
+      "properties": {
+        "coreCompetencies": {
+          "$ref": "#/$defs/CoreCompetencies"
+        },
+        "cvVersion": {
+          "type": "integer"
+        },
+        "identity": {
+          "$ref": "#/$defs/Identity"
+        },
+        "judged": {
+          "type": "boolean"
+        },
+        "potentialNarrativeBridges": {
+          "$ref": "#/$defs/NarrativeBridges"
+        },
+        "professionalHistory": {
+          "items": {
+            "$ref": "#/$defs/RoleHistory"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cvVersion",
+        "identity",
+        "coreCompetencies",
+        "professionalHistory",
+        "potentialNarrativeBridges",
+        "judged"
+      ],
+      "title": "CvProfile",
       "type": "object"
     },
     "CvSection": {
@@ -725,6 +821,13 @@
         "core": {
           "$ref": "#/$defs/SubScore"
         },
+        "culture": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "cvBulletIds": {
           "items": {
             "type": "string"
@@ -762,6 +865,7 @@
         "jobQuote",
         "cvBulletIds",
         "keywords",
+        "culture",
         "model"
       ],
       "title": "FitEvidence",
@@ -774,6 +878,13 @@
         },
         "core": {
           "$ref": "#/$defs/SubScore"
+        },
+        "culture": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "cvBulletIds": {
           "items": {
@@ -828,6 +939,7 @@
         "jobQuote",
         "cvBulletIds",
         "keywords",
+        "culture",
         "model",
         "jobId",
         "freshness",
@@ -886,6 +998,26 @@
       "title": "FormatCheck",
       "type": "object"
     },
+    "FoundBy": {
+      "description": "SRCH-25: the run that first added a job \u2014 written once, when the job is inserted.\n\nWhat the Jobs screen's \"New\" tag and its origin label (\"Search 11 Nov\") read. It replaces a\nsingle list of the last run's job ids, which every run overwrote \u2014 so a job lost its \"new\"\nmark the moment any other run finished, inbox and watchlist runs included, whether or not\nanyone had looked at it.",
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "channel": {
+          "$ref": "#/$defs/Channel"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel",
+        "at"
+      ],
+      "title": "FoundBy",
+      "type": "object"
+    },
     "FoundCounts": {
       "properties": {
         "board": {
@@ -931,6 +1063,88 @@
         "repaired"
       ],
       "title": "GuardResult",
+      "type": "object"
+    },
+    "HookType": {
+      "enum": [
+        "Core-Metric",
+        "Company-Mission",
+        "Industry-Problem",
+        "Referral"
+      ],
+      "type": "string"
+    },
+    "Identity": {
+      "properties": {
+        "applicantCity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "applicantLinkedinUrl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "applicantName": {
+          "type": "string"
+        },
+        "applicantPortfolioUrl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "applicantState": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "applicantName",
+        "applicantLinkedinUrl",
+        "applicantPortfolioUrl",
+        "applicantCity",
+        "applicantState"
+      ],
+      "title": "Identity",
+      "type": "object"
+    },
+    "ImpliedAchievement": {
+      "description": "A line that implies a result without a number \u2014 for the applicant to quantify, if true.",
+      "properties": {
+        "bulletId": {
+          "type": "string"
+        },
+        "phrase": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bulletId",
+        "phrase"
+      ],
+      "title": "ImpliedAchievement",
       "type": "object"
     },
     "InboxSettings": {
@@ -1042,6 +1256,10 @@
         "queries": {
           "type": "integer"
         },
+        "queued": {
+          "default": 0,
+          "type": "integer"
+        },
         "results": {
           "type": "integer"
         },
@@ -1080,6 +1298,7 @@
         "creditsSaved",
         "localPages",
         "fallbackPages",
+        "queued",
         "batchSize",
         "errors"
       ],
@@ -1123,6 +1342,9 @@
         },
         "firstSeen": {
           "type": "string"
+        },
+        "foundBy": {
+          "$ref": "#/$defs/FoundBy"
         },
         "hiddenReason": {
           "type": "string"
@@ -1173,6 +1395,9 @@
         "salary": {
           "$ref": "#/$defs/Salary"
         },
+        "seenAt": {
+          "type": "string"
+        },
         "seniority": {
           "$ref": "#/$defs/Seniority"
         },
@@ -1211,8 +1436,32 @@
       "title": "Job",
       "type": "object"
     },
+    "JobAnalysis": {
+      "description": "The job-description rubric, filled in for the job a pack is written for.\n\nAssembled in `nodes.analyse` from three sources so that each part comes from the one that can\nbe trusted with it: the role title and company are WERA's own record of the job, the matrix\nis `keywords.extract`'s (already held to the post), and only the department, industry,\nseniority and strategic context are read by `job.analyse`.",
+      "properties": {
+        "atsKeywordMatrix": {
+          "$ref": "#/$defs/KeywordMatrix"
+        },
+        "roleProfile": {
+          "$ref": "#/$defs/RoleProfile"
+        },
+        "strategicContext": {
+          "$ref": "#/$defs/StrategicContext"
+        }
+      },
+      "required": [
+        "roleProfile",
+        "atsKeywordMatrix",
+        "strategicContext"
+      ],
+      "title": "JobAnalysis",
+      "type": "object"
+    },
     "JobKeyword": {
       "properties": {
+        "category": {
+          "$ref": "#/$defs/KeywordCategory"
+        },
         "term": {
           "type": "string"
         },
@@ -1283,6 +1532,72 @@
       ],
       "type": "string"
     },
+    "JobsCleared": {
+      "description": "SRCH-27: what \"Clear jobs\" removed \u2014 or, before it runs, what it would remove.",
+      "properties": {
+        "applications": {
+          "type": "integer"
+        },
+        "documents": {
+          "type": "integer"
+        },
+        "jobs": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "jobs",
+        "applications",
+        "documents"
+      ],
+      "title": "JobsCleared",
+      "type": "object"
+    },
+    "KeywordCategory": {
+      "enum": [
+        "hard_skill",
+        "methodology",
+        "tool"
+      ],
+      "type": "string"
+    },
+    "KeywordMatrix": {
+      "description": "The post's terms, grouped. The first three are the checkable keywords coverage measures;\n`soft_skills_and_culture` is display and letter context, and never counted.",
+      "properties": {
+        "hardSkills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "methodologiesAndFrameworks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "softSkillsAndCulture": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "toolsAndSoftware": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "hardSkills",
+        "methodologiesAndFrameworks",
+        "toolsAndSoftware",
+        "softSkillsAndCulture"
+      ],
+      "title": "KeywordMatrix",
+      "type": "object"
+    },
     "Language": {
       "properties": {
         "level": {
@@ -1298,6 +1613,15 @@
       ],
       "title": "Language",
       "type": "object"
+    },
+    "LetterSection": {
+      "enum": [
+        "opening_hook",
+        "core_value_proposition",
+        "strategic_alignment_and_culture",
+        "call_to_action_and_close"
+      ],
+      "type": "string"
     },
     "Link": {
       "properties": {
@@ -1354,6 +1678,26 @@
       ],
       "type": "string"
     },
+    "LocalTerm": {
+      "properties": {
+        "language": {
+          "type": "string"
+        },
+        "term": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "term",
+        "language",
+        "title"
+      ],
+      "title": "LocalTerm",
+      "type": "object"
+    },
     "Location": {
       "properties": {
         "city": {
@@ -1370,6 +1714,46 @@
         "raw"
       ],
       "title": "Location",
+      "type": "object"
+    },
+    "Market": {
+      "properties": {
+        "boards": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "country": {
+          "type": "string"
+        },
+        "languages": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "proposed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "searchTerms": {
+          "items": {
+            "$ref": "#/$defs/LocalTerm"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "country",
+        "languages",
+        "searchTerms",
+        "boards",
+        "proposed"
+      ],
+      "title": "Market",
       "type": "object"
     },
     "MasterCV": {
@@ -1426,6 +1810,26 @@
       "title": "MasterCV",
       "type": "object"
     },
+    "NarrativeBridges": {
+      "description": "`addressed_gaps` is not here: a gap is a gap against a particular post, so it belongs to\nthe pack written for one, not to the CV.",
+      "properties": {
+        "strongestCrossFunctionalTrait": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Trait"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "strongestCrossFunctionalTrait"
+      ],
+      "title": "NarrativeBridges",
+      "type": "object"
+    },
     "NavCounts": {
       "properties": {
         "demoMode": {
@@ -1448,6 +1852,9 @@
     },
     "Pack": {
       "properties": {
+        "analysis": {
+          "$ref": "#/$defs/JobAnalysis"
+        },
         "answers": {
           "items": {
             "$ref": "#/$defs/AnswerItem"
@@ -1471,6 +1878,38 @@
         "answers"
       ],
       "title": "Pack",
+      "type": "object"
+    },
+    "Paragraph": {
+      "description": "A letter paragraph, and which part of the template it is doing.\n\nBoth optional, because a letter drafted before the template has no sections to report. A\nparagraph the person rewrites keeps its section: it is still the opening, or still the close.",
+      "properties": {
+        "composed": {
+          "type": "boolean"
+        },
+        "editedByUser": {
+          "type": "boolean"
+        },
+        "section": {
+          "$ref": "#/$defs/LetterSection"
+        },
+        "sourceIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "text": {
+          "type": "string"
+        },
+        "theme": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "sourceIds"
+      ],
+      "title": "Paragraph",
       "type": "object"
     },
     "Person": {
@@ -1497,6 +1936,51 @@
         "links"
       ],
       "title": "Person",
+      "type": "object"
+    },
+    "PlannedQuery": {
+      "description": "One search the Strategist will send (SRCH-20, stage 1). Built in code from the parsed CV and\nthe profile, never by a model, and stored on the plan so the queries a search used can be read\nback \u2014 and so a new CV, which makes a new plan, can never search with the last CV's words.",
+      "properties": {
+        "domain": {
+          "type": "string"
+        },
+        "gl": {
+          "type": "string"
+        },
+        "hl": {
+          "type": "string"
+        },
+        "page": {
+          "default": 1,
+          "type": "integer"
+        },
+        "q": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "open",
+            "board"
+          ],
+          "type": "string"
+        },
+        "tier": {
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "q",
+        "gl",
+        "hl",
+        "source",
+        "tier",
+        "title",
+        "page"
+      ],
+      "title": "PlannedQuery",
       "type": "object"
     },
     "PostedPrecision": {
@@ -1562,7 +2046,7 @@
       "enum": [
         "24h",
         "7d",
-        "30d"
+        "21d"
       ],
       "type": "string"
     },
@@ -1620,6 +2104,100 @@
       "title": "Role",
       "type": "object"
     },
+    "RoleHistory": {
+      "properties": {
+        "companyName": {
+          "type": "string"
+        },
+        "duration": {
+          "type": "string"
+        },
+        "impliedAchievements": {
+          "items": {
+            "$ref": "#/$defs/ImpliedAchievement"
+          },
+          "type": "array"
+        },
+        "quantifiableAchievements": {
+          "items": {
+            "$ref": "#/$defs/Achievement"
+          },
+          "type": "array"
+        },
+        "roleId": {
+          "type": "string"
+        },
+        "roleTitle": {
+          "type": "string"
+        },
+        "utilizedToolsAndFrameworks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "roleId",
+        "companyName",
+        "roleTitle",
+        "duration",
+        "quantifiableAchievements",
+        "impliedAchievements",
+        "utilizedToolsAndFrameworks"
+      ],
+      "title": "RoleHistory",
+      "type": "object"
+    },
+    "RoleProfile": {
+      "properties": {
+        "companyName": {
+          "type": "string"
+        },
+        "department": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "experienceLevel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Seniority"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "industryName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetRoleTitle": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "targetRoleTitle",
+        "department",
+        "companyName",
+        "industryName",
+        "experienceLevel"
+      ],
+      "title": "RoleProfile",
+      "type": "object"
+    },
     "RunError": {
       "properties": {
         "code": {
@@ -1655,6 +2233,8 @@
       "enum": [
         "queued",
         "discovering",
+        "planning",
+        "harvesting",
         "searching",
         "scraping",
         "feeds",
@@ -1752,6 +2332,9 @@
         "fit": {
           "$ref": "#/$defs/FitReport"
         },
+        "foundBy": {
+          "$ref": "#/$defs/FoundBy"
+        },
         "hiddenReason": {
           "type": "string"
         },
@@ -1803,6 +2386,9 @@
         },
         "salary": {
           "$ref": "#/$defs/Salary"
+        },
+        "seenAt": {
+          "type": "string"
         },
         "seniority": {
           "$ref": "#/$defs/Seniority"
@@ -1939,6 +2525,32 @@
       "title": "SearchProfile",
       "type": "object"
     },
+    "SearchSchedule": {
+      "description": "The scheduled job search: when the Strategist and the Harvester run without being asked.",
+      "properties": {
+        "creditsThisWeek": {
+          "type": "integer"
+        },
+        "cron": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "nextRunAt": {
+          "type": "string"
+        },
+        "weeklyCreditCap": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enabled",
+        "cron"
+      ],
+      "title": "SearchSchedule",
+      "type": "object"
+    },
     "SecretStatus": {
       "enum": [
         "set",
@@ -1957,11 +2569,16 @@
         },
         "llm": {
           "$ref": "#/$defs/SecretStatus"
+        },
+        "serper": {
+          "$ref": "#/$defs/SecretStatus",
+          "default": "missing"
         }
       },
       "required": [
         "llm",
         "firecrawl",
+        "serper",
         "inbox"
       ],
       "title": "SecretsStatus",
@@ -2004,6 +2621,9 @@
         "redactContact": {
           "type": "boolean"
         },
+        "searchSchedule": {
+          "$ref": "#/$defs/SearchSchedule"
+        },
         "spentThisWeekUsd": {
           "type": "number"
         },
@@ -2023,13 +2643,18 @@
         "baseUrl",
         "models",
         "weights",
-        "inbox"
+        "inbox",
+        "searchSchedule"
       ],
       "title": "Settings",
       "type": "object"
     },
     "SettingsResponse": {
       "properties": {
+        "allowClearJobs": {
+          "default": false,
+          "type": "boolean"
+        },
         "baseUrl": {
           "type": "string"
         },
@@ -2058,6 +2683,9 @@
         "redactContact": {
           "type": "boolean"
         },
+        "searchSchedule": {
+          "$ref": "#/$defs/SearchSchedule"
+        },
         "secrets": {
           "$ref": "#/$defs/SecretsStatus"
         },
@@ -2081,8 +2709,10 @@
         "models",
         "weights",
         "inbox",
+        "searchSchedule",
         "secrets",
-        "llmProvider"
+        "llmProvider",
+        "allowClearJobs"
       ],
       "title": "SettingsResponse",
       "type": "object"
@@ -2111,6 +2741,10 @@
           },
           "type": "array"
         },
+        "findMoreSize": {
+          "default": 12,
+          "type": "integer"
+        },
         "found": {
           "$ref": "#/$defs/FoundCounts"
         },
@@ -2123,17 +2757,7 @@
         "hiddenTotal": {
           "type": "integer"
         },
-        "newJobIds": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
         "rejected": {
-          "type": "integer"
-        },
-        "scoringBatchSize": {
-          "default": 8,
           "type": "integer"
         },
         "snoozed": {
@@ -2143,12 +2767,11 @@
       "required": [
         "found",
         "channels",
-        "newJobIds",
         "hidden",
         "hiddenTotal",
         "awaitingScore",
         "awaiting",
-        "scoringBatchSize",
+        "findMoreSize",
         "snoozed",
         "rejected",
         "activeRunIds"
@@ -2245,6 +2868,70 @@
       ],
       "type": "string"
     },
+    "StrategicContext": {
+      "description": "Why this hire exists, in the post's own words. Every field is a verbatim excerpt of the\npost or null \u2014 see `llm_outputs.QuotedContext`, which is what enforces it.",
+      "properties": {
+        "companyInitiativeOrMarket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "companyProblemToSolve": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "companyValueOrPillar": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "primaryJobRequirement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "upcomingCompanyGoal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "primaryJobRequirement",
+        "companyInitiativeOrMarket",
+        "companyProblemToSolve",
+        "upcomingCompanyGoal",
+        "companyValueOrPillar"
+      ],
+      "title": "StrategicContext",
+      "type": "object"
+    },
     "SubScore": {
       "properties": {
         "cvBulletIds": {
@@ -2329,6 +3016,49 @@
       "title": "TailoredCV",
       "type": "object"
     },
+    "TargetMatrix": {
+      "properties": {
+        "cvVersion": {
+          "type": "integer"
+        },
+        "field": {
+          "type": "string"
+        },
+        "generatedAt": {
+          "type": "string"
+        },
+        "markets": {
+          "items": {
+            "$ref": "#/$defs/Market"
+          },
+          "type": "array"
+        },
+        "model": {
+          "type": "string"
+        },
+        "profileKey": {
+          "type": "string"
+        },
+        "queries": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlannedQuery"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "field",
+        "markets",
+        "cvVersion",
+        "profileKey",
+        "model",
+        "generatedAt",
+        "queries"
+      ],
+      "title": "TargetMatrix",
+      "type": "object"
+    },
     "TestResult": {
       "properties": {
         "code": {
@@ -2370,6 +3100,25 @@
         "writing"
       ],
       "title": "TierModels",
+      "type": "object"
+    },
+    "Trait": {
+      "properties": {
+        "bulletIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trait": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "trait",
+        "bulletIds"
+      ],
+      "title": "Trait",
       "type": "object"
     },
     "Urgency": {

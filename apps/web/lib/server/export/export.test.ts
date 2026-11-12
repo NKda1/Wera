@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "../http";
 import type { ApplicationWithJob, Cited, Contact, MasterCV, Pack } from "../../types";
 import { exportDoc } from "./content";
-import { renderExport } from "./index";
+import { lintExport, renderExport } from "./index";
 
 const fixture = <T>(name: string): T => JSON.parse(readFileSync(fileURLToPath(new URL(`../../../../../fixtures/demo/${name}`, import.meta.url)), "utf8")) as T;
 
@@ -53,7 +53,7 @@ const PACK: Pack = {
     wordCount: 268,
     guard: clean,
   },
-  ats: { keywords: [{ term: "FastAPI", weight: "required", matched: true, inMasterCv: true }], coverage: 0.82, backedCoverage: 1, formatChecks: [], pages: 1, attempt: 1 },
+  ats: { keywords: [{ term: "FastAPI", weight: "required", matched: true, inMasterCv: true }], coverage: 0.82, backedCoverage: 1, formatChecks: [], pages: 1 },
   answers: [],
 };
 
@@ -134,6 +134,14 @@ describe("CV PDF", () => {
     const out = await render("cv", "pdf", stale);
     expect(checks(out.checks).roles_resolved).toMatchObject({ pass: false });
     expect(checks(out.checks).roles_resolved.message).toContain("exp-gone");
+  });
+
+  it("lints a pack still under review, the same way the download does (ATSC-05/06)", async () => {
+    const reviewing: ApplicationWithJob = { ...APP, status: "ready_for_review", approvedAt: undefined };
+    await expect(render("cv", "pdf", reviewing)).rejects.toThrow(ApiError);
+    const lint = await lintExport("cv", reviewing, CV, CONTACT, 1);
+    expect(lint.map((c) => c.id)).toEqual((await render("cv", "pdf")).checks.map((c) => c.id));
+    expect(lint.filter((c) => !c.pass).map((c) => `${c.id}: ${c.message}`)).toEqual([]);
   });
 
   it("renders byte-identical files for the same pack (EXP-03)", async () => {

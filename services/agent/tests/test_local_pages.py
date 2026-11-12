@@ -22,7 +22,7 @@ def _profile(**over) -> SearchProfile:
         "remote": "any",
         "seniority": ["graduate"],
         "exclude": [],
-        "recency": "30d",
+        "recency": "21d",
         "sites": ["careers.google.com", "gradcracker.com"],
         "channels": {"boardSearch": True, "inbox": False, "watchlist": True},
         "generatedFromCvVersion": 1,
@@ -87,17 +87,20 @@ class _StubClient:
 
 
 class TestADirectBoardIsNeverSearched:
-    """`Site.direct` means WERA reads the board itself. If such a board also reached a Firecrawl
-    query it would be both searched *and* fetched, and the free source would start costing."""
+    """`Site.direct` means WERA reads the board itself. If such a board also reached a search it
+    would be both searched *and* fetched, and the free source would start costing."""
 
-    def test_it_is_excluded_from_the_query_grid(self):
+    def test_it_is_excluded_from_the_searches(self):
+        from wera_agent.nodes import strategist
+
         google = _site(terms_reviewed_on="2026-10-31", direct=True, countries=["GB"])
         gradcracker = Site.model_validate(
             {"domain": "gradcracker.com", "name": "Gradcracker", "terms_reviewed_on": "2026-10-31", "countries": ["GB"]}
         )
         usable = firecrawl_search.usable_sites(_profile(), [google, gradcracker])
         assert [s.domain for s in usable] == ["gradcracker.com"]
-        assert [q.domain for q in firecrawl_search.queries_for(_profile(), [google, gradcracker])] == ["gradcracker.com"]
+        planned = strategist.queries(_profile(), None, [google, gradcracker])
+        assert {q.domain for q in planned if q.source == "board"} == {"gradcracker.com"}
 
     def test_it_is_offered_to_the_reader_instead(self):
         google = _site(terms_reviewed_on="2026-10-31", direct=True, countries=["GB"])

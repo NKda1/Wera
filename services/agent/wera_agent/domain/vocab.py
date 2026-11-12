@@ -2,6 +2,7 @@
 
 import re
 from functools import lru_cache
+from typing import Protocol
 
 from ..schemas.cv import Education, MasterCV, Role, Skill
 
@@ -113,7 +114,22 @@ SYNONYMS: dict[str, list[str]] = {
 # ever be reached through that map. That made the alias list wrong on its face and the mechanism
 # impossible to extend. It is per-alias now: a group may mix cased and uncased spellings, so
 # `golang` matches anywhere while `Go` must be capitalised.
-CASE_SENSITIVE_ALIASES = frozenset({"go"})
+#
+# Each maps to the one written form that counts, because "capitalised" is not one rule: the
+# language is `Go` but the architecture is `REST`, and "Rest of the migration" at the start of a
+# bullet is exactly the false positive this exists to stop.
+CASE_SENSITIVE_ALIASES: dict[str, str] = {"go": "Go", "rest": "REST", "rag": "RAG", "jest": "Jest", "maven": "Maven"}
+
+# Aliases that are ordinary words with no cased form to tell them apart, so they count only when
+# the post itself wrote them — never as a synonym reached from another term. Measured: "Moved
+# shipping containers" covered a post asking for Docker, and "ran blood tests" covered Testing.
+# WERA reads CVs from every field, not only engineering ones, so a word that is a skill in one
+# trade is ordinary in another. A post that literally asks for "tests" still matches "tests".
+#
+# Not "agent": the plural is the group's own name and matches "estate agents" either way, so
+# making the singular ambiguous protected nothing and cost the match between "agent tooling" in
+# a post and a post's own "Agents".
+AMBIGUOUS_ALIASES = frozenset({"tests", "containers", "threads", "threading", "concurrent", "profiling"})
 
 # Qualifier tails a post hangs off a skill's name. "CI/CD pipelines", "Testing experience" and
 # "Python development" ask for the same thing as the bare term, but they are not the term, so
@@ -174,20 +190,45 @@ def _alias_re(alias: str) -> re.Pattern[str]:
 
 @lru_cache(maxsize=256)
 def _proper_noun_re(alias: str) -> re.Pattern[str]:
-    return re.compile(rf"(^|[^A-Za-z0-9]){re.escape(alias.capitalize())}($|[^A-Za-z0-9])")
+    return re.compile(rf"(^|[^A-Za-z0-9]){re.escape(CASE_SENSITIVE_ALIASES[alias])}($|[^A-Za-z0-9])")
 
 
 def text_has_term(text: str, term: str) -> bool:
     """Whole-word match of a term or any of its synonyms, case-insensitive except where an alias
-    is also an ordinary word (`CASE_SENSITIVE_ALIASES`)."""
+    is also an ordinary word (`CASE_SENSITIVE_ALIASES`, `AMBIGUOUS_ALIASES`)."""
     haystack = text.lower()
+    own = set(_reductions(term.lower().strip())[:2])
     for alias in aliases_for(term):
+        if alias in AMBIGUOUS_ALIASES and alias not in own:
+            continue
         if alias in CASE_SENSITIVE_ALIASES:
             if _proper_noun_re(alias).search(text):
                 return True
         elif _alias_re(alias).search(haystack):
             return True
     return False
+
+
+class _Term(Protocol):
+    term: str
+
+
+def in_post[K: _Term](keywords: list[K], post: str | None) -> list[K]:
+    """The keywords the post actually contains, under any spelling that counts as them.
+
+    The ATS coverage score divides by this list, so a term the post never asked for is reported
+    to the applicant as a gap they must fill — and nothing checked. On the demo fixtures, written
+    by hand, 14 of 129 terms were not in their own post: "REST APIs" marked *required* for a post
+    that only says "third-party APIs". A model extracting keywords makes the same mistake for
+    real, adding what posts like this one usually ask for.
+
+    Applied where keywords are made (`KeywordList`) and where they are read back
+    (`fit.cached_evidence`, `Store`), so a score cached before this rule existed is corrected
+    without being paid for again. No post means nothing to check against, and nothing to cover.
+    """
+    if not post:
+        return []
+    return [k for k in keywords if text_has_term(post, k.term)]
 
 
 def skill_text(skill: Skill) -> str:

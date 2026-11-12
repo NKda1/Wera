@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS intake_runs (
 	credits_saved INTEGER NOT NULL,
 	local_pages INTEGER NOT NULL,
 	fallback_pages INTEGER NOT NULL,
+	queued INTEGER NOT NULL,
 	errors JSONB NOT NULL,
 	duration_ms INTEGER NOT NULL,
 	settled BOOLEAN NOT NULL,
@@ -102,10 +103,12 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 	detail VARCHAR(300),
 	attempt INTEGER NOT NULL,
 	called_at VARCHAR(32) NOT NULL,
+	trace_id VARCHAR(32),
 	PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS ix_llm_calls_called_at ON llm_calls (called_at);
 CREATE INDEX IF NOT EXISTS ix_llm_calls_task ON llm_calls (task);
+CREATE INDEX IF NOT EXISTS ix_llm_calls_trace_id ON llm_calls (trace_id);
 
 CREATE TABLE IF NOT EXISTS master_cv (
 	version INTEGER NOT NULL,

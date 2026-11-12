@@ -57,6 +57,14 @@ TEXT_FOR_MODEL = 12_000
 # Enough text to be a description rather than a cookie banner. Below this the page didn't render.
 MIN_DESCRIPTION = 200
 
+# What `parse` returns for a page the model read and found no job on (`NormalisedJob.is_job_posting`).
+NOT_A_JOB = "notAJob"
+
+# The answers that mean "read, and not a job" rather than "couldn't read it" (SRCH-21). The caller
+# must not pay Firecrawl to read any of these again: a listing, a closed page and an advert slot
+# would each come back as the same answer, five credits later.
+NOT_JOB_ANSWERS = frozenset({"not-a-job", "listing", "closed"})
+
 
 def card(
     url: str,
@@ -74,14 +82,26 @@ def card(
     if ats is not None:
         return ats, "ats-feed"
 
-    html = _get(url)
+    try:
+        html = _get(url)
+    except RedirectedAway as gone:
+        # SRCH-23: a posting that now redirects to a search page, a category or the careers home
+        # has been taken down — the board kept the address and moved the person on.
+        logfire.info("{url} redirects to {target}: the posting is gone", url=url, target=str(gone))
+        return None, "closed"
     if html:
+        verdict = _not_one_job(html)
+        if verdict is not None:
+            return None, verdict
         found = _from_json_ld(html)
         if found is not None:
             return found, "json-ld"
 
     rendered = fetch_html(url) if fetch_html is not None else None
     if rendered:
+        verdict = _not_one_job(rendered)
+        if verdict is not None:
+            return None, verdict
         found = _from_json_ld(rendered)
         if found is not None:
             return found, "json-ld-rendered"
@@ -91,10 +111,42 @@ def card(
     best = rendered or html
     if parse is not None and best:
         found = _from_model(best, parse)
+        if found is not None and found.get(NOT_A_JOB):
+            # The page was read and it isn't a job. The caller must not pay to read it again.
+            return None, "not-a-job"
         if found is not None:
             return found, "model"
 
     return None, "unreadable" if best else "unreachable"
+
+
+def _not_one_job(html: str) -> str | None:
+    """`"listing"` or `"closed"` when the page is plainly not one open job, before any rung reads it.
+
+    A page carrying several `JobPosting`s is a results page: the JSON-LD rung used to take the
+    first one and the model rung reported the first job it saw, so a listing came back as one job
+    with the listing as its link. A closed page is one whose title or opening text says so.
+    """
+    from .postings import is_closed_page
+
+    found = {
+        (_string(p.get("title")).strip().lower(), _string(_dig(p.get("hiringOrganization"), "name")).strip().lower())
+        for payload in _json_ld_blocks(html)
+        for p in _job_postings(payload)
+    }
+    if len(found) > 1:
+        return "listing"
+    if is_closed_page(_title_of(html), html_to_text(html)):
+        return "closed"
+    return None
+
+
+def _title_of(html: str) -> str:
+    try:
+        node = LexborHTMLParser(html).css_first("title")
+    except Exception:  # noqa: BLE001
+        return ""
+    return (node.text() if node is not None else "") or ""
 
 
 # ---------------------------------------------------------------------------
@@ -140,13 +192,23 @@ def _from_ats(url: str) -> dict[str, Any] | None:
 # Rung 2 and 3: JSON-LD
 
 
+class RedirectedAway(Exception):
+    """A posting's address now lands on something that isn't a posting. Carries where it went."""
+
+
 def _get(url: str) -> str | None:
-    """The page over plain HTTP. Redirects followed — a board moving a posting is routine, and
-    unlike `liveness.check` nothing here reads a redirect as evidence of anything."""
+    """The page over plain HTTP. Redirects followed — a board moving a posting to a new address is
+    routine. A redirect that lands somewhere that isn't a posting at all is the one kind that says
+    something, and it raises `RedirectedAway`."""
+    from .postings import classify
+
     try:
         response = request("GET", url, follow_redirects=True)
     except Exception:  # noqa: BLE001 — unreachable is an answer
         return None
+    final = str(response.url)
+    if response.history and final != url and classify(url) == "posting" and classify(final) != "posting":
+        raise RedirectedAway(final)
     if response.status_code != 200:
         return None
     try:
@@ -283,6 +345,8 @@ def _from_model(html: str, parse: Callable[[str], dict[str, Any] | None]) -> dic
         return None
     if not found:
         return None
+    if found.get(NOT_A_JOB):
+        return {NOT_A_JOB: True}
     title = _string(found.get("title")).strip()
     company = _string(found.get("company")).strip()
     if not title or not company:

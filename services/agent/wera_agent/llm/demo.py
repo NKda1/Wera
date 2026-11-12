@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from ..config import wera
 from ..domain.guard import check_cited
 from ..domain.questions import SENSITIVE, kind, links_answer
-from ..domain.vocab import skill_text, text_has_term
+from ..domain.vocab import master_cv_text, skill_text, text_has_term
 from ..nodes.ats import build_ats, reconcile_skills
 from ..schemas.cv import Bullet, MasterCV, Role
 from ..schemas.jobs import FitEvidence, Job
@@ -28,7 +28,9 @@ from ..schemas.pack import (
     CvItem,
     CvSection,
     GuardResult,
+    JobAnalysis,
     Pack,
+    Paragraph,
     TailoredCV,
 )
 from ..schemas.profile import SearchProfile
@@ -49,6 +51,9 @@ class PackInput:
     # them, and the honest material for that half is their own stated preferences — the CV says
     # what they have done, never what they want next. Optional so an older caller still works.
     profile: SearchProfile | None = None
+    # The job-description rubric (`nodes.analyse`), once the draft has one: what the post says
+    # about why the role exists, which the letter's company half is written from.
+    analysis: JobAnalysis | None = None
 
 
 def lc_first(s: str) -> str:
@@ -273,7 +278,7 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
     cv, job, evidence = inp.cv, inp.job, inp.evidence
     roles = {r.id: r for r in [*cv.experience, *cv.projects]}
     fact = company_fact(job.description_md, job.company)
-    paragraphs: list[Cited] = []
+    paragraphs: list[Paragraph] = []
 
     # LTR-04: no announcing the application and no thanking them for reading. The real prompt
     # bans both, and a demo that models what the product forbids teaches the wrong thing.
@@ -284,7 +289,7 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
         intro.append(f"The {job.title} opening at {job.company} is the work I want next.")
     if fact:
         intro.append(f"Your post puts it as “{fact}” — that's the part I'd want to be close to.")
-    paragraphs.append(Cited(text=" ".join(intro), source_ids=[cv.summary.id] if cv.summary else []))
+    paragraphs.append(Paragraph(text=" ".join(intro), source_ids=[cv.summary.id] if cv.summary else [], section="opening_hook"))
 
     items = [it for s in doc.sections for it in s.items]
     for idx, item in enumerate(items[:2]):
@@ -296,20 +301,21 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
             parts.append(f"I also {lc_first(no_stop(second.text))}.")
         if idx == 0 and evidence.job_quote and job.description_md and evidence.job_quote in job.description_md:
             parts.append(f"That is close to what you describe as “{evidence.job_quote}”.")
-        # A third bullet where the role has one. LTR-01 wants 250–350 words and the demo was
-        # landing at 201–226 — short because it used two bullets per role and stopped, not because
-        # there was nothing left to say. Length here comes from more of the applicant's record,
-        # never from filler; there is no honest way to pad a cover letter.
-        third = item.bullets[2] if len(item.bullets) > 2 else None
-        if third:
-            parts.append(f"Before that I {lc_first(no_stop(third.text))}.")
+        # Two bullets per role. A third was added when LTR-01 wanted 250–350 words; at 180–260 it
+        # pushed letters over the top, and a short letter is now the point.
         if idx == 1:
             overlap = _matched_skills(inp)
             if overlap:
                 # Safe past the citation guard: these are the master CV's own skill names, and
                 # `check_cited` accepts a term that appears in the applicant's skills list.
                 parts.append(f"The overlap with what you list is {_sentence_list(overlap)}.")
-        paragraphs.append(Cited(text=" ".join(parts), source_ids=[sid for b in item.bullets[:3] for sid in b.source_ids]))
+        paragraphs.append(
+            Paragraph(
+                text=" ".join(parts),
+                source_ids=[sid for b in item.bullets[:3] for sid in b.source_ids],
+                section="core_value_proposition",
+            )
+        )
 
     # LTR-06: why this company, grounded in what the post says about how it works and in what the
     # applicant told WERA they want — never in a guess at their values. Folded into the closing
@@ -323,11 +329,8 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
         fit.append("I do my best work in a room with the team, so being on-site suits me.")
     elif inp.profile and job.remote:
         fit.append(f"I'm open to remote, hybrid or on-site, so the {job.remote} arrangement you describe works either way.")
-    # Where, from the profile the person set rather than a guess. This is the sentence a letter
-    # usually leaves out and a hiring team actually wants: that the applicant is already looking
-    # in this city, not willing to be persuaded about it.
-    if inp.profile and job.location.city and any(job.location.city.lower() == p.strip().lower() for p in inp.profile.locations):
-        fit.append(f"{job.location.city} is one of the places I'm searching, so there's nothing to negotiate there.")
+    # No "{city} is one of the places I'm searching" sentence any more: it was the longest thing in
+    # a close that LTR-01's shorter letter (180–260 words) has no room for.
     closing = " ".join(
         [*fit, f"I'd like to talk about where this would fit at {job.company}. I can make any afternoon next week."]
     )
@@ -338,9 +341,15 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
         if len(extras) > 1:
             said.append(f"I also {lc_first(no_stop(extras[1].text))}.")
         said.append(closing)
-        paragraphs.append(Cited(text=" ".join(said), source_ids=[sid for b in extras for sid in b.source_ids]))
+        paragraphs.append(
+            Paragraph(
+                text=" ".join(said), source_ids=[sid for b in extras for sid in b.source_ids], section="call_to_action_and_close"
+            )
+        )
     else:
-        paragraphs.append(Cited(text=closing, source_ids=[cv.summary.id] if cv.summary else []))
+        paragraphs.append(
+            Paragraph(text=closing, source_ids=[cv.summary.id] if cv.summary else [], section="call_to_action_and_close")
+        )
 
     contact = _named_contact(job.description_md)
     letter = CoverLetter(
@@ -355,6 +364,7 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
         company_fact=CompanyFact(quote=fact, policy_quote=policy),
         word_count=sum(words(p.text) for p in paragraphs),
         guard=GuardResult(pass_=True, violations=[], repaired=False),
+        hook_type="Company-Mission" if fact else "Core-Metric",
     )
     letter.guard = guard_letter(letter, cv, evidence, job)
     return letter
@@ -421,14 +431,15 @@ def generate_pack(inp: PackInput) -> Pack:
     # loop that used to be here is gone.
     doc = _build_cv(inp, _select_bullets(inp, total, per_role, []))
     doc = reconcile_skills(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, threshold=wera().ats_threshold)
-    ats = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, attempt=1)
+    letter = _build_letter(inp, doc)
+    ats = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, letter=letter)
 
-    return Pack(cv=doc, letter=_build_letter(inp, doc), ats=ats, answers=_build_answers(inp, doc))
+    return Pack(cv=doc, letter=letter, ats=ats, answers=_build_answers(inp, doc), analysis=inp.analysis)
 
 
 def refresh_ats(pack: Pack, *, cv: MasterCV, evidence: FitEvidence, cv_pages: int, job: Job) -> AtsReport:
     """Recompute the ATS report after the user edits a document (format and coverage only)."""
-    return build_ats(pack.cv, cv=cv, evidence=evidence, cv_pages=cv_pages, job=job, attempt=pack.ats.attempt)
+    return build_ats(pack.cv, cv=cv, evidence=evidence, cv_pages=cv_pages, job=job, letter=pack.letter)
 
 
 # ---------------------------------------------------------------------------
@@ -551,8 +562,9 @@ def _letter_output(inp: PackInput) -> dict:
     letter = _build_letter(inp, inp.doc)
     return {
         "greeting": letter.greeting,
-        "paragraphs": [_cites(p) for p in letter.paragraphs],
+        "paragraphs": [{**_cites(p), "section": p.section} for p in letter.paragraphs],
         "signoff": letter.signoff,
+        "hookType": letter.hook_type,
         "companyQuote": letter.company_fact.quote,
         "policyQuote": letter.company_fact.policy_quote,
     }
@@ -593,6 +605,20 @@ DEMO_TECH = (
 )
 
 
+# How the demo sorts the terms it recognises into the ATS keyword matrix. Anything unlisted is a
+# hard skill — a language or a field, which is what the CV's own unlisted skills are.
+DEMO_CATEGORY = {
+    **dict.fromkeys(
+        ("FastAPI", "Next.js", "PostgreSQL", "LangChain", "LangGraph", "Docker", "Kubernetes", "AWS", "GCP", "Azure"),
+        "tool",
+    ),
+    **dict.fromkeys(("React", "Django", "Presidio", "Stripe"), "tool"),
+    **dict.fromkeys(("REST APIs", "LLM guardrails", "Prompt engineering", "evaluation", "agents"), "methodology"),
+}
+# Culture phrases the demo posts really use, so the soft-skill bucket has something true in it.
+DEMO_CULTURE = ("curiosity", "ownership", "collaboration", "communication", "mentoring", "end to end", "good docs")
+
+
 def _demo_keywords(job_text: str, cv: MasterCV) -> list[dict]:
     """ATSC-01, deterministically: the terms the ad actually contains.
 
@@ -605,8 +631,84 @@ def _demo_keywords(job_text: str, cv: MasterCV) -> list[dict]:
         if any(term == f["term"] for f in found):
             continue
         if text_has_term(job_text, term):
-            found.append({"term": term, "weight": "required" if term in cv_terms else "nice"})
-    return found[:25]
+            weight = "required" if term in cv_terms else "nice"
+            found.append({"term": term, "weight": weight, "category": DEMO_CATEGORY.get(term, "hard_skill")})
+    culture = [{"term": c, "weight": "nice", "category": "soft_skill"} for c in DEMO_CULTURE if text_has_term(job_text, c)]
+    return found[:25] + culture[:8]
+
+
+def _demo_analysis(post: str) -> dict:
+    """`job.analyse`, deterministically: real sentences from the post, or null.
+
+    The company blurb under the first heading stands in for the initiative, and the first bullet
+    for the main requirement. Crude, but every value is an excerpt of the post, so the demo
+    exercises the same check a real reply is held to.
+    """
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", post) if p.strip()]
+    prose = next((p for p in paragraphs[1:] if not p.startswith(("#", "-"))), None) if paragraphs else None
+    blurb = re.split(r"(?<=\.)\s", prose)[0] if prose else None
+    bullet = next((m.group(1).strip() for m in re.finditer(r"(?m)^\s*[-*]\s+(.+)$", post)), None)
+    lowered = post.lower()
+    level = next((lv for lv in ("graduate", "junior", "senior") if lv in lowered), None)
+    return {
+        "roleProfile": {"department": None, "industryName": None, "experienceLevel": level},
+        "strategicContext": {
+            "primaryJobRequirement": bullet,
+            "companyInitiativeOrMarket": blurb,
+            "companyProblemToSolve": None,
+            "upcomingCompanyGoal": None,
+            "companyValueOrPillar": None,
+        },
+    }
+
+
+DEMO_DOMAINS = {
+    "AI tooling": ("LangChain", "LangGraph", "LLM guardrails", "Prompt engineering"),
+    "Web products": ("Next.js", "TypeScript", "React"),
+    "Payments": ("Stripe",),
+}
+_RESULT_VERBS = re.compile(r"\b(?:reduced|cut|improved|grew|increased|sped up|saved|lowered)\b[^,.;]*", re.IGNORECASE)
+
+
+def _demo_strategy(context: dict) -> dict:
+    """`strategist.plan`, deterministically: every target country, its known boards in file order.
+
+    No search terms. Translating a job title is the part of the Strategist that needs a model, and
+    a demo that made them up would be teaching the matrix to trust them.
+    """
+    from ..nodes.strategist import COUNTRY_LANGUAGES
+
+    boards: dict[str, list[str]] = context.get("boards") or {}
+    markets = [
+        {
+            "country": country,
+            "languages": COUNTRY_LANGUAGES.get(country, ["en"]),
+            "searchTerms": [],
+            "boards": [d for d, served in boards.items() if not served or country in served],
+            "proposedBoards": [],
+        }
+        for country in sorted(context.get("countries") or [])
+    ]
+    return {"field": "software engineering", "markets": markets}
+
+
+def _demo_cv_profile(cv: MasterCV) -> dict:
+    """`cv.profile`, deterministically, from the CV's own words."""
+    skills = {s.name for s in cv.skills}
+    text = master_cv_text(cv)
+    bullets = [b for r in [*cv.experience, *cv.projects] for b in r.bullets]
+    implied = [
+        {"bulletId": b.id, "phrase": m.group(0).strip()}
+        for b in bullets
+        if not re.search(r"\d", b.text) and (m := _RESULT_VERBS.search(b.text))
+    ]
+    together = [b.id for b in bullets if re.search(r"\bwith the\b", b.text)]
+    return {
+        "primaryDomains": [d for d, terms in DEMO_DOMAINS.items() if skills & set(terms)],
+        "methodologies": [m for m in ("Prompt engineering", "LLM guardrails", "REST APIs") if text_has_term(text, m)],
+        "impliedMetrics": implied[:10],
+        "strongestCrossFunctionalTrait": {"trait": "Works across teams", "bulletIds": together} if together else None,
+    }
 
 
 def _demo_subscore(job_text: str, cv: MasterCV, terms: list[str], *, floor: float) -> dict:
@@ -778,10 +880,22 @@ def respond(task: str, variables: dict, context: dict | None, demo_input: PackIn
         if cv is None:
             raise KeyError("fit.score needs the master CV in validation context")
         return _fit_score_output(variables, cv)
+    if task == "job.analyse":
+        return _demo_analysis(str((context or {}).get("post") or ""))
+    if task == "cv.profile":
+        if cv is None:
+            raise KeyError("cv.profile needs the master CV in validation context")
+        return _demo_cv_profile(cv)
+    if task == "strategist.plan":
+        return _demo_strategy(context or {})
     if task == "email.extract":
         # Demo mode never opens a mailbox (DEMO-02), so there is no email to read. Returning
         # nothing is honest; inventing cards would make the demo look like it had an inbox.
         return {"cards": []}
+    if task == "guard.claims":
+        # The demo writer only ever restates master-CV lines, so it claims nothing they don't —
+        # the honest answer, and the one the real check gives a letter that does the same.
+        return {"findings": []}
     if task == "guard.repair":
         # The demo writer only ever copies master-CV lines, so there is nothing to repair. Saying
         # so (rather than inventing a fix) is what the real model does when it can't help either.

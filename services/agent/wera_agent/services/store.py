@@ -38,8 +38,9 @@ from ..db.models import (
     MasterCvRow,
     ProfileRow,
 )
-from ..domain import cv_build, cv_extract, dedupe
+from ..domain import cv_build, cv_extract, dedupe, filters
 from ..domain.applications import ALLOWED
+from ..domain.cv_profile import build_profile
 from ..domain.profile_diff import profile_diff
 from ..domain.scoring import build_fit_report, js_round, liveness, urgency
 from ..domain.text import is_linkedin_url, title_case
@@ -47,14 +48,16 @@ from ..domain.vocab import cv_line_index, master_cv_text, text_has_term
 from ..errors import ApiError, validation_error
 from ..llm.demo import PackInput, guard_cv, refresh_ats
 from ..llm.gateway import structured
-from ..llm.pricing import spent_this_week_usd
+from ..llm.pricing import pending_calls, spent_this_week_usd
 from ..llm.prompts import cv_text, profile_text, untrusted
+from ..nodes import strategist
 from ..pii import scrub_contacts
 from ..schemas.api import (
     ApplicationPatchIn,
     DecisionIn,
     DocumentPatchIn,
     FoundCounts,
+    JobsCleared,
     NavCounts,
     ProfileProposalResult,
     ShortlistMeta,
@@ -63,13 +66,16 @@ from ..schemas.api import (
 )
 from ..schemas.applications import Application, ApplicationJob, ApplicationListItem, ApplicationWithJob, DraftProgress
 from ..schemas.cv import Contact, CvLine, MasterCV
-from ..schemas.jobs import Ats, FitEvidence, FitWeights, Job, ScoredJob, SubScore
-from ..schemas.llm_outputs import ParsedCv, ProfileProposal
-from ..schemas.pack import AnswerItem, AtsReport, Cited, CoverLetter, CvItem, CvSection, Pack, TailoredCV
+from ..schemas.cv_profile import CvProfile
+from ..schemas.jobs import Ats, FitEvidence, FitWeights, FoundBy, Job, ScoredJob, SubScore
+from ..schemas.llm_outputs import CvProfileOutput, ParsedCv, ProfileProposal
+from ..schemas.pack import AnswerItem, AtsReport, Cited, CoverLetter, CvItem, CvSection, JobAnalysis, Pack, TailoredCV
 from ..schemas.profile import SearchProfile
 from ..schemas.runs import ChannelSummary, Estimate, IntakeRun, RunError, RunIds
-from ..schemas.settings import SecretsStatus, SettingsPatch, SettingsResponse
+from ..schemas.settings import DEFAULT_SEARCH_CRON, SecretsStatus, SettingsPatch, SettingsResponse
+from ..schemas.strategy import PlannedQuery, TargetMatrix
 from ..settings import get_settings, llm_provider_name
+from ..sources.harvest import BATCH
 from . import providers
 from .demo_data import DAY, MIN, first_run_seeds, seed_to_job
 
@@ -292,9 +298,18 @@ class Store:
         yet. A third is ordinary failure — the run stopped on budget, or one job's scoring call
         failed. Treating any of these as a missing attribute is what made the Jobs screen 500
         on a real database while demo mode, whose hidden jobs all carry fit reports, stayed green.
+
+        Keywords come back filtered to the ones the post contains (`fit.with_posted_keywords`),
+        so every reader — the ATS report, the skills line, the guard — measures the same list.
         """
+        from ..nodes.fit import with_posted_keywords
+
         row = self.s.get(FitReportRow, job_id)
-        return FitEvidence.model_validate(row.evidence) if row else None
+        if row is None:
+            return None
+        evidence = FitEvidence.model_validate(row.evidence)
+        job = self.s.get(JobRow, job_id)
+        return with_posted_keywords(evidence, self._job(job)) if job is not None else evidence
 
     def scoring_model(self) -> str:
         return self._settings()["models"]["scoring"]
@@ -436,9 +451,9 @@ class Store:
                 for seed in first_run_seeds():
                     job, evidence, questions = seed_to_job(seed, now)
                     job.first_seen = iso(now)
+                    job.found_by = FoundBy(run_id=run.id, channel="board_search", at=iso(now))
                     save_job(self.s, job, evidence, questions, created_at=iso(now), cv_version=self.cv().version)
                     added.append(job.id)
-                set_kv(self.s, "lastRunJobIds", added)
                 run.results, run.new_jobs, run.credits_used = 118, len(added), 40 + len(added) * 5
             else:
                 # SRCH-05: URLs already known are skipped, so a repeat run scrapes nothing — and
@@ -446,7 +461,6 @@ class Store:
                 # credits this used to spend anyway. A repeat run inside the window is free.
                 run.results, run.new_jobs = 112, 0
                 run.credits_used, run.credits_saved = 0, 40
-                set_kv(self.s, "lastRunJobIds", [])
             stats = {**stats, "board": {"queries": 20, "results": run.results, "ranAt": iso(now)}}
         elif run.channel == "email_alert":
             run.results = run.new_jobs = 0
@@ -458,10 +472,6 @@ class Store:
             run.results = run.new_jobs = 0
             stats = {**stats, "watchlist": {**stats["watchlist"], "checkedAt": iso(now)}}
         set_kv(self.s, "stats", stats)
-
-    def set_last_run_jobs(self, job_ids: list[str]) -> None:
-        """What the shortlist marks as new since the last run."""
-        set_kv(self.s, "lastRunJobIds", job_ids)
 
     def record_channel_stats(self, channel: str, *, queries: int, results: int, new_jobs: int, emails: int = 0) -> None:
         """The channel strip's figures after a real run.
@@ -519,12 +529,12 @@ class Store:
         up to no more than one old run was permitted.
         """
         since = iso(self.now - DAY)
-        return int(
-            self.s.scalar(
-                select(func.count()).select_from(LlmCallRow).where(LlmCallRow.task == "fit.score", LlmCallRow.called_at >= since)
-            )
-            or 0
+        written = self.s.scalar(
+            select(func.count()).select_from(LlmCallRow).where(LlmCallRow.task == "fit.score", LlmCallRow.called_at >= since)
         )
+        # Plus this unit of work's own calls, which are written only when it commits (`gateway._record`).
+        pending = sum(1 for r in pending_calls(self.s) if r["task"] == "fit.score" and r["called_at"] >= since)
+        return int(written or 0) + pending
 
     def jobs_needing_score(self, *, cv_version: int, model: str) -> list[Job]:
         """Every new job whose score is missing or no longer valid (SCH-02, COST-04).
@@ -636,6 +646,30 @@ class Store:
     def get_job(self, job_id: str) -> ScoredJob:
         return self.scored(self._job(self._job_row(job_id)))
 
+    def mark_seen(self, job_id: str) -> None:
+        """SRCH-25: the person opened this job, so it is no longer new. Idempotent."""
+        job = self._job(self._job_row(job_id))
+        if job.seen_at is None:
+            job.seen_at = iso(self.now)
+            save_job(self.s, job)
+            self.s.flush()
+
+    def mark_all_seen(self) -> int:
+        """Every new job, seen. Returns how many were new."""
+        # The JSON column's own operators, not `func.json_extract`, which is SQLite's and doesn't
+        # exist on Postgres. `as_string()` matters: SQLite renders a bare `data["seenAt"]` through
+        # `json_quote`, which turns a missing key into the text 'null', so `IS NULL` never matched.
+        # Both keys are left out of `data` when unset (`Opt`), so missing is SQL NULL either way.
+        rows = self.s.scalars(
+            select(JobRow).where(JobRow.data["foundBy"].as_string().is_not(None), JobRow.data["seenAt"].as_string().is_(None))
+        ).all()
+        for row in rows:
+            job = self._job(row)
+            job.seen_at = iso(self.now)
+            save_job(self.s, job)
+        self.s.flush()
+        return len(rows)
+
     def sites(self) -> list[SiteOption]:
         return [
             SiteOption(
@@ -668,7 +702,7 @@ class Store:
         channels = [
             ChannelSummary(
                 channel="board_search",
-                detail=f"Firecrawl · {board_sites}",
+                detail=f"Google via Serper · {board_sites}",
                 stats=f"{board['queries']} queries · {board['results']} results · ran {_hhmm(board['ranAt'])}"
                 if board["ranAt"]
                 else "not run yet",
@@ -697,12 +731,11 @@ class Store:
                 watchlist=watch["newSinceYesterday"],
             ),
             channels=channels,
-            new_job_ids=get_kv(self.s, "lastRunJobIds", []),
             hidden=self.list_unscored("hidden", limit=self.HIDDEN_SHOWN),
             hidden_total=self.count_jobs("hidden"),
             awaiting_score=self.awaiting_score(),
             awaiting=self.list_awaiting_score(limit=self.HIDDEN_SHOWN),
-            scoring_batch_size=wera().scoring_batch_size,
+            find_more_size=wera().surface.max,
             snoozed=self.count_jobs("snoozed"),
             rejected=self.count_jobs("rejected"),
             active_run_ids=list(self.s.scalars(select(IntakeRunRow.id).where(IntakeRunRow.status == "running"))),
@@ -723,6 +756,8 @@ class Store:
         row = self._job_row(job_id)
         job = self._job(row)
         now = self.now
+        # Deciding on a job is the surest sign it was looked at (SRCH-25).
+        job.seen_at = job.seen_at or iso(now)
 
         if d.action == "unhide":
             if job.status != "hidden":
@@ -811,6 +846,7 @@ class Store:
         if existing is not None:
             raise ApiError(409, "ALREADY_KNOWN", f"WERA already has this job: {existing.title} at {existing.company}.")
 
+        job.found_by = FoundBy(channel="manual", at=iso(self.now))
         save_job(self.s, job, None, [], created_at=iso(self.now))
         evidence, _, code = fit.evidence_for(self.s, job, self.cv(), model=self._settings()["models"]["scoring"], now=self.now)
         if evidence is None:
@@ -820,7 +856,6 @@ class Store:
                 f"WERA read the job but couldn't score it, so nothing was added. "
                 f"{MESSAGES.get(code or '', 'Try again in a moment.')}",
             )
-        set_kv(self.s, "lastRunJobIds", [job.id])
         self.s.flush()
         return self.scored(job)
 
@@ -894,8 +929,8 @@ class Store:
         existing = self.s.scalars(select(JobRow).where(JobRow.dedupe_key == job.dedupe_key)).first()
         if existing is not None:
             raise ApiError(409, "ALREADY_KNOWN", f"WERA already has this job: {existing.title} at {existing.company}.")
+        job.found_by = FoundBy(channel="manual", at=iso(self.now))
         save_job(self.s, job, evidence, questions, created_at=iso(self.now), cv_version=cv.version)
-        set_kv(self.s, "lastRunJobIds", [job.id])
         self.s.flush()
         return self.scored(job)
 
@@ -949,7 +984,10 @@ class Store:
     def draft_input(self, app_id: str | None, *, note: str | None) -> PackInput:
         """What a writing step needs, with the person's own change note if they left one."""
         app = self._app_row(_required(app_id))
-        return self.pack_input(app.job_id, note=note or app.change_note)
+        inp = self.pack_input(app.job_id, note=note or app.change_note)
+        if self.has_document(app.id, "analysis"):
+            inp.analysis = self.load_document(app.id, "analysis", JobAnalysis)
+        return inp
 
     def save_document(self, app_id: str | None, kind: str, document: Any) -> None:
         """One document, as a new version (G2-02); earlier versions stay."""
@@ -1002,6 +1040,12 @@ class Store:
         )
         self.s.add(DocumentRow(application_id=app_id, kind=kind, version=current + 1, content=content, created_at=iso(self.now)))
         self.s.flush()
+
+    def has_document(self, app_id: str | None, kind: str) -> bool:
+        found = self.s.scalar(
+            select(DocumentRow.version).where(DocumentRow.application_id == _required(app_id), DocumentRow.kind == kind).limit(1)
+        )
+        return found is not None
 
     def load_document[T](self, app_id: str | None, kind: str, model: type[T]) -> T:
         row = self.s.scalars(
@@ -1159,13 +1203,17 @@ class Store:
         self.s.flush()
         return closed
 
-    def upsert_jobs(self, jobs: list[Job]) -> tuple[list[Job], set[str]]:
+    def upsert_jobs(self, jobs: list[Job], *, run_ids: dict[str, str] | None = None) -> tuple[list[Job], set[str]]:
         """Saves a run's jobs. Returns `(as stored, the ids that are new)`.
 
         A job WERA already had keeps its own id, status and decisions — a second sighting is a
         new source and a fresher `lastSeen`, not a new job (SCH-02). The stored jobs come back
         because a merged sighting takes the id it already had, and anything downstream (a fit
         report, for one) has to point at that id and not at the one this run invented.
+
+        A new job is tagged with the run that found it (SRCH-25, `found_by`); a re-sighting keeps
+        the tag it already had, so a job doesn't turn "new" again because another run saw it.
+        `run_ids` maps a channel to its intake run.
         """
         new_ids: set[str] = set()
         stored: list[Job] = []
@@ -1173,6 +1221,9 @@ class Store:
         for job in jobs:
             existing = self.s.get(JobRow, job.id) or by_key.get(job.dedupe_key)
             if existing is None:
+                if job.found_by is None and job.sources:
+                    channel = job.sources[0].channel
+                    job.found_by = FoundBy(run_id=(run_ids or {}).get(channel), channel=channel, at=iso(self.now))
                 save_job(self.s, job, questions=[])
                 new_ids.add(job.id)
                 stored.append(job)
@@ -1203,6 +1254,12 @@ class Store:
         WERA retry every single run and spend the credits it was trying to save."""
         set_kv(self.s, "atsDiscoveredAt", at)
         self.s.flush()
+
+    def credits_this_week(self) -> int:
+        """Firecrawl credits spent by runs started in the last seven days (`max_credits_per_week`)."""
+        since = iso(self.now - 7 * DAY)
+        total = self.s.scalar(select(func.sum(IntakeRunRow.credits_used)).where(IntakeRunRow.started_at >= since))
+        return int(total or 0)
 
     def sites_discovered_at(self) -> str | None:
         """SRCH-12: when WERA last looked for new boards. None means never."""
@@ -1308,6 +1365,7 @@ class Store:
             letter=CoverLetter.model_validate(latest["letter"]),
             ats=AtsReport.model_validate(latest["ats"]),
             answers=[AnswerItem.model_validate(a) for a in latest.get("answers", {}).get("items", [])],
+            analysis=JobAnalysis.model_validate(latest["analysis"]) if "analysis" in latest else None,
         )
 
     def _save_pack(self, app_id: str, pack: Pack, kinds: tuple[str, ...] = PACK_KINDS) -> None:
@@ -1490,7 +1548,12 @@ class Store:
             para.text = text
             para.edited_by_user = True
             pack.letter.word_count = sum(len([w for w in re.split(r"\s+", p.text) if w]) for p in pack.letter.paragraphs)
-            changed = ("letter",)
+            # The ATS report measures the letter too now, so an edit that adds or removes a
+            # keyword has to show up there — the same reason a CV edit refreshes it.
+            pack.ats = refresh_ats(
+                pack, cv=self.cv(), evidence=self._evidence(job.id), cv_pages=self._settings()["cvPages"], job=job
+            )
+            changed = ("letter", "ats")
         elif kind == "answers":
             answer = next((a for a in pack.answers if a.id == patch.target), None)
             if answer is None:
@@ -1534,30 +1597,28 @@ class Store:
     # ---- Intake runs (SRCH-06…08, PRF-05, UX-01) ----
 
     def estimate(self, channels: list[str]) -> Estimate:
-        from ..config import sites
-        from ..sources.firecrawl_search import JSON_SCRAPE_CREDITS, SEARCH_CREDITS, queries_for
+        """PRF-05: what a search will cost, before it runs.
 
-        p = self._profile()
+        `queries` are Serper searches — tier 1 of the plan, which a search always sends; later
+        tiers only go when it is short of 8 jobs, and are capped at `max_serper_queries` either way.
+        `credits` are Firecrawl's: the pessimistic case of a few postings no free rung can read,
+        priced at the rate the cap counts in (COST-05), so the dialog and the cap can't disagree.
+        """
+        from ..sources.firecrawl_search import JSON_SCRAPE_CREDITS
+
         board = "board_search" in channels
-        # Counted by the same function the run uses, not re-derived. It used to be
-        # `len(titles) * len(locations)`, which stopped being the grid the moment SRCH-11 made it
-        # title × board — and COST-05 requires the dialog's arithmetic and the cap's to be the
-        # same one. Asking `queries_for` means they cannot drift again.
-        queries = len(queries_for(p, sites())) if board else 0
-        # SRCH-05: pages are read locally first (`sources.extract`) and only fall through to a
-        # paid scrape when no free rung could read them. This figure is what the dialog promises,
-        # so it is the *fallback* rate, not the page count — and it is deliberately pessimistic
-        # rather than optimistic, because a quote that comes in under is a good surprise and one
-        # that comes in over is the thing the cap exists to prevent. Revise it from a real run's
-        # `fallbackPages`, which is recorded for exactly this purpose.
+        queries = 0
+        if board:
+            planned, _matrix = self.search_queries(refresh=False)
+            queries = min(sum(1 for q in planned if q.tier == 1), wera().max_serper_queries)
+        # Paid reads are the exception: a run reads most postings from their own markup or with the
+        # fast model. Revise from a real run's `fallbackPages`, which is recorded for this.
         pages = 3 if board else 0
         stats = get_kv(self.s, "stats")
         return Estimate(
             queries=queries,
             pages=pages,
-            # The same rates the cap counts in, from one place, so the dialog can't promise one
-            # number while the run enforces another.
-            credits=queries * SEARCH_CREDITS + pages * JSON_SCRAPE_CREDITS,
+            credits=pages * JSON_SCRAPE_CREDITS,
             usd=0.02,
             companies=stats["watchlist"]["companies"] if "watchlist" in channels else 0,
             demo=get_settings().wera_demo_mode,
@@ -1644,18 +1705,22 @@ class Store:
         return self._start_scoring_run("rescore")
 
     def start_score_more(self) -> RunIds:
-        """MATCH-05: call up the next batch from the broad search's pool.
+        """ "Find more" (SRCH-26): the next 8–12 — the unscored backlog, then the queue, then the
+        plan's unsent searches (`intake.find_more`).
 
         The twin of `start_rescore_if_idle` and the opposite in one way that matters: **this one
         raises.** A re-score is a side effect of saving a CV, so it declines rather than cost
-        someone their CV; this is a button whose entire purpose is to score more jobs, and a
+        someone their CV; this is a button whose entire purpose is to find more jobs, and a
         button that silently does nothing is worse than one that says why it can't.
         """
         self.settle()
         active = self.s.scalars(select(IntakeRunRow.channel).where(IntakeRunRow.status == "running")).first()
         if active is not None:
             raise ApiError(409, "RUN_ACTIVE", f"{_run_name(active)} already running. Wait for it to finish or cancel it.")
-        if not self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model()):
+        # In demo mode there is no search to fall back on (DEMO-02), so an empty backlog is the end.
+        if get_settings().wera_demo_mode and not self.jobs_needing_score(
+            cv_version=self.cv().version, model=self.scoring_model()
+        ):
             raise ApiError(409, "NOTHING_TO_SCORE", "Every job on your list has an up-to-date score. Run a search to find more.")
         cfg = wera()
         if self.scored_today() >= cfg.max_scored_per_day:
@@ -1718,10 +1783,10 @@ class Store:
             credits_saved=run.credits_saved,
             local_pages=run.local_pages,
             fallback_pages=run.fallback_pages,
-            # From config rather than the row: it is how scoring is handed out *now*, and a run
-            # reading back a batch size that has since changed would make the screen draw a
-            # boundary in the wrong place.
-            batch_size=wera().scoring_batch_size,
+            queued=run.queued or 0,
+            # The Harvester's round: the screen re-reads the shortlist each time one lands. From the
+            # code rather than the row, because it is how scoring is handed out *now*.
+            batch_size=BATCH,
             errors=[RunError.model_validate(e) for e in run.errors],
         )
 
@@ -1751,9 +1816,129 @@ class Store:
     #   application reuse a dead one's id, and with it a dead one's paused graph thread.
     # * `master_cv`, `contact`, `search_profile`, `settings` — the person, not their job list.
     #   The CV being saved is the whole point of the operation.
-    RESET_TABLES = (DocumentRow, ApplicationRow, FitReportRow, DecisionRow, JobRow, CrawlCacheRow, IntakeRunRow)
+    # * `intake_runs` — the other ledger. Firecrawl credits are counted from the runs that spent
+    #   them (`credits_this_week`), so deleting the runs handed the week's credits back, and a
+    #   cleared list could spend the weekly cap again. Running ones are cancelled instead.
+    RESET_TABLES = (DocumentRow, ApplicationRow, FitReportRow, DecisionRow, JobRow, CrawlCacheRow)
 
-    def reset_job_world(self) -> dict[str, int]:
+    def clear_preview(self) -> JobsCleared:
+        """What "Clear jobs" would remove, so the confirm can name it before anything goes."""
+        self._assert_clear_allowed()
+        return JobsCleared(
+            jobs=self.s.scalar(select(func.count()).select_from(JobRow)) or 0,
+            applications=self.s.scalar(select(func.count()).select_from(ApplicationRow)) or 0,
+            documents=self.s.scalar(select(func.count()).select_from(DocumentRow)) or 0,
+        )
+
+    def clear_jobs(self) -> JobsCleared:
+        """SRCH-27: the testing control — every job and everything built on one, gone, so the next
+        search starts from an empty screen. The same operation a CV upload runs when
+        `reset_on_cv_upload` is on (`reset_job_world`), on demand.
+
+        Refused unless `allow_clear_jobs` is set. **That setting is for single-user testing and must
+        be off before accounts exist**, for the reason `reset_on_cv_upload` must: someone else's
+        applications are not a test fixture.
+        """
+        self._assert_clear_allowed()
+        counts = self.reset_job_world(reason="Clear jobs")
+        if not get_settings().wera_demo_mode:
+            # The discovery queue and the week of rejections go too, or the next search would hand
+            # the Harvester postings found before the clear and skip ones it turned down then.
+            # Best effort: a stopped Redis has nothing in it to clear.
+            from ..sources import targets
+
+            try:
+                targets.clear_all(targets.connect())
+            except ApiError as exc:
+                logfire.warn("Clear jobs left Redis alone: {code}", code=exc.code)
+        return JobsCleared(
+            jobs=counts[JobRow.__tablename__],
+            applications=counts[ApplicationRow.__tablename__],
+            documents=counts[DocumentRow.__tablename__],
+        )
+
+    # The statuses an audit may change. A job someone rejected, or one already closed, archived or
+    # hidden, has nothing to gain from a new reason; one with an application is flagged instead.
+    AUDITABLE = ("new", "shortlisted", "snoozed")
+
+    def audit_listings(self, *, apply: bool = False) -> list[dict[str, str]]:
+        """SRCH-21 applied to what is already saved: the jobs that are really a results page, a
+        category, a company profile, a blog post or a dead page.
+
+        Each is hidden with its reason when `apply` is set, never deleted, so the decision can be
+        undone from the Jobs screen. A job with an application is only flagged: hiding it would
+        hide work in progress, and the person should decide what happens to that pack.
+        """
+        from ..sources.postings import classify, is_closed_page
+
+        reasons = {
+            "listing": "Not a job posting: a page of results",
+            "closed": "Not a job posting: the page is gone",
+            "other": "Not a job posting",
+        }
+        applied = set(self.s.scalars(select(ApplicationRow.job_id).where(ApplicationRow.status != "discarded")))
+        found: list[dict[str, str]] = []
+        for row in self.s.scalars(select(JobRow).order_by(JobRow.first_seen)).all():
+            job = self._job(row)
+            kind = classify(job.apply_url or "", title=job.title)
+            if kind == "posting" and is_closed_page(job.title, ""):
+                kind = "closed"
+            if kind == "posting":
+                continue
+            if row.id in applied or job.status == "in_application":
+                action = "flagged: has an application"
+            elif job.status not in self.AUDITABLE:
+                action = f"left alone: already {job.status}"
+            else:
+                action = "hidden" if apply else "would hide"
+                if apply:
+                    job.status, job.hidden_reason = "hidden", reasons[kind]
+                    save_job(self.s, job)
+            found.append(
+                {
+                    "id": row.id,
+                    "kind": kind,
+                    "status": job.status,
+                    "action": action,
+                    "title": job.title,
+                    "url": job.apply_url or "",
+                }
+            )
+        self.s.flush()
+        if apply:
+            logfire.info("Audited saved jobs: {count} aren't postings", count=len(found))
+        return found
+
+    def refilter_hidden(self, *, apply: bool = False) -> list[Job]:
+        """MATCH-01 again, over the jobs it hid: the ones today's filters and profile would keep.
+
+        For when a filter was wrong or the profile changed — a profile reading "London, UK" once hid
+        London jobs whose posting said "London, England" (fixed 11 Nov). A job brought back is
+        unscored, so it joins the backlog "Find more" scores first; nothing is deleted either way.
+        Only jobs hidden by the filters are considered: a decision a person made stays made.
+        """
+        brought: list[Job] = []
+        profile = self._profile()
+        for row in self.s.scalars(select(JobRow).where(JobRow.status == "hidden")).all():
+            job = self._job(row)
+            if not job.hidden_reason or job.hidden_reason.startswith("Not a job posting"):
+                continue
+            if filters.hidden_reason(job, profile, self.now) is not None:
+                continue
+            brought.append(job)
+            if apply:
+                job.status, job.hidden_reason = "new", None
+                save_job(self.s, job)
+        self.s.flush()
+        if apply and brought:
+            logfire.info("Brought back {count} job(s) the filters no longer hide", count=len(brought))
+        return brought
+
+    def _assert_clear_allowed(self) -> None:
+        if not wera().allow_clear_jobs:
+            raise ApiError(403, "CLEAR_JOBS_OFF", "Clearing jobs is turned off (allow_clear_jobs in config/wera.yaml).")
+
+    def reset_job_world(self, *, reason: str = "a new CV") -> dict[str, int]:
         """Delete every job, score, decision, application and pack, and the crawl cache with them.
 
         What `reset_on_cv_upload` does when it is on, and the operation that makes "upload a CV
@@ -1789,7 +1974,7 @@ class Store:
         self.s.flush()
         self.s.expire_all()  # the ORM is holding rows that no longer exist
         self.cleared_jobs = counts[JobRow.__tablename__]
-        logfire.info("Cleared the job backlog for a new CV: {counts}", counts=counts)
+        logfire.info("Cleared the job backlog for {reason}: {counts}", reason=reason, counts=counts)
         return counts
 
     def put_cv(self, cv: MasterCV, *, rescore: bool = True) -> int:
@@ -1933,6 +2118,118 @@ class Store:
         self._profile_row().data = profile.model_dump(mode="json")
         return profile
 
+    def strategy(self) -> TargetMatrix | None:
+        """The Strategist's matrix, while it still answers the current question.
+
+        Read-only and free: a stale matrix (new CV, new profile, new scoring model) is reported as
+        none rather than used, so a board search never runs on a plan for somebody else's search.
+        Nothing here calls a model; `refresh_strategy` does.
+        """
+        cached = get_kv(self.s, "target_matrix")
+        if not cached:
+            return None
+        matrix = TargetMatrix.model_validate(cached)
+        current = strategist.is_current(matrix, cv_version=self.cv().version, profile=self._profile(), model=self.scoring_model())
+        if not current:
+            return None
+        # The queries are rebuilt on every read — in code, for free — and kept when they change, so
+        # `GET /strategy` always shows what a search would send. Kept as they were made, they went
+        # stale the moment anything they're built from moved without making the plan stale: a board
+        # approved, or how queries are written (measured: a level word added, and a current plan
+        # went on sending the old searches).
+        fresh = strategist.queries(self._profile(), self.cv_profile_cached(), sites(), matrix)
+        if fresh != matrix.queries:
+            matrix.queries = fresh
+            set_kv(self.s, "target_matrix", matrix.model_dump(mode="json"))
+        return matrix
+
+    def search_queries(self, *, refresh: bool = True) -> tuple[list[PlannedQuery], TargetMatrix | None]:
+        """SRCH-20, stage 1: the queries for the current CV and profile, and the plan they came from.
+
+        A stale plan is replaced first when `refresh` allows (one `strategist.plan` call). If that
+        can't be had — budget, provider, no countries — the queries are still built from the CV
+        and the profile, just without the Strategist's localised terms: a search that can't plan
+        should search in the person's own words rather than not at all.
+        """
+        matrix = self.strategy()
+        if matrix is None and refresh:
+            try:
+                matrix = self.refresh_strategy()
+            except ApiError as exc:
+                logfire.warn("Searching without a fresh Strategist plan: {code}", code=exc.code)
+        if matrix is not None:
+            return matrix.queries, matrix
+        return strategist.queries(self._profile(), self.cv_profile_cached(), sites(), None), None
+
+    def plan_key(self) -> str:
+        """Which plan a discovery queue belongs to: the CV version and the profile's fingerprint."""
+        from ..sources.targets import plan_key
+
+        return plan_key(self.cv().version, strategist.profile_key(self._profile()))
+
+    def refresh_strategy(self) -> TargetMatrix:
+        """Run the Strategist, queue the boards it proposes, and keep the matrix.
+
+        Proposals are appended to `sites.yaml` unreviewed — the same append-only queue discovery
+        writes to, under the same `max_sites` ceiling — after their domain has answered over the
+        network. The matrix records which ones made it.
+        """
+        from ..config import sites_file, write_sites
+
+        cv, profile = self.cv(), self._profile()
+        matrix, proposals = strategist.plan(
+            self.s,
+            cv=cv,
+            cv_profile=self.cv_profile(),
+            profile=profile,
+            sites=sites(),
+            model=self.scoring_model(),
+            now=self.now,
+        )
+        file = sites_file()
+        live = [s for s in file.sites if s.declined_on is None]
+        room = max(0, file.max_sites - len(live))
+        found = strategist.verified_proposals(proposals[:room], field=matrix.field, today=_local(self.now).date()) if room else []
+        if found:
+            write_sites(file.model_copy(update={"sites": [*file.sites, *found]}))
+            logfire.info("Strategist proposes {count} board(s) for review", count=len(found))
+        for market in matrix.markets:
+            market.proposed = [s.domain for s in found if market.country in s.countries]
+        set_kv(self.s, "target_matrix", matrix.model_dump(mode="json"))
+        return matrix
+
+    def cv_profile_cached(self) -> CvProfile:
+        """The rubric without asking a model: the computed half, plus the model half if it is
+        already cached for this CV. For reads that must stay free (`strategy`)."""
+        cv = self.cv()
+        cached = get_kv(self.s, "cv_profile")
+        judged = None
+        if cached and cached.get("cvVersion") == cv.version:
+            judged = CvProfileOutput.model_validate(cached["judged"], context={"cv": cv})
+        return build_profile(cv, judged)
+
+    def cv_profile(self) -> CvProfile:
+        """The candidate rubric for the current CV (`domain.cv_profile`).
+
+        The computed half is rebuilt on every call — it is cheap and always matches the CV. The
+        model half is paid for once per CV version and cached, because the CV only changes when
+        the person saves it. A failed call is not cached, so the next read tries again; until
+        then the profile says `judged: false` rather than showing empty fields as answers.
+        """
+        cv = self.cv()
+        cached = get_kv(self.s, "cv_profile")
+        judged: CvProfileOutput | None = None
+        if cached and cached.get("cvVersion") == cv.version:
+            judged = CvProfileOutput.model_validate(cached["judged"], context={"cv": cv})
+        else:
+            try:
+                judged = structured(self.s, "cv.profile", CvProfileOutput, {"cv": cv_text(cv)}, context={"cv": cv})
+            except ApiError as exc:
+                logfire.warn("Couldn't profile CV v{version}: {code}", version=cv.version, code=exc.code)
+            else:
+                set_kv(self.s, "cv_profile", {"cvVersion": cv.version, "judged": judged.model_dump(mode="json")})
+        return build_profile(cv, judged)
+
     def generate_profile(self) -> ProfileProposalResult:
         """PRF-01/PRF-04: propose a profile from the master CV and show what would change.
 
@@ -1977,16 +2274,26 @@ class Store:
 
     def get_settings(self) -> SettingsResponse:
         self.settle()
+        from ..api.scheduler import next_search_at
+
         env = get_settings()
         data = self._settings()
+        schedule = {"enabled": False, "cron": DEFAULT_SEARCH_CRON, **(data.get("searchSchedule") or {})}
         return SettingsResponse.model_validate(
             {
                 **data,
+                "searchSchedule": {
+                    **schedule,
+                    "nextRunAt": None if env.wera_demo_mode else next_search_at(schedule),
+                    "creditsThisWeek": self.credits_this_week(),
+                    "weeklyCreditCap": wera().max_credits_per_week,
+                },
                 # SET-06: the real figure, from the rows the gateway writes (not a stored number).
                 "spentThisWeekUsd": spent_this_week_usd(self.s, self.now),
                 "demoMode": env.wera_demo_mode,
                 "secrets": SecretsStatus.model_validate(env.secret_status()).model_dump(),
                 "llmProvider": llm_provider_name(data["baseUrl"]),
+                "allowClearJobs": wera().allow_clear_jobs,
             }
         )
 
@@ -2006,6 +2313,18 @@ class Store:
             data["inbox"] = {**data["inbox"], "senders": patch.inbox.senders}
         self._save_settings(data)
         self.s.flush()
+        if patch.search_schedule is not None:
+            # Applied once the save has committed, so the running schedule never gets ahead of
+            # the stored one — a save that failed would otherwise leave a search scheduled that
+            # the Settings screen says is off.
+            schedule = patch.search_schedule.model_dump(mode="json", by_alias=True)
+
+            async def reschedule() -> None:
+                from ..api import scheduler
+
+                scheduler.apply_search_schedule(schedule)
+
+            self.defer(reschedule, name="scheduled-search:apply")
         return self.get_settings()
 
     def test_provider(self, provider: str) -> TestResult:

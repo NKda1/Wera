@@ -18,12 +18,13 @@ from sqlalchemy.orm import Session
 from ..clock import iso
 from ..db.models import FitReportRow
 from ..domain.scoring import build_fit_report
+from ..domain.vocab import in_post, text_has_term
 from ..errors import ApiError
 from ..llm.gateway import structured
 from ..llm.prompts import cv_text, untrusted
 from ..schemas.cv import MasterCV
 from ..schemas.jobs import FitEvidence, FitReport, FitWeights, Job, JobKeyword
-from ..schemas.llm_outputs import FitScoreOutput, KeywordList
+from ..schemas.llm_outputs import CULTURE_LIMIT, KEYWORD_LIMIT, FitScoreOutput, KeywordList
 
 
 def job_hash(job: Job) -> str:
@@ -49,7 +50,18 @@ def cached_evidence(session: Session, job: Job, *, cv_version: int, model: str) 
         return None
     if (row.job_hash or "") != job_hash(job):
         return None
-    return FitEvidence.model_validate(row.evidence)
+    return with_posted_keywords(FitEvidence.model_validate(row.evidence), job)
+
+
+def with_posted_keywords(evidence: FitEvidence, job: Job) -> FitEvidence:
+    """Stored evidence with only the keywords its post contains (`vocab.in_post`).
+
+    On read rather than by invalidating the cache: the sub-scores are still right, and a new cache
+    key would have re-scored every job on the shortlist to fix a list that code can fix for free.
+    """
+    evidence.keywords = in_post(evidence.keywords, job.description_md)
+    evidence.culture = [c for c in evidence.culture if job.description_md and text_has_term(job.description_md, c)]
+    return evidence
 
 
 def save_evidence(session: Session, job: Job, evidence: FitEvidence, *, cv_version: int, now: int) -> None:
@@ -77,16 +89,26 @@ def _job_block(job: Job) -> str:
     return f"{header}\n{untrusted('job post', job.description_md or '(no description available)')}"
 
 
-def keywords_for(session: Session, job: Job, cv: MasterCV) -> list[JobKeyword]:
-    """ATSC-01: what the ad asks for, on the fast tier. Used by scoring and later by the ATS check."""
+def keywords_for(session: Session, job: Job, cv: MasterCV) -> tuple[list[JobKeyword], list[str]]:
+    """ATSC-01: what the ad asks for, on the fast tier — the checkable keywords, and its culture.
+
+    Split here and nowhere else, so that every reader of `FitEvidence.keywords` gets only terms a
+    CV can name: the coverage denominator, the skills line and the citation guard all read that
+    list, and none of them should ever see "ownership".
+    """
     out = structured(
         session,
         "keywords.extract",
         KeywordList,
         {"job": _job_block(job)},
-        context={"cv": cv},
+        # The post itself, not `_job_block`: WERA's own header line would let a keyword through
+        # on the strength of the job title it wrote, which is not the post asking for it.
+        context={"cv": cv, "post": job.description_md or ""},
     )
-    return out.keywords
+    checkable = [k for k in out.keywords if k.category != "soft_skill"]
+    culture = [k.term for k in out.keywords if k.category == "soft_skill"]
+    keywords = [JobKeyword(term=k.term, weight=k.weight, category=k.category) for k in checkable[:KEYWORD_LIMIT]]
+    return keywords, culture[:CULTURE_LIMIT]
 
 
 def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidence:
@@ -98,7 +120,7 @@ def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidenc
         {"cv": cv_text(cv), "job": _job_block(job)},
         context={"cv": cv},
     )
-    keywords = keywords_for(session, job, cv) if job.description_md else []
+    keywords, culture = keywords_for(session, job, cv) if job.description_md else ([], [])
     return FitEvidence(
         core=verdict.core,
         adjacent=verdict.adjacent,
@@ -108,6 +130,7 @@ def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidenc
         job_quote=verdict.job_quote,
         cv_bullet_ids=verdict.cv_bullet_ids,
         keywords=keywords,
+        culture=culture,
         model=model,
     )
 

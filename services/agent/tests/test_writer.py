@@ -142,7 +142,9 @@ def test_reports_gaps_the_cv_cant_back_and_never_invents_them(pack, demo_cv):
     p, _ = pack
     assert [k.term for k in p.ats.keywords if not k.matched and not k.in_master_cv] == ["Docker", "Model evaluation"]
     assert "docker" not in tailored_text(p.cv, demo_cv).lower()
-    assert round(p.ats.coverage * 100) == 86
+    # 86 until the fixture's keywords were held to `vocab.in_post`: it listed Next.js, which the
+    # Fernhill post never mentions, and counted it as matched.
+    assert round(p.ats.coverage * 100) == 85
 
 
 def test_coverage_is_measured_over_the_page_the_parser_actually_reads(pack, demo_cv):
@@ -198,10 +200,12 @@ class TestSkillsReconciliation:
 
         backed = [k for k in p.ats.keywords if k.in_master_cv]
         assert backed, "fixture no longer has a keyword the CV can back"
-        # Strip the skills line and let reconciliation rebuild it from nothing.
+        # Strip the skills line and let reconciliation rebuild it from nothing. A threshold the
+        # body can't reach alone, or there is nothing to cover: the Fernhill bullets clear 0.75
+        # on their own once the fixture stops listing keywords its post never asked for.
         stripped = p.cv.model_copy(deep=True)
         stripped.skills = []
-        rebuilt = reconcile_skills(stripped, cv=demo_cv, evidence=evidence, cv_pages=1, threshold=0.75)
+        rebuilt = reconcile_skills(stripped, cv=demo_cv, evidence=evidence, cv_pages=1, threshold=1.0)
         assert rebuilt.skills
 
     def test_never_adds_a_keyword_the_cv_does_not_list_as_a_skill(self, demo_cv, demo_jobs):
@@ -249,7 +253,7 @@ class TestSkillsReconciliation:
         doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)).cv
         doc.skills = []
         rebuilt = reconcile_skills(doc, cv=demo_cv, evidence=evidence, cv_pages=1, threshold=0.75)
-        report = build_ats(rebuilt, cv=demo_cv, evidence=evidence, cv_pages=1, job=job, attempt=1)
+        report = build_ats(rebuilt, cv=demo_cv, evidence=evidence, cv_pages=1, job=job)
 
         backable = [k for k in report.keywords if k.in_master_cv]
         uncovered = [k.term for k in backable if not k.matched]
@@ -284,8 +288,8 @@ class TestTheLetterReadsLikeAPerson:
         assert "i am writing" not in opening
 
     def test_every_demo_letter_is_in_the_ltr_01_band(self, api):
-        """LTR-01: 250–350 words. Every demo letter was 229–236 — short because the writer used
-        two bullets per role and stopped, not because there was nothing left to say.
+        """LTR-01: 180–260 words (shortened from 250–350 on 2026-11-10: a short letter from the CV's
+        own lines is what is wanted, and what makes the letter affordable).
 
         Asserted over the packs the demo actually produces, not over `generate_pack` on arbitrary
         jobs: a job the CV barely matches has little to say, and padding it to a word count is the
@@ -295,7 +299,7 @@ class TestTheLetterReadsLikeAPerson:
             app = api.ok("GET", f"/applications/{item['id']}")
             letter = (app.get("pack") or {}).get("letter")
             if letter:
-                assert 250 <= letter["wordCount"] <= 350, f"{app['job']['company']}: {letter['wordCount']} words"
+                assert 180 <= letter["wordCount"] <= 260, f"{app['job']['company']}: {letter['wordCount']} words"
                 assert letter["guard"]["pass"], f"{app['job']['company']}: lengthening broke the guard"
 
     def test_the_salutation_is_never_a_dead_one(self):

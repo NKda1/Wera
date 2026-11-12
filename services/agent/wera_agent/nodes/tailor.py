@@ -19,8 +19,9 @@ from ..llm.gateway import structured
 from ..llm.prompts import cv_text, untrusted
 from ..schemas.cv import MasterCV
 from ..schemas.llm_outputs import LetterOutput, SummaryDraft, TailorSelection
-from ..schemas.pack import Cited, CompanyFact, CoverLetter, CvItem, CvSection, TailoredCV
+from ..schemas.pack import Cited, CompanyFact, CoverLetter, CvItem, CvSection, Paragraph, TailoredCV
 from .guard import guard_and_repair
+from .letter_plan import context_text, keywords_text, plan
 
 # Roughly how many bullets fit, by CV length. The model is told the budget; `estimate_pages`
 # checks what actually came back.
@@ -160,12 +161,6 @@ def _item(lines: dict[str, dict[str, str]], pick) -> CvItem | None:  # noqa: ANN
     return CvItem(role_id=pick.role_id, bullets=bullets) if bullets else None
 
 
-def _cited(item) -> Cited:  # noqa: ANN001 — a Cites from llm_outputs
-    """A model-written line, kept as written. Only the letter needs this: it is the one document
-    here whose prose the model actually composes, so its text can't be copied from anywhere."""
-    return Cited(text=item.text, source_ids=item.source_ids)
-
-
 def cv_locations(doc: TailoredCV) -> list[tuple[str, Cited]]:
     """The same location names the review screen uses for its edit targets."""
     items: list[tuple[str, Cited]] = []
@@ -243,6 +238,8 @@ def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
     """
     cv = inp.cv
     tailored = "\n".join(f"- {b.text}" for _, b in cv_locations(doc))
+    keywords = keywords_text(plan(inp.evidence, cv))
+    context = context_text(inp.analysis)
     best: CoverLetter | None = None
     feedback: str | None = None
 
@@ -257,6 +254,8 @@ def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
                 "tailored": tailored or "(no lines selected)",
                 "wants": _what_they_want(inp),
                 "note": _letter_note(inp.note, feedback),
+                "keywords": keywords,
+                "context": context,
             },
             context={"cv": cv},
             demo_input=inp,
@@ -363,7 +362,9 @@ def _dropped_feedback(candidate: CoverLetter) -> str:
 def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverLetter:
     """One model reply, guarded and assembled."""
     cv = inp.cv
-    paragraphs = [_cited(p) for p in out.paragraphs]
+    paragraphs = [
+        Paragraph(text=p.text, source_ids=p.source_ids, section=p.section, theme=p.theme or None) for p in out.paragraphs
+    ]
     # LTR-02/06: only a quote that really is in the post counts as one. Both are checked the same
     # way, because the company half of a letter is where a model is most tempted to invent — it
     # has no CV to be held to there, so the post is the only thing that can hold it.
@@ -374,15 +375,22 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
     # the company fact, the role, the company name — are the employer's, not a claim about the
     # applicant, so they are taken out before checking. Otherwise a number inside a quoted
     # sentence reads as an uncited figure and a good paragraph gets dropped.
-    quoted = [quote, policy, inp.evidence.job_quote, inp.job.title, inp.job.company]
+    quoted = [quote, policy, inp.evidence.job_quote, inp.job.title, inp.job.company, *_context_quotes(inp)]
     result, decisions = guard_and_repair(
         session,
         [(f"p{i}", Cited(text=_without(p.text, quoted), source_ids=p.source_ids)) for i, p in enumerate(paragraphs)],
         cv,
         [k.term for k in inp.evidence.keywords],
+        # The letter is the one document whose prose a model writes, so it is the one held to the
+        # claim check as well as the regex rules.
+        claims=True,
+        # The close asks for a conversation; it has nothing to cite. It was being dropped for
+        # "no master-CV source", and the claim check now covers what a close could get wrong.
+        unsourced_ok={f"p{i}" for i, p in enumerate(paragraphs) if p.section == "call_to_action_and_close"},
     )
-    # A paragraph the guard accepted keeps its full wording, quote included.
-    kept = [decisions.get(f"p{i}", p) for i, p in enumerate(paragraphs)]
+    # A paragraph the guard accepted keeps its full wording, quote included. A repaired one keeps
+    # the section and theme of the paragraph it replaces: the repair fixes a claim, not its place.
+    kept = [_repaired(p, decisions[f"p{i}"]) if f"p{i}" in decisions else p for i, p in enumerate(paragraphs)]
     paragraphs = [p for p in kept if p is not None]
     text = " ".join(p.text for p in paragraphs)
     return CoverLetter(
@@ -393,7 +401,22 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
         company_fact=CompanyFact(quote=quote, policy_quote=policy),
         word_count=words(text),
         guard=result,
+        hook_type=out.hook_type,
     )
+
+
+def _context_quotes(inp: PackInput) -> list[str]:
+    """The strategic-context excerpts the letter was given. They are the post's words, checked
+    against it already (`QuotedContext`), so like `companyQuote` they are not claims to guard."""
+    if inp.analysis is None:
+        return []
+    return [v for v in inp.analysis.strategic_context.model_dump(by_alias=False).values() if v]
+
+
+def _repaired(original: Paragraph, replacement: Cited | None) -> Paragraph | None:
+    if replacement is None:
+        return None
+    return Paragraph(**replacement.model_dump(by_alias=False), section=original.section, theme=original.theme)
 
 
 def _without(text: str, quoted: list[str]) -> str:

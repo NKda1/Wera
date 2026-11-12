@@ -2,12 +2,13 @@
 
 import math
 import re
+import unicodedata
 
 from ..domain.scoring import ats_coverage, js_round
 from ..domain.vocab import education_text, master_cv_text, role_header, skill_text, text_has_term
 from ..schemas.cv import MasterCV
 from ..schemas.jobs import FitEvidence, Job
-from ..schemas.pack import AtsKeyword, AtsReport, FormatCheck, TailoredCV
+from ..schemas.pack import AtsKeyword, AtsReport, CoverLetter, FormatCheck, TailoredCV
 
 # Roughly two lines of skills per page, at `estimate_pages`' 95 characters a line. A character
 # budget rather than a count, because ten long skill names and ten short ones are not the same
@@ -54,9 +55,25 @@ def estimate_pages(doc: TailoredCV, cv: MasterCV) -> float:
     return js_round((total / 46) * 10) / 10
 
 
+# ATSC-05, the same rule `export/lint.ts` applies to the file it renders: letters, digits and
+# single hyphens. A name with an accent or an apostrophe fails it, which is the point of checking.
+FILE_NAME = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-(?:CV|Letter)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\.(?:pdf|docx)")
+
+
+def _name_part(s: str) -> str:
+    """`export/content.ts`'s `part`, so the name checked here is the name the file gets."""
+    kept = "".join(c for c in unicodedata.normalize("NFKD", s) if c.isalnum() or c == " ")
+    return "-".join(kept.split())
+
+
 def cv_file_name(cv: MasterCV, company: str) -> str:
-    """ATSC-05: First-Last-CV-Company.pdf"""
-    return f"{re.sub(r'\s+', '-', cv.person.name)}-CV-{re.sub(r'\W+', '-', company, flags=re.ASCII)}.pdf"
+    """ATSC-05: First-Last-CV-Company.pdf, built the way the export builds it.
+
+    This used to be its own spelling of the rule, and the two disagreed: "Siobhán O'Neill" became
+    `Siobhán-O'Neill-CV-…` here and `Siobhan-ONeill-CV-…` on the actual file, so a check on this
+    name was a check on a file nobody would download.
+    """
+    return f"{_name_part(cv.person.name) or 'CV'}-CV-{_name_part(company) or 'Company'}.pdf"
 
 
 def _skill_for_term(cv: MasterCV, term: str) -> str | None:
@@ -155,30 +172,55 @@ def _coverage(body_lines: list[str], skills: list[str], evidence: FitEvidence) -
     )
 
 
-def build_ats(doc: TailoredCV, *, cv: MasterCV, evidence: FitEvidence, cv_pages: int, job: Job, attempt: int) -> AtsReport:
+def build_ats(
+    doc: TailoredCV, *, cv: MasterCV, evidence: FitEvidence, cv_pages: int, job: Job, letter: CoverLetter | None = None
+) -> AtsReport:
     text = tailored_text(doc, cv)
     master = master_cv_text(cv)
+    letter_text = "\n".join(p.text for p in letter.paragraphs) if letter else None
     keywords = [
-        AtsKeyword(term=k.term, weight=k.weight, matched=text_has_term(text, k.term), in_master_cv=text_has_term(master, k.term))
+        AtsKeyword(
+            term=k.term,
+            weight=k.weight,
+            matched=text_has_term(text, k.term),
+            in_master_cv=text_has_term(master, k.term),
+            category=k.category,
+            in_letter=text_has_term(letter_text, k.term) if letter_text is not None else None,
+        )
         for k in evidence.keywords
     ]
     pages = estimate_pages(doc, cv)
     fits = pages <= cv_pages
     page_msg = (
-        f"Fits on {cv_pages} page{'s' if cv_pages > 1 else ''}" if fits else f"Runs to {_num(pages)} pages — trim to {cv_pages}"
+        f"About {cv_pages} page{'s' if cv_pages > 1 else ''}, estimated"
+        if fits
+        else f"About {_num(pages)} pages, estimated — trim to {cv_pages}"
     )
+    file_name = cv_file_name(cv, job.company)
     return AtsReport(
         keywords=keywords,
         coverage=ats_coverage(keywords),
         backed_coverage=ats_coverage([k for k in keywords if k.in_master_cv]),
+        # Over the backed keywords only, because those are the only ones the letter is allowed
+        # to use (`nodes.letter_plan`): a letter is not short of a keyword it was told never to claim.
+        # Nothing backed means nothing to cover, which is no measurement rather than 0%.
+        letter_coverage=(
+            ats_coverage([k.model_copy(update={"matched": bool(k.in_letter)}) for k in keywords if k.in_master_cv])
+            if letter_text is not None and any(k.in_master_cv for k in keywords)
+            else None
+        ),
         pages=pages,
-        attempt=attempt,
+        # Only what this module can actually measure. It used to also report a single column, an
+        # extractable file and no tables as passed — written as `pass_=True`, for a PDF that did
+        # not exist yet. The rendered file is linted where it is rendered (`export/lint.ts`), and
+        # the review rail shows that result in place of these once it has it.
         format_checks=[
-            FormatCheck(id="single_column", pass_=True, message="Single column, standard headings"),
-            FormatCheck(id="extractable", pass_=True, message="Text-extractable PDF and DOCX"),
-            FormatCheck(id="no_tables", pass_=True, message="No tables, images or headers"),
             FormatCheck(id="pages", pass_=fits, message=page_msg),
-            FormatCheck(id="file_name", pass_=True, message=f"File name {cv_file_name(cv, job.company)}"),
+            FormatCheck(
+                id="file_name",
+                pass_=bool(FILE_NAME.fullmatch(file_name)),
+                message=file_name if FILE_NAME.fullmatch(file_name) else f"{file_name} isn't First-Last-CV-Company.pdf",
+            ),
         ],
     )
 

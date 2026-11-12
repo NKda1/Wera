@@ -2,7 +2,7 @@
 
 import { ChevronDown, ExternalLink } from "lucide-react";
 import { useId, useState } from "react";
-import { formatAge, formatLiveness, formatLocation, formatPostedAge, formatSalary, sourceLine, sourceName } from "@/lib/format";
+import { formatAge, formatLiveness, formatLocation, formatOrigin, formatPostedAge, formatSalary, sourceLine, sourceName } from "@/lib/format";
 import type { ScoredJob } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -33,6 +33,7 @@ export function JobCard({
   rank,
   isNew,
   busy,
+  onOpen,
   onApprove,
   onSnooze,
   onReject,
@@ -41,11 +42,14 @@ export function JobCard({
   rank: number;
   isNew: boolean;
   busy: boolean;
+  /** Called when the details are opened: that is what "seen" means (SRCH-25). */
+  onOpen?: () => void;
   onApprove: () => void;
   onSnooze: (days: 1 | 3 | 7) => void;
   onReject: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const origin = formatOrigin(job);
   const detailsId = useId();
   const { fit } = job;
   // MATCH-10: appended rather than replacing anything, and empty for a confirmed job — if every
@@ -56,7 +60,7 @@ export function JobCard({
     .join(" · ");
 
   return (
-    <Card className={cn("animate-fade-in p-5 sm:p-6", isNew && "ring-2 ring-mint-200")} aria-labelledby={`${detailsId}-title`}>
+    <Card className={cn("animate-fade-in p-5 sm:p-6", isNew && "ring-2 ring-forest-700/40")} aria-labelledby={`${detailsId}-title`}>
       <div className="grid grid-cols-[64px_1fr] gap-x-4 gap-y-4 sm:gap-x-5 md:grid-cols-[64px_1fr_112px]">
         <div className="flex flex-col items-center gap-1.5">
           <ScoreRing score={fit.total} roughOnly={fit.roughOnly} />
@@ -64,10 +68,25 @@ export function JobCard({
         </div>
 
         <div className="min-w-0">
+          {/* SRCH-25: a filled tag ahead of the title, in words, so it reads in either theme and to
+              a screen reader — the old one was a pale pill after the title that every run wiped.
+              The origin stays after the tag has gone: where and when a job was found is still
+              worth knowing once it has been read. */}
+          {isNew || origin ? (
+            <p className="mb-1.5 flex flex-wrap items-center gap-2">
+              {isNew ? (
+                <span className="rounded-full bg-forest-700 px-2.5 py-0.5 text-[11px] font-bold tracking-wide text-white uppercase">New</span>
+              ) : null}
+              {origin ? <span className="text-small text-ink-2">{origin}</span> : null}
+            </p>
+          ) : null}
           <h3 id={`${detailsId}-title`} className="text-h2">
             <button
               type="button"
-              onClick={() => setOpen((o) => !o)}
+              onClick={() => {
+                if (!open) onOpen?.();
+                setOpen((o) => !o);
+              }}
               aria-expanded={open}
               aria-controls={detailsId}
               className="group -mx-1 inline-flex items-start gap-1.5 rounded-md px-1 text-left hover:text-forest-700"
@@ -76,11 +95,6 @@ export function JobCard({
               <ChevronDown className={cn("mt-1.5 size-4 shrink-0 text-ink-2 transition-transform group-hover:text-forest-700", open && "rotate-180")} aria-hidden="true" />
               <span className="sr-only">{open ? "Hide details" : "Show details"}</span>
             </button>
-            {isNew ? (
-              <Pill tone="green" dot={false} className="ml-2 align-middle text-[11px]">
-                New
-              </Pill>
-            ) : null}
             {/* CV-08: this score judged a CV, a model or a posting that has since changed. Amber,
                 not red — the score is out of date, not wrong, and it is still the best evidence
                 WERA has until the re-scoring pass reaches this job. */}

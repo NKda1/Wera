@@ -16,12 +16,16 @@ made structural it is, because that is the only kind a model cannot get wrong: s
 `TailorSelection`, which has no free-text field at all.
 """
 
+import re
 from typing import Annotated, Any, Literal
 
 from pydantic import ValidationInfo, field_validator, model_validator
 
+from ..domain.verbatim import appears_in
+from ..domain.vocab import in_post
 from .base import Model, Opt, check, count, fail, required
-from .jobs import JobKeyword, Location, RemoteMode, Salary, SubScore
+from .jobs import Location, RemoteMode, Salary, SubScore
+from .pack import HookType, LetterSection, StrategicContext
 from .profile import Recency, Seniority
 
 Score = Annotated[float, check(lambda v: 0 <= v <= 10, "range", "Scores run from 0 to 10")]
@@ -46,8 +50,9 @@ Term = Annotated[str, required("This can't be empty")]
 # So: a letter under 150 words is a stub, and over 500 is an essay. Either is drift worth one
 # retry carrying the numbers back (§8.5 step 1), which is actionable in a way "write it well"
 # is not.
-LETTER_MIN_WORDS = 150
-LETTER_MAX_WORDS = 500
+# Moved with LTR-01's target (now 180–260): a stub is under 120, an essay over 400.
+LETTER_MIN_WORDS = 120
+LETTER_MAX_WORDS = 400
 
 
 def _cv(info: ValidationInfo) -> Any | None:
@@ -194,13 +199,7 @@ class ParsedCv(Model):
     languages: list[ParsedLanguage]
 
 
-# ---- match.verdict and fit.score ----
-
-
-class MatchVerdict(Model):
-    verdict: Literal["strong", "possible", "weak"]
-    reason: Reason
-    job_quote: str
+# ---- fit.score ----
 
 
 class FitScoreOutput(Model):
@@ -225,8 +224,222 @@ class FitScoreOutput(Model):
 # ---- keywords.extract (ATSC-01) ----
 
 
+KEYWORD_LIMIT = 25  # checkable keywords — what coverage divides by
+CULTURE_LIMIT = 8  # soft skills and culture, display only
+
+
+class ExtractedKeyword(Model):
+    """One term from the post, sorted into the ATS keyword matrix.
+
+    `soft_skill` exists so the model has somewhere to put "cross-functional collaboration" other
+    than the checkable list. Asking it to leave soft skills out entirely meant they leaked in as
+    `required` keywords; giving them their own bucket, split off in code, is what keeps them out
+    of coverage (`fit.keywords_for`).
+    """
+
+    term: Term
+    weight: Literal["required", "nice"]
+    category: Literal["hard_skill", "methodology", "tool", "soft_skill"]
+
+
 class KeywordList(Model):
-    keywords: Annotated[list[JobKeyword], count(0, 25, "", "At most 25 keywords")]
+    keywords: Annotated[
+        list[ExtractedKeyword], count(0, KEYWORD_LIMIT + CULTURE_LIMIT, "", f"At most {KEYWORD_LIMIT + CULTURE_LIMIT} terms")
+    ]
+
+    @field_validator("keywords")
+    @classmethod
+    def _only_what_the_post_says(cls, v: list[ExtractedKeyword], info: ValidationInfo) -> list[ExtractedKeyword]:
+        """A keyword the post doesn't contain is dropped, not argued with.
+
+        A filter for the same reason `Cites` filters ids: one invented term ("Kubernetes", for a
+        post that only says Docker) shouldn't cost the call its retry, when the other twenty are
+        right and dropping it loses nothing. Without the post in context there is nothing to
+        check against, so the list passes through — the read-back side checks it again.
+        """
+        post = (info.context or {}).get("post") if info.context else None
+        return v if post is None else in_post(v, post)
+
+
+# ---- job.analyse ----
+#
+# The parts of the job-description rubric a model has to read for. Title, company and the
+# keyword matrix are not here: WERA already knows the first two, and the matrix is
+# `keywords.extract`'s, so `nodes.analyse` assembles the stored `JobAnalysis` from all three.
+
+
+class RoleProfileOutput(Model):
+    department: str | None
+    industry_name: str | None
+    experience_level: Seniority | None
+
+
+class QuotedContext(StrategicContext):
+    """What the post says about why this hire exists — each one a quote from the post, or null.
+
+    Quotes rather than summaries because the letter is written from these (LTR-06), and the
+    company half of a letter is where a model most wants to invent: there is no CV to hold it to
+    there, only the post. A summary can't be checked; a quote can.
+    """
+
+    @model_validator(mode="after")
+    def _quotes_from_the_post(self, info: ValidationInfo) -> "QuotedContext":
+        """An excerpt the post doesn't contain becomes null — the honest answer, and the one the
+        rubric asks for when a field can't be read off the text."""
+        post = (info.context or {}).get("post") if info.context else None
+        if post is None:
+            return self
+        for name in type(self).model_fields:
+            if not appears_in(getattr(self, name), post):
+                setattr(self, name, None)
+        return self
+
+
+class JobAnalysisOutput(Model):
+    role_profile: RoleProfileOutput
+    strategic_context: QuotedContext
+
+
+# ---- strategist.plan ----
+#
+# The Strategist's reply, and the checks that keep it to what it was asked. It may rank the
+# boards it was shown and propose a few it wasn't; it may not invent a market the person isn't
+# looking in, put a board in a market it doesn't serve, or turn a search term into a query
+# language (`"`, `OR`) that would change what a board search asks.
+
+_HOST = re.compile(r"(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
+_OPERATORS = re.compile(r'["()]|\b(?:OR|AND|NOT)\b')
+_LANG = re.compile(r"[a-z]{2}")
+TERMS_PER_MARKET = 8
+PROPOSALS_PER_PLAN = 2
+
+
+class LocalTermOutput(Model):
+    term: Term
+    language: Term
+    title: Term
+
+
+class ProposedBoardOutput(Model):
+    domain: Term
+    name: Term
+    sectors: list[str]
+    # Unbounded on purpose. It is never stored or shown — it is there so the model has to justify
+    # a suggestion before making it — and as a `Reason` its 200-character cap failed the first
+    # live plan, spending a retry on a sentence nobody reads.
+    why: str
+
+
+class MarketOutput(Model):
+    country: Term
+    languages: list[str]
+    search_terms: Annotated[list[LocalTermOutput], count(0, 20, "", "At most 20 search terms per market")]
+    boards: list[str]
+    proposed_boards: Annotated[list[ProposedBoardOutput], count(0, 5, "", "At most 5 proposed boards per market")]
+
+
+class StrategistOutput(Model):
+    field: Term
+    markets: Annotated[list[MarketOutput], count(0, 8, "", "At most 8 markets")]
+
+    @model_validator(mode="after")
+    def _within_what_was_asked(self, info: ValidationInfo) -> "StrategistOutput":
+        """Filters, like the rest of this module: a stray market or an unknown board is dropped,
+        and the call keeps everything it got right."""
+        ctx = info.context or {}
+        if "boards" not in ctx:
+            return self
+        from ..http import is_denied
+
+        countries: set[str] = ctx.get("countries") or set()
+        boards: dict[str, list[str]] = ctx["boards"]  # known domain → countries it serves ([] = all)
+        titles = {t.casefold() for t in ctx.get("titles") or []}
+        kept: dict[str, MarketOutput] = {}
+        for m in self.markets:
+            m.country = m.country.strip().upper()
+            if m.country in kept or (countries and m.country not in countries):
+                continue
+            m.languages = list(
+                dict.fromkeys(lang.strip().lower() for lang in m.languages if _LANG.fullmatch(lang.strip().lower()))
+            )
+            terms: list[LocalTermOutput] = []
+            for t in m.search_terms:
+                t.term = " ".join(_OPERATORS.sub(" ", t.term).split())
+                t.language = t.language.strip().lower()
+                usable = t.term and len(t.term) <= 60 and t.language in m.languages and t.title.casefold() in titles
+                if usable and t.term.casefold() not in {x.term.casefold() for x in terms}:
+                    terms.append(t)
+            m.search_terms = terms[:TERMS_PER_MARKET]
+            m.boards = list(
+                dict.fromkeys(
+                    d.strip().lower()
+                    for d in m.boards
+                    if d.strip().lower() in boards and (not boards[d.strip().lower()] or m.country in boards[d.strip().lower()])
+                )
+            )
+            proposed: list[ProposedBoardOutput] = []
+            for p in m.proposed_boards:
+                p.domain = p.domain.strip().lower().removeprefix("https://").removeprefix("http://").split("/")[0]
+                if _HOST.fullmatch(p.domain) and p.domain not in boards and not is_denied(f"https://{p.domain}/"):
+                    proposed.append(p)
+            m.proposed_boards = proposed
+            kept[m.country] = m
+        self.markets = list(kept.values())
+        return self
+
+
+# ---- cv.profile ----
+#
+# The judgement half of the CV rubric. Everything a regex or a lookup can answer — identity,
+# per-role tools, numeric achievements — is computed in `domain.cv_profile`, so the model is only
+# asked what needs reading, and everything it returns is checked against the CV.
+
+
+class ImpliedMetric(Model):
+    """An achievement that implies a number without stating one, for the applicant to quantify."""
+
+    bullet_id: Term
+    phrase: Term
+
+
+class CrossFunctionalTrait(Model):
+    trait: Term
+    bullet_ids: list[str]
+
+
+class CvProfileOutput(Model):
+    primary_domains: Annotated[list[Term], count(0, 5, "", "At most 5 domains")]
+    methodologies: Annotated[list[Term], count(0, 10, "", "At most 10 methodologies")]
+    implied_metrics: Annotated[list[ImpliedMetric], count(0, 10, "", "At most 10 implied metrics")]
+    strongest_cross_functional_trait: CrossFunctionalTrait | None
+
+    @model_validator(mode="after")
+    def _backed_by_the_cv(self, info: ValidationInfo) -> "CvProfileOutput":
+        """Filters, not vetoes, like `Cites`: a methodology the CV never names, a phrase that
+        isn't in the bullet it names, and a trait with no line behind it are each dropped."""
+        cv = _cv(info)
+        if cv is None:
+            return self
+        from ..domain.vocab import master_cv_text, text_has_term
+
+        text = master_cv_text(cv)
+        self.methodologies = [m for m in self.methodologies if text_has_term(text, m)]
+        lines = {b.id: b.text for r in [*cv.experience, *cv.projects] for b in r.bullets}
+        # The phrase, not the line: measured live, the model returned whole bullets here, which
+        # points at a line without saying which part of it is the result to quantify.
+        self.implied_metrics = [
+            m
+            for m in self.implied_metrics
+            if m.bullet_id in lines
+            and appears_in(m.phrase, lines[m.bullet_id])
+            and len(m.phrase.strip(" .")) < 0.8 * len(lines[m.bullet_id].strip(" ."))
+        ]
+        trait = self.strongest_cross_functional_trait
+        if trait is not None:
+            trait.bullet_ids = [i for i in trait.bullet_ids if i in lines]
+            if not trait.bullet_ids:
+                self.strongest_cross_functional_trait = None
+        return self
 
 
 # ---- cv.tailor, letter.write, answers.draft ----
@@ -361,6 +574,9 @@ class LetterParagraph(Cites):
     """
 
     theme: str = ""
+    # Which segment of the letter template this paragraph is. Defaulted rather than required so
+    # a reply that leaves it out costs a label, not a retry — the letter is still the letter.
+    section: LetterSection = "core_value_proposition"
 
 
 class LetterOutput(Model):
@@ -370,7 +586,7 @@ class LetterOutput(Model):
     # Which opening the letter commits to. Also write-only, and also not decoration: the opening
     # used to be whatever the model drifted into, which was usually a restatement of the job title.
     # Choosing from a closed set forces a decision about what the first sentence is *for*.
-    hook_type: Literal["Core-Metric", "Company-Mission", "Industry-Problem", "Referral"] = "Core-Metric"
+    hook_type: HookType = "Core-Metric"
     company_quote: str  # LTR-02: one fact quoted word for word from the post
     # LTR-06: a second verbatim fact, about how the company works — its remote or hybrid policy,
     # learning budget, sponsorship, how it's structured. Empty when the post states none, which
@@ -447,13 +663,52 @@ class RepairOutput(Model):
     item: Cites | None
 
 
+# ---- guard.claims ----
+#
+# The citation guard checks numbers and named skills, which a regex can do. It cannot check a
+# claim: "the team adopted it for all outbound LLM traffic" passed it, against a CV line that
+# says only "wrote prompt templates and evaluation notes … with the security team". This is the
+# check that can, held to the same rule as everything else here — a finding is a quote.
+
+
+class ClaimFinding(Model):
+    location: Term  # which paragraph, as given ("p0")
+    claim: Term  # the unsupported words, copied from that paragraph
+
+
+class ClaimCheck(Model):
+    findings: Annotated[list[ClaimFinding], count(0, 20, "", "At most 20 findings")]
+
+    @field_validator("findings")
+    @classmethod
+    def _quoted_from_the_paragraph(cls, v: list[ClaimFinding], info: ValidationInfo) -> list[ClaimFinding]:
+        """A finding that isn't a quote from the paragraph it names is dropped: the checker may
+        point at words, never put them in a letter's mouth."""
+        texts: dict[str, str] | None = (info.context or {}).get("paragraphs") if info.context else None
+        if texts is None:
+            return v
+        return [f for f in v if f.location in texts and appears_in(f.claim, texts[f.location])]
+
+
 # ---- job.normalise and email.extract ----
 
 
 class NormalisedJob(Model):
-    title: Annotated[str, required("Add a title")]
-    company: Annotated[str, required("Add a company")]
+    # A way to say "this page isn't a job" that is an answer, not a failure. Without it a model
+    # shown an advert slot or a listing correctly returned no title — which failed `required`,
+    # was retried, failed again, and then fell through to a paid Firecrawl scrape of the same
+    # non-job (seen in Logfire on a live harvest, 2026-11-10).
+    is_job_posting: bool
+    title: str | None
+    company: str | None
     location: Location
+
+    @model_validator(mode="after")
+    def _a_posting_has_its_facts(self) -> "NormalisedJob":
+        if self.is_job_posting and not ((self.title or "").strip() and (self.company or "").strip()):
+            raise fail("required", "A job posting needs its title and company; if this isn't one, set isJobPosting to false")
+        return self
+
     remote: RemoteMode | None
     salary: Opt[Salary] = None
     language: str
@@ -472,11 +727,3 @@ class JobCard(Model):
 
 class JobCardList(Model):
     cards: list[JobCard]
-
-
-# ---- outreach.draft ----
-
-
-class OutreachDraft(Model):
-    note: str
-    follow_up: str

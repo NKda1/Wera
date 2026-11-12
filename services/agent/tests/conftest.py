@@ -9,6 +9,7 @@ from wera_agent import clock, tasks
 from wera_agent.config import wera
 from wera_agent.db.session import make_engine, reset_caches, transaction
 from wera_agent.main import create_app
+from wera_agent.migrate import wipe_postgres
 from wera_agent.paths import FIXTURES_DIR
 from wera_agent.schemas.cv import MasterCV
 from wera_agent.services import store as store_module
@@ -28,13 +29,14 @@ def _wipe_postgres(url: str) -> None:
     """A clean database per test, the way a fresh SQLite file is.
 
     Dropping the schema takes the Alembic version table and LangGraph's checkpoint tables with
-    it, which matches SQLite, where the checkpoints live in their own throwaway file.
+    it, which matches SQLite, where the checkpoints live in their own throwaway file. Migration
+    0011's own schemas go too (`migrate.SCHEMAS`), or one test's archived records would be the
+    next one's.
     """
     engine = make_engine(url)
     try:
         with engine.begin() as conn:
-            conn.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE")
-            conn.exec_driver_sql("CREATE SCHEMA public")
+            wipe_postgres(conn)
     finally:
         engine.dispose()
 
@@ -53,7 +55,19 @@ def isolated(tmp_path, monkeypatch) -> Iterator[None]:
     monkeypatch.setenv("LOGFIRE_ENABLED", "false")
     monkeypatch.setenv("LOGFIRE_IGNORE_NO_CONFIG", "1")
     monkeypatch.setenv("AGENT_TOKEN", TOKEN)
-    for name in ("LLM_API_KEY", "FIRECRAWL_API_KEY", "ALERTS_IMAP_APP_PASSWORD", "ALERTS_IMAP_USER"):
+    # Loopback is open to the tests (the ASGI client needs it), and a developer's own Redis listens
+    # there — so the suite points at a port nothing serves. Tests that want a queue get `fakeredis`.
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:1/0")
+    # A shell's DEMO_DATABASE_URL would win over the DATABASE_URL set above, since tests run in demo mode.
+    for name in (
+        "LLM_API_KEY",
+        "FIRECRAWL_API_KEY",
+        "SERPER_API_KEY",
+        "ALERTS_IMAP_APP_PASSWORD",
+        "ALERTS_IMAP_USER",
+        "DEMO_DATABASE_URL",
+        "LOGFIRE_READ_TOKEN",
+    ):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
     reset_caches()

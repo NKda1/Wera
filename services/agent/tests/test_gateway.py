@@ -132,7 +132,11 @@ def generate(store, **kwargs):
 
 
 def calls(store, task: str = "profile.generate") -> list[LlmCallRow]:
-    """Rows for one task. Seeding the demo database drafts packs, so the table isn't empty."""
+    """Rows for one task. Seeding the demo database drafts packs, so the table isn't empty.
+
+    Written first: call rows wait on the session until it commits (`gateway._record`), and these
+    tests read inside the unit of work that made the calls."""
+    gateway.write_pending(store.s)
     return list(store.s.scalars(select(LlmCallRow).where(LlmCallRow.task == task).order_by(LlmCallRow.id)).all())
 
 
@@ -242,6 +246,22 @@ class TestTruncation:
         assert "did not fit the required shape" not in json.dumps(second["messages"])
 
     @respx.mock
+    def test_a_full_effort_task_cut_off_retries_without_thinking(self, store, live, monkeypatch):
+        """A full-effort task that hits its ceiling thought until stopped; on the live letters the
+        doubled retry ran away just as often, and the same call without thinking never did."""
+        from wera_agent.config import wera
+
+        spec = wera().task("profile.generate")
+        monkeypatch.setattr(spec, "reasoning", "on")
+        respx.post(COMPLETIONS).mock(side_effect=[truncated(), reply(GOOD)])
+        assert generate(store).titles
+        first, second = (json.loads(c.request.content) for c in respx.calls)
+        assert first["reasoning"] == {"effort": "high"}
+        assert second["reasoning"] == {"enabled": False}
+        # The answer's own budget, with no thinking allowance on top, rather than double both.
+        assert second["max_completion_tokens"] == spec.max_tokens
+
+    @respx.mock
     def test_cut_off_twice_gives_up_and_names_the_cause(self, store, live):
         route = respx.post(COMPLETIONS).mock(side_effect=[truncated(), truncated()])
         with pytest.raises(ApiError) as caught:
@@ -264,6 +284,37 @@ class TestTruncation:
         for row in cut_off:
             assert (row.input_tokens, row.output_tokens) == (800, 2700)
             assert row.cost_usd > 0
+
+
+class TestAModelCallHoldsNoLock:
+    """Logfire showed "database is locked" failing drafts, intake runs and the startup sweep: the
+    call row was flushed at the first model call, which took SQLite's one write lock and held it
+    through every call after. A unit of work mid-way through its model calls must leave the
+    database writable by everyone else."""
+
+    def test_another_writer_can_commit_while_a_call_is_uncommitted(self, client):
+        from wera_agent.db.models import KvRow
+        from wera_agent.db.session import transaction
+        from wera_agent.services.store import Store
+
+        with transaction() as session:
+            store = Store(session)
+            generate(store)
+            # The unit of work is still open, with a call made and a write of its own pending.
+            store.s.add(KvRow(key="mid-draft", value=1))
+            with transaction() as other:
+                other.add(KvRow(key="someone-else", value=1))  # commits on exit; failed after 15s
+        with transaction() as session:
+            assert session.get(KvRow, "someone-else") is not None
+            assert calls(Store(session)), "the call row is still written, at commit"
+
+    def test_the_budget_counts_calls_not_yet_written(self, store):
+        from wera_agent.llm.pricing import spent_this_week_usd
+
+        before = spent_this_week_usd(store.s, store.now)
+        store.s.info.setdefault("wera.llm_calls", []).append({"cost_usd": 0.5, "called_at": "9999-01-01T00:00:00.000Z"})
+        assert spent_this_week_usd(store.s, store.now) == pytest.approx(before + 0.5)
+        store.s.info.pop("wera.llm_calls")  # a stand-in, not a row to write at commit
 
 
 class TestWhatACallCost:

@@ -28,7 +28,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import Runnable
 from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from ..clock import iso, now_ms
@@ -40,7 +40,7 @@ from ..errors import ApiError
 from ..pii import ContactRedactor, NullRedactor, Redactor
 from ..settings import get_settings
 from . import demo
-from .pricing import budget, cost_usd
+from .pricing import PENDING, budget, cost_usd
 from .prompts import RETRY_NOTE, template
 
 # §9.4: stable codes. The provider's own message never reaches the caller.
@@ -297,6 +297,12 @@ def _publish(row: dict[str, Any]) -> None:
             span.set_attribute("llm.code", row["code"])
 
 
+def _trace_id() -> str | None:
+    """The current trace's id in Logfire's spelling, or None outside one (OBS-02)."""
+    context = trace.get_current_span().get_span_context()
+    return format(context.trace_id, "032x") if context.is_valid else None
+
+
 def _record(
     session: Session,
     *,
@@ -342,13 +348,40 @@ def _record(
         "detail": detail[:300] if detail else None,
         "attempt": attempt,
         "called_at": iso(now_ms()),
+        "trace_id": _trace_id(),
     }
     _publish(row)
-    session.add(LlmCallRow(**row))
-    session.flush()
+    # Kept on the session, not flushed. Flushing here took SQLite's single write lock at the first
+    # model call of a unit of work and held it through every call after — a letter and its retry
+    # held it for over 100 seconds — and every other writer waited 15s and failed. Logfire showed
+    # it as "database is locked" on drafts, intake runs and the startup sweep. Written at commit
+    # instead (`_write_pending_calls`), so the lock is held for milliseconds.
+    session.info.setdefault(PENDING, []).append(row)
     if not ok:
         _unrecorded.append(row)
     return cost
+
+
+@event.listens_for(Session, "before_commit")
+def _write_pending_calls(session: Session) -> None:
+    """The calls this unit of work made, written as it commits (`_record`)."""
+    rows = session.info.pop(PENDING, None)
+    if rows:
+        session.add_all(LlmCallRow(**r) for r in rows)
+
+
+@event.listens_for(Session, "after_soft_rollback")
+def _drop_pending_calls(session: Session, _previous: Any) -> None:
+    """Rolled back with the work they were for, as a flushed row would have been. A failed call is
+    also in `_unrecorded`, so its cost is still written by `flush_unrecorded`."""
+    session.info.pop(PENDING, None)
+
+
+def write_pending(session: Session) -> None:
+    """Puts this session's pending call rows in it now. For code — tests, mostly — that reads
+    `llm_calls` inside the same unit of work that made the calls."""
+    _write_pending_calls(session)
+    session.flush()
 
 
 # Failed calls whose row may be rolled back with the work they were for. Written by
@@ -471,18 +504,21 @@ def _structured[Out: BaseModel](
     """
     cfg = wera()
     spec = cfg.task(task)
-    saved = state.settings_data(session)
-    limit = float(saved.get("weeklyBudgetUsd", cfg.weekly_budget_usd))
-
-    # COST-01, before anything is built or sent.
-    spend = budget(session, limit)
+    # Reads only, and without autoflush: a write the caller has pending would otherwise be
+    # flushed here — taking the write lock — and held through the model call that follows.
+    # Measured: the Strategist's CV-profile cache write was flushed by this read and then held for
+    # its 50-second call, and the startup sweep failed on "database is locked" behind it.
+    with session.no_autoflush:
+        saved = state.settings_data(session)
+        limit = float(saved.get("weeklyBudgetUsd", cfg.weekly_budget_usd))
+        # COST-01, before anything is built or sent.
+        spend = budget(session, limit)
+        # PRIV-01. Demo mode redacts too, so the demo path exercises the same code.
+        redactor = _redactor(session, redact and bool(saved.get("redactContact", True)))
     if spend.reached:
         raise _fail(BUDGET)
     if spend.warn:  # COST-02
         logfire.warn("Weekly LLM budget at {percent}%", percent=round(spend.fraction * 100), task=task)
-
-    # PRIV-01. Demo mode redacts too, so the demo path exercises the same code.
-    redactor = _redactor(session, redact and bool(saved.get("redactContact", True)))
     prompt_vars: dict[str, Any] = {}
     mapping: dict[str, str] = {}
     for key, value in variables.items():
@@ -508,8 +544,9 @@ def _structured[Out: BaseModel](
     # `settings_data` backfills a tier the stored blob predates, so this can't KeyError.
     models = [saved["models"][spec.tier], *cfg.fallbacks.get(spec.tier, [])]
     ceiling = spec.max_tokens
-    headroom = _HEADROOM[spec.reasoning]
-    chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=spec.reasoning, headroom=headroom)
+    reasoning: Effort = spec.reasoning
+    headroom = _HEADROOM[reasoning]
+    chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=reasoning, headroom=headroom)
     messages = template(task).format_messages(**prompt_vars)
     errors: str | None = None
 
@@ -520,7 +557,7 @@ def _structured[Out: BaseModel](
         thing, and which one arrives depends on the provider and the structured-output method,
         so they share this.
         """
-        nonlocal ceiling, headroom, chain, errors
+        nonlocal ceiling, headroom, reasoning, chain, errors
         _record(
             session,
             task=task,
@@ -536,11 +573,22 @@ def _structured[Out: BaseModel](
         logfire.warn("{task} was cut off at {tokens} tokens", task=task, tokens=ceiling + headroom)
         if attempt > 1:
             return False
-        # Both, not just the ceiling: a reply cut off because the *thinking* ran long is not
-        # helped by more room for the answer.
-        ceiling *= TRUNCATION_RETRY_FACTOR
-        headroom *= TRUNCATION_RETRY_FACTOR
-        chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=spec.reasoning, headroom=headroom)
+        if reasoning == "on":
+            # A full-effort task that hit its ceiling thought until it was stopped, and more room
+            # doesn't stop that. Measured on qwen3.8-27b's letters (2026-11-10, 11 live packs):
+            # about half of first attempts ran to 5,500 tokens of thinking, the doubled retry ran
+            # to 11,000 about half the time again — on any upstream host, not a bad one — and
+            # neither `effort: low` nor an explicit thinking budget stopped it. The same letter
+            # without thinking came back first time in all five tries, in ~600 tokens. A plainer
+            # letter the guard has checked beats a failed pack that cost three times as much.
+            reasoning, headroom = "off", 0
+            logfire.warn("{task} ran out of room thinking; retrying without thinking", task=task)
+        else:
+            # Both, not just the ceiling: a reply cut off because the *thinking* ran long is not
+            # helped by more room for the answer.
+            ceiling *= TRUNCATION_RETRY_FACTOR
+            headroom *= TRUNCATION_RETRY_FACTOR
+        chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=reasoning, headroom=headroom)
         errors = None  # nothing was wrong with the shape; the reply never got as far as a shape
         return True
 

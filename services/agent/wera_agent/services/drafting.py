@@ -10,15 +10,18 @@ which is why a half-drafted pack is still a readable pack.
 
 from dataclasses import replace
 
+import logfire
 from sqlalchemy.orm import Session
 
 from ..config import wera
 from ..errors import ApiError
+from ..llm.demo import PackInput
+from ..nodes.analyse import analyse as analyse_job
 from ..nodes.answers import answers as draft_answers
 from ..nodes.ats import build_ats, reconcile_skills
 from ..nodes.tailor import letter as write_letter
 from ..nodes.tailor import tailor as tailor_cv
-from ..schemas.pack import TailoredCV
+from ..schemas.pack import CoverLetter, JobAnalysis, TailoredCV
 from ..sources.greenhouse import fetch_questions
 from .store import Store
 
@@ -31,9 +34,35 @@ def step_cv(session: Session, app_id: str, *, note: str | None) -> None:
     """
     store = Store(session)
     inp = store.draft_input(app_id, note=note)
+    analysis = _analyse(session, store, app_id, inp)
     doc = tailor_cv(session, inp)
     doc = reconcile_skills(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, threshold=wera().ats_threshold)
+    # Both saved after the model calls, never between them: a save takes SQLite's one write lock,
+    # and saving the analysis first held it through the tailoring call.
+    if analysis is not None:
+        store.save_document(app_id, "analysis", analysis)
     store.save_document(app_id, "cv", doc)
+
+
+def _analyse(session: Session, store: Store, app_id: str, inp: PackInput) -> JobAnalysis | None:
+    """The job-description rubric, once per application (`nodes.analyse`), or None to keep what
+    the application already has.
+
+    First, because the letter is written from it; and only once, because a redraft is a change
+    to the documents, not to the job — so it reuses the analysis it already has.
+
+    A failure here doesn't stop the pack. The analysis is context the letter draws on when it is
+    there, and a letter without it is the letter WERA wrote before the rubric existed: weaker on
+    the company paragraph, not wrong. Failing the whole draft over it would trade a good CV for
+    a better sentence.
+    """
+    if store.has_document(app_id, "analysis"):
+        return None
+    try:
+        return analyse_job(session, inp.job, inp.evidence)
+    except ApiError as exc:
+        logfire.warn("Couldn't analyse {job_id} for its pack: {code}", job_id=inp.job.id, code=exc.code)
+        return None
 
 
 def step_letter(session: Session, app_id: str, *, note: str | None) -> None:
@@ -49,7 +78,8 @@ def step_ats(session: Session, app_id: str, *, note: str | None) -> None:
     store = Store(session)
     inp = store.draft_input(app_id, note=note)
     doc = store.load_document(app_id, "cv", TailoredCV)
-    report = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, attempt=1)
+    letter = store.load_document(app_id, "letter", CoverLetter)
+    report = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, letter=letter)
     store.save_document(app_id, "ats", report)
 
 

@@ -30,7 +30,14 @@ class TestSchedule:
     def test_the_watchlist_runs_each_morning_and_the_inbox_through_the_day(self):
         """SCH-01."""
         jobs = {job.id: job for job in scheduler.build().get_jobs()}
-        assert set(jobs) == {"morning-watchlist", "inbox-check", "daily-recheck"}
+        assert set(jobs) == {"morning-watchlist", "inbox-check", "daily-recheck", "nightly-backup", "telemetry-archive"}
+
+        # REL-05: the backup runs in the small hours, before anything scheduled starts writing.
+        backup = str(jobs["nightly-backup"].trigger)
+        assert "hour='3'" in backup and "minute='0'" in backup
+        # OBS-01: the archive after it, so a dump never catches a night's records half-written.
+        archive = str(jobs["telemetry-archive"].trigger)
+        assert "hour='3'" in archive and "minute='15'" in archive
 
         # SRCH-13: after the watchlist, not before — its fresh feed answers confirm part of the
         # estate for free, which is that many fewer HTTP checks.
@@ -47,14 +54,15 @@ class TestSchedule:
         assert "hour='7-22/3'" in inbox and "minute='0'" in inbox
         assert list(jobs["inbox-check"].args) == [["email_alert"]]
 
-    def test_nothing_scheduled_ever_starts_a_board_search(self):
-        """SCH-01: board search is the only channel that spends Firecrawl credits, so it runs
-        when a person asks and at no other time.
+    def test_nothing_scheduled_by_default_starts_a_board_search(self):
+        """SCH-01: board search spends Firecrawl credits, so it runs on a schedule only when the
+        person has turned the scheduled search on (`TestTheScheduledSearch`) — never by default.
 
         Asserted over every job rather than against the one that used to carry it: the next
         channel added to the morning sweep should have to pass this too.
         """
         for job in scheduler.build().get_jobs():
+            assert job.id != scheduler.SEARCH_JOB
             for channels in job.args:
                 assert "board_search" not in channels, f"{job.id} would spend credits on its own"
 
@@ -134,3 +142,75 @@ class TestNow:
         trigger = scheduler.build().get_job("morning-watchlist").trigger
         # APScheduler resolves a naive cron against the local zone, which is what we want here.
         assert trigger.timezone is not None
+
+
+class TestTheScheduledSearch:
+    """SCH-01's opt-in half: the Strategist and the Harvester, on a schedule the person chose."""
+
+    @pytest.fixture
+    def pending(self, monkeypatch):
+        """A built, unstarted scheduler in the module slot — enough to add and inspect jobs."""
+        built = scheduler.build()
+        monkeypatch.setattr(scheduler, "_scheduler", built)
+        return built
+
+    def test_turning_it_on_adds_the_job_and_off_removes_it(self, pending):
+        scheduler.apply_search_schedule({"enabled": True, "cron": "0 8 * * 1-5"})
+        job = pending.get_job(scheduler.SEARCH_JOB)
+        assert job is not None and "hour='8'" in str(job.trigger) and "day_of_week='1-5'" in str(job.trigger)
+        scheduler.apply_search_schedule({"enabled": True, "cron": "30 18 * * *"})
+        assert "hour='18'" in str(pending.get_job(scheduler.SEARCH_JOB).trigger)
+        scheduler.apply_search_schedule({"enabled": False, "cron": "30 18 * * *"})
+        assert pending.get_job(scheduler.SEARCH_JOB) is None
+
+    def test_a_schedule_it_cant_read_schedules_nothing(self, pending):
+        scheduler.apply_search_schedule({"enabled": True, "cron": "whenever"})
+        assert pending.get_job(scheduler.SEARCH_JOB) is None
+
+    def test_saving_the_setting_applies_it_once_the_save_commits(self, store, pending):
+        import asyncio
+
+        from wera_agent.schemas.settings import SettingsPatch
+
+        store.put_settings(SettingsPatch.model_validate({"searchSchedule": {"enabled": True, "cron": "0 7 * * *"}}))
+        assert pending.get_job(scheduler.SEARCH_JOB) is None  # not before the commit
+        ((make, name),) = [d for d in store.deferred if d[1] == "scheduled-search:apply"]
+        asyncio.run(make())
+        assert pending.get_job(scheduler.SEARCH_JOB) is not None
+
+    def test_it_runs_one_board_search_and_leaves_the_plan_to_the_pipeline(self, client, monkeypatch):
+        """SRCH-20: planning is stage 1 of every board search, so the schedule doesn't do it twice —
+        it used to refresh the plan first and then start a search that read it."""
+        import asyncio
+
+        from wera_agent.services.store import Store
+
+        monkeypatch.setattr(Store, "refresh_strategy", lambda self: pytest.fail("the scheduler planned on its own"))
+        ran: list[list[str]] = []
+
+        async def run(channels):
+            ran.append(channels)
+
+        monkeypatch.setattr(scheduler, "_run_channels", run)
+        asyncio.run(scheduler._scheduled_search())
+        assert ran == [["board_search"]]
+
+    def test_the_next_run_is_reported_only_when_it_is_on(self):
+        assert scheduler.next_search_at({"enabled": False, "cron": "0 8 * * *"}) is None
+        assert scheduler.next_search_at({"enabled": True, "cron": "0 8 * * *"}).endswith(":00")
+
+
+class TestTheScheduleSetting:
+    def test_too_often_is_refused_with_a_reason_on_the_field(self, api):
+        body = api("PUT", "/settings", {"searchSchedule": {"enabled": True, "cron": "0 */2 * * *"}})[1]
+        assert body["error"]["code"] == "VALIDATION"
+        assert "6 hours" in body["error"]["fields"]["searchSchedule.cron"]
+
+    def test_a_schedule_that_isnt_one_is_refused(self, api):
+        body = api("PUT", "/settings", {"searchSchedule": {"enabled": True, "cron": "every morning"}})[1]
+        assert "five fields" in body["error"]["fields"]["searchSchedule.cron"]
+
+    def test_it_is_off_until_turned_on_and_saved_as_given(self, api):
+        assert api.ok("GET", "/settings")["searchSchedule"]["enabled"] is False
+        saved = api.ok("PUT", "/settings", {"searchSchedule": {"enabled": True, "cron": "0 9 * * 1,3,5"}})
+        assert saved["searchSchedule"]["enabled"] is True and saved["searchSchedule"]["cron"] == "0 9 * * 1,3,5"

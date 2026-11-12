@@ -28,10 +28,16 @@ class Settings(BaseSettings):
 
     wera_demo_mode: bool = True
     database_url: str | None = None
+    # Demo mode's own database. Separate so that a DATABASE_URL in .env.local — which points at
+    # the real data — can never be what a demo writes its sample jobs into.
+    demo_database_url: str | None = None
     data_dir: Path = ROOT / "data"
 
     # Tracing. Off in effect without a Logfire project token; see wera_agent/observability.py.
     logfire_enabled: bool = True
+    # OBS-01: a project *read* token, for copying Logfire's records into `telemetry.records`
+    # (services/telemetry_archive.py). The write token in .logfire/ can't read.
+    logfire_read_token: SecretStr | None = None
 
     # Service-to-service auth between the web app and this service (loopback only).
     agent_token: SecretStr | None = None
@@ -44,6 +50,13 @@ class Settings(BaseSettings):
     # gateway can sit in front of it without any node changing (see wera_agent/pii.py).
     llm_proxy_url: str | None = None
     firecrawl_api_key: SecretStr | None = None
+    # SRCH-20's discovery: serper.dev, which answers Google searches over an API. Google's own
+    # robots.txt disallows `/search` for every agent, so this is the way to ask Google that
+    # doesn't mean fetching a page that says no.
+    serper_api_key: SecretStr | None = None
+    # Where discovered postings wait for the Harvester (`sources.targets`). Loopback by default;
+    # nothing in it outlives a week.
+    redis_url: str = "redis://127.0.0.1:6379/0"
     alerts_imap_host: str | None = None
     alerts_imap_user: str | None = None
     alerts_imap_app_password: SecretStr | None = None
@@ -51,10 +64,17 @@ class Settings(BaseSettings):
 
     @property
     def db_url(self) -> str:
+        """Postgres on this machine unless DATABASE_URL says otherwise (REL-04).
+
+        Every real run — the app, demo mode, the eval, the schedule — uses Postgres. SQLite is
+        what the unit tests point DATABASE_URL at (`tests/conftest.py`), and nothing else: a
+        default that quietly made a SQLite file would split someone's data across two databases.
+        """
+        if self.wera_demo_mode and self.demo_database_url:
+            return self.demo_database_url
         if self.database_url:
             return self.database_url
-        name = "demo.db" if self.wera_demo_mode else "wera.db"
-        return f"sqlite:///{self.data_dir / name}"
+        return f"postgresql://localhost/{'wera_demo' if self.wera_demo_mode else 'wera'}"
 
     def secret_status(self) -> dict[str, SecretStatus]:
         def status(v: SecretStr | None) -> SecretStatus:
@@ -63,6 +83,7 @@ class Settings(BaseSettings):
         return {
             "llm": status(self.llm_api_key),
             "firecrawl": status(self.firecrawl_api_key),
+            "serper": status(self.serper_api_key),
             "inbox": status(self.alerts_imap_app_password),
         }
 

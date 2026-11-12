@@ -68,7 +68,7 @@ class TestGatesSurviveARestart:
 
         run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
 
-        assert documents(app_id) == {"cv", "letter", "ats", "answers"}
+        assert documents(app_id) == {"analysis", "cv", "letter", "ats", "answers"}
         assert status_of(app_id) == "ready_for_review"
 
     def test_gate_2_is_still_pending_after_a_restart(self, client, approved):
@@ -144,15 +144,16 @@ class TestRestartRecovery:
         with pytest.raises(Crash):
             run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
 
-        # The CV survived; the letter never happened; the application is still drafting.
-        assert documents(app_id) == {"cv"}
+        # The CV (and the job analysis before it) survived; the letter never happened; the
+        # application is still drafting.
+        assert documents(app_id) == {"analysis", "cv"}
         assert status_of(app_id) == "drafting"
         assert run(graph.pending_gate(JOB)) is None  # stopped mid-run, not at a gate
 
         # WERA restarts.
         monkeypatch.setattr(demo, "respond", real)
         assert run(graph.resume_unfinished()) == 1
-        assert documents(app_id) == {"cv", "letter", "ats", "answers"}
+        assert documents(app_id) == {"analysis", "cv", "letter", "ats", "answers"}
         assert status_of(app_id) == "ready_for_review"
 
 

@@ -69,6 +69,10 @@ def _tick(done: int, total: int, label: str = "") -> None:
 
 AGREEMENT_TOLERANCE = 1.5  # SPEC §12.2
 PASS_AGREEMENT = 80.0  # the share of ads that must agree, in percent
+# The share of expected keywords a live run must find. Below the last measured live run (92%),
+# because `hand_scores.yaml` keyword lists are a starting point and a strict gate on a list
+# nobody has finished writing would fail for the list's sake.
+PASS_RECALL = 0.8
 
 DAY_MS = 24 * 60 * 60 * 1000
 
@@ -191,11 +195,17 @@ def keyword_hit(expected: str, found: list[str]) -> bool:
     """Whether one expected term is covered by anything the extractor returned.
 
     A match either way round counts: a found term may be narrower than the expected one
-    ("guardrails" for "LLM guardrails") or wider ("Python 3" for "Python").
+    ("guardrails" for "LLM guardrails") or wider ("Python 3" for "Python"). So does a spelling
+    the synonym map accepts: `keywords.extract` writes the post's own token now, so "Postgres"
+    for an expected "PostgreSQL" is the extractor being right, not missing it.
     """
+    from .domain.vocab import text_has_term
+
     want = _terms(expected)
     if not want:
         return False
+    if any(text_has_term(f, expected) for f in found):
+        return True
     return any(want <= have or (have and have <= want) for have in (_terms(f) for f in found))
 
 
@@ -341,12 +351,19 @@ class Report:
           exercise the contract, not to match anyone's judgement. A demo run that agreed with
           the hand scores would be a coincidence, and failing CI on it would be noise. The run
           still has to score all twenty ads, which is the regression this catches.
+
+        A live run also has to find the keywords (`PASS_RECALL`). Coverage divides by that list,
+        so an extractor that misses half the post makes every pack's ATS score look better than
+        it is — and recall was reported here but never held to anything. Not in demo mode: demo
+        extraction starts from the CV's own skills, so its recall measures the fixture.
         """
         if self.failed:
             return False
-        if self.demo_mode or self.agreement is None:
+        if self.demo_mode:
             return True
-        return self.agreement >= PASS_AGREEMENT
+        if self.keyword_recall is not None and self.keyword_recall < PASS_RECALL:
+            return False
+        return self.agreement is None or self.agreement >= PASS_AGREEMENT
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -357,6 +374,7 @@ class Report:
             "ranAt": self.ran_at,
             "tolerance": AGREEMENT_TOLERANCE,
             "passAgreement": PASS_AGREEMENT,
+            "passRecall": PASS_RECALL,
             "ads": len(self.rows),
             "compared": len(self.compared),
             "unscored": len(self.unscored),
@@ -389,7 +407,7 @@ def _scratch_database(directory: Path) -> Iterator[None]:
     from .settings import get_settings
 
     previous = os.environ.get("DATABASE_URL")
-    os.environ["DATABASE_URL"] = f"sqlite:///{directory / 'eval.db'}"
+    os.environ["DATABASE_URL"] = _scratch_url(get_settings().db_url, directory)
     get_settings.cache_clear()
     reset_caches()
     try:
@@ -401,6 +419,46 @@ def _scratch_database(directory: Path) -> Iterator[None]:
             os.environ["DATABASE_URL"] = previous
         get_settings.cache_clear()
         reset_caches()
+
+
+def _scratch_url(configured: str, directory: Path) -> str:
+    """Where an eval writes: never the configured database, and always empty when it starts.
+
+    On Postgres, a sibling database on the same server — `wera` evaluates in `wera_eval` — made if
+    it doesn't exist and wiped before every run. A sibling rather than a schema inside `wera`: a
+    scratch schema is one wrong `search_path` away from writing golden ads into someone's real
+    shortlist, and a separate database cannot be. On SQLite (the unit tests), a file in `directory`.
+    """
+    from sqlalchemy.engine import make_url
+
+    url = make_url(configured)
+    if url.get_backend_name() == "sqlite":
+        return f"sqlite:///{directory / 'eval.db'}"
+    scratch = url.set(database=f"{url.database}_eval")
+    _create_and_wipe(url, scratch.database or "")
+    return scratch.render_as_string(hide_password=False)
+
+
+def _create_and_wipe(server: Any, name: str) -> None:
+    """Make database `name` on `server`'s Postgres if it isn't there, then empty it."""
+    from .db.session import make_engine
+    from .migrate import wipe_postgres
+
+    admin = make_engine(server.set(database="postgres").render_as_string(hide_password=False))
+    try:
+        # CREATE DATABASE can't run inside a transaction block.
+        with admin.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            exists = conn.exec_driver_sql("SELECT 1 FROM pg_database WHERE datname = %s", (name,)).scalar()
+            if not exists:
+                conn.exec_driver_sql(f'CREATE DATABASE "{name}"')
+    finally:
+        admin.dispose()
+    scratch = make_engine(server.set(database=name).render_as_string(hide_password=False))
+    try:
+        with scratch.begin() as conn:
+            wipe_postgres(conn)
+    finally:
+        scratch.dispose()
 
 
 def _use_model(session: Any, model: str | None) -> str:
@@ -571,6 +629,9 @@ class PackRow:
     skills: int = 0
     guard_pass: bool = False
     ats_coverage: float = 0.0
+    # The share of what the CV can back that the pack covers — the half of coverage WERA is
+    # accountable for, and the one `PackReport.passed` holds to the threshold.
+    backed_coverage: float = 0.0
     pages: float = 0.0
     letter_words: int = 0
     seconds: float = 0.0
@@ -629,6 +690,11 @@ class PackReport:
         return sum(r.ats_coverage for r in done) / len(done) if done else 0.0
 
     @property
+    def mean_backed_coverage(self) -> float:
+        done = self.completed
+        return sum(r.backed_coverage for r in done) / len(done) if done else 0.0
+
+    @property
     def guard_pass_rate(self) -> float:
         done = self.completed
         return 100.0 * sum(1 for r in done if r.guard_pass) / len(done) if done else 0.0
@@ -637,8 +703,17 @@ class PackReport:
     def passed(self) -> bool:
         """Every pack has to come back whole. There is no tolerance here on purpose: a pack that
         failed is one the person cannot send, and a 90% success rate means one application in
-        ten silently isn't there."""
-        return bool(self.rows) and len(self.completed) == len(self.rows)
+        ten silently isn't there.
+
+        And the packs have to cover what the CV can back, on average, to ATSC-03's threshold.
+        Coverage was recorded here and never judged, so a run measured at 48% (`packs-deepseek-…`)
+        passed exactly as a run at 92% did. Backed coverage rather than raw: a post asking for
+        ten things the CV has never heard of is not a pack WERA wrote badly.
+        """
+        from .config import wera
+
+        whole = bool(self.rows) and len(self.completed) == len(self.rows)
+        return whole and self.mean_backed_coverage >= wera().ats_threshold
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -650,6 +725,7 @@ class PackReport:
             "guardPassRate": round(self.guard_pass_rate, 1),
             "meanBullets": round(self.mean_bullets, 1),
             "meanAtsCoverage": round(self.mean_coverage, 3),
+            "meanBackedCoverage": round(self.mean_backed_coverage, 3),
             "failures": self.failures,
             "costUsd": round(self.cost_usd, 4),
             "calls": self.calls,
@@ -731,6 +807,7 @@ def run_packs(*, model: str | None = None, cv_path: Path | None = None, ads: int
                     row.skills = len(pack.cv.skills)
                     row.guard_pass = pack.cv.guard.pass_ and pack.letter.guard.pass_
                     row.ats_coverage = pack.ats.coverage
+                    row.backed_coverage = pack.ats.backed_coverage
                     row.pages = pack.ats.pages
                     row.letter_words = pack.letter.word_count
             except _Skip:
@@ -791,6 +868,7 @@ def packs_as_markdown(report: PackReport) -> str:
         f"| Guard pass rate | {report.guard_pass_rate:.0f}% |",
         f"| Mean bullets selected | {report.mean_bullets:.1f} |",
         f"| Mean ATS coverage | {report.mean_coverage:.0%} |",
+        f"| Mean backed coverage | {report.mean_backed_coverage:.0%} |",
         f"| Model calls | {report.calls} |",
         f"| Cost | ${report.cost_usd:.4f} |",
         "",

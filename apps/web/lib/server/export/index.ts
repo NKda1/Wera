@@ -64,3 +64,21 @@ export async function renderExport(
   const bytes = new Uint8Array(await renderToBuffer(paper(doc)));
   return { bytes, fileName, contentType: TYPES.pdf, checks: await lintPdf(bytes, doc, fileName, maxPages) };
 }
+
+/**
+ * The format lint for a pack still under review: the same render and the same `lintPdf` the
+ * download runs, with the file thrown away afterwards.
+ *
+ * Not behind the approval gate, because nothing is handed over — and the checks are most use
+ * *before* approval, which is when a failure can still be fixed. The review rail used to show
+ * checks the agent asserted (`pass: true`, for a PDF that hadn't been rendered); this is what
+ * replaces them.
+ */
+export async function lintExport(kind: ExportKind, app: ApplicationWithJob, cv: MasterCV, contact: Contact, maxPages: number): Promise<FormatCheck[]> {
+  if (!app.pack) {
+    throw new ApiError(409, "NO_PACK", "This application has no drafted pack to check yet.");
+  }
+  const doc = exportDoc(kind, app, cv, contact);
+  const bytes = new Uint8Array(await renderToBuffer(paper(doc)));
+  return lintPdf(bytes, doc, `${doc.fileBase}.pdf`, maxPages);
+}
