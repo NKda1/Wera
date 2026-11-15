@@ -365,6 +365,72 @@ class TestFallbacks:
         assert row.ok and row.model == FALLBACK  # priced as the model that actually answered
 
 
+class TestOpenRoutersOwnRecord:
+    """OBS-06: each call tells OpenRouter which WERA trace it belongs to, so the record OpenRouter
+    broadcasts to Logfire — tokens and cost as billed — joins the call's own row and span."""
+
+    @pytest.fixture(autouse=True)
+    def traced(self):
+        import logfire
+
+        logfire.configure(send_to_logfire=False, console=False, inspect_arguments=False)
+
+    @respx.mock
+    def test_the_call_carries_its_trace_and_nothing_else(self, store, live):
+        import logfire
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        spans = InMemorySpanExporter()
+        logfire.configure(
+            send_to_logfire=False, console=False, inspect_arguments=False, additional_span_processors=[SimpleSpanProcessor(spans)]
+        )
+        route = respx.post(COMPLETIONS).mock(return_value=reply(GOOD))
+        generate(store)
+        sent = json.loads(route.calls[0].request.content)["trace"]
+        (row,) = calls(store)
+        # The task's own span, which OpenRouter's record is nested under.
+        (task_span,) = [
+            s
+            for s in spans.get_finished_spans()
+            if s.name == "llm {task}" and s.attributes.get("logfire.span_type") != "pending_span"
+        ]
+        assert row.trace_id and len(row.trace_id) == 32
+        assert sent == {
+            "trace_id": row.trace_id,
+            "parent_span_id": format(task_span.context.span_id, "016x"),
+            "generation_name": "profile.generate",
+            "environment": "real",
+            "wera_trace_id": row.trace_id,
+        }
+
+    @respx.mock
+    def test_a_live_eval_says_it_is_one(self, store, live, monkeypatch):
+        # `wera eval` sets this before anything reads the settings; its calls land in a database
+        # that is wiped, so OpenRouter's record is the only one that lasts.
+        monkeypatch.setenv("WERA_RUN_LABEL", "eval")
+        get_settings.cache_clear()
+        route = respx.post(COMPLETIONS).mock(return_value=reply(GOOD))
+        generate(store)
+        assert json.loads(route.calls[0].request.content)["trace"]["environment"] == "eval"
+
+    def test_wera_eval_labels_its_process_before_logfire_is_configured(self, monkeypatch):
+        from wera_agent import cli
+
+        # Recorded as absent, so the label `main` sets is removed again after the test.
+        monkeypatch.setenv("WERA_RUN_LABEL", "unset")
+        monkeypatch.delenv("WERA_RUN_LABEL")
+        get_settings.cache_clear()
+        import wera_agent.observability as observability
+
+        seen: list[str] = []
+        # `main` imports `configure` when it runs, so the module's attribute is what it calls.
+        monkeypatch.setattr(observability, "configure", lambda: seen.append(get_settings().environment))
+        monkeypatch.setattr(cli, "_dispatch", lambda args: 0)
+        assert cli.main(["eval"]) == 0
+        assert seen == ["eval"]
+
+
 class TestProviderErrors:
     @pytest.mark.parametrize(
         ("status", "code"),

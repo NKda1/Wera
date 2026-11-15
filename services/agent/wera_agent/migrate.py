@@ -32,7 +32,7 @@ def empty_analytics(conn: Connection) -> None:
 
     For `wera reset`: the views there depend on the app's tables, so those can't be dropped while
     the views stand, and everything in it is derived from the data being deleted. Migration 0011
-    makes it all again.
+    makes it all again (and 0014 its OpenRouter views).
     """
     rows = conn.exec_driver_sql(
         "select table_name, table_type from information_schema.tables where table_schema = 'analytics'"
@@ -40,6 +40,7 @@ def empty_analytics(conn: Connection) -> None:
     for name, kind in rows:
         conn.exec_driver_sql(f'drop {"view" if kind == "VIEW" else "table"} if exists analytics."{name}" cascade')
     conn.exec_driver_sql("drop function if exists analytics.ts(text)")
+    conn.exec_driver_sql("drop function if exists analytics.num(text)")
 
 
 def upgrade(url: str | None = None) -> None:

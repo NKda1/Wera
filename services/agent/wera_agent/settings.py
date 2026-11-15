@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     )
 
     wera_demo_mode: bool = True
+    # What kind of run this process is, when demo/real isn't the whole answer: `wera eval` sets
+    # "eval". A live eval is demo mode off, so it reported itself as "real" — in Logfire and in
+    # what WERA tells OpenRouter — though its calls land in a scratch database that is wiped.
+    wera_run_label: str | None = None
     database_url: str | None = None
     # Demo mode's own database. Separate so that a DATABASE_URL in .env.local — which points at
     # the real data — can never be what a demo writes its sample jobs into.
@@ -74,6 +78,11 @@ class Settings(BaseSettings):
     alerts_imap_user: str | None = None
     alerts_imap_app_password: SecretStr | None = None
     alerts_folder: str = "WERA-alerts"
+
+    @property
+    def environment(self) -> str:
+        """ "demo", "real", or the run's own label: one name for Logfire and for OpenRouter's traces."""
+        return self.wera_run_label or ("demo" if self.wera_demo_mode else "real")
 
     @property
     def db_url(self) -> str:

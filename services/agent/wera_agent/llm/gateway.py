@@ -181,7 +181,15 @@ def _fail(code: str) -> ApiError:
     return ApiError(status, code, MESSAGES[code])
 
 
-def make_chat(model: str, *, base_url: str, max_tokens: int, reasoning: Effort, headroom: int | None = None) -> BaseChatModel:
+def make_chat(
+    model: str,
+    *,
+    base_url: str,
+    max_tokens: int,
+    reasoning: Effort,
+    headroom: int | None = None,
+    trace: dict[str, str] | None = None,
+) -> BaseChatModel:
     """One configured model, through `ChatOpenAI` (ARCHITECTURE §3.3).
 
     OpenRouter speaks the OpenAI protocol, so one client covers it, any other OpenAI-compatible
@@ -203,6 +211,8 @@ def make_chat(model: str, *, base_url: str, max_tokens: int, reasoning: Effort, 
         "provider": {"data_collection": "deny"},
         "reasoning": _REASONING[reasoning],
     }
+    if trace:
+        options["trace"] = trace
 
     from langchain_openai import ChatOpenAI
 
@@ -221,13 +231,20 @@ def make_chat(model: str, *, base_url: str, max_tokens: int, reasoning: Effort, 
 
 
 def _chain[Out: BaseModel](
-    models: list[str], Output: type[Out], *, base_url: str, max_tokens: int, reasoning: Effort, headroom: int | None = None
+    models: list[str],
+    Output: type[Out],
+    *,
+    base_url: str,
+    max_tokens: int,
+    reasoning: Effort,
+    headroom: int | None = None,
+    trace: dict[str, str] | None = None,
 ) -> Runnable:
     """The tier's model with the configured fallbacks behind it. Each one is asked for the same
     schema, so a fallback answer is as usable as the first."""
 
     def one(model: str) -> Runnable:
-        chat = make_chat(model, base_url=base_url, max_tokens=max_tokens, reasoning=reasoning, headroom=headroom)
+        chat = make_chat(model, base_url=base_url, max_tokens=max_tokens, reasoning=reasoning, headroom=headroom, trace=trace)
         # strict=True sends the schema to the provider; `include_raw` keeps the token counts and
         # turns a parse failure into a value we can retry on instead of an exception.
         return chat.with_structured_output(Output, method="json_schema", strict=True, include_raw=True)
@@ -319,6 +336,30 @@ def _publish(row: dict[str, Any]) -> None:
         )
         if row["code"]:
             span.set_attribute("llm.code", row["code"])
+
+
+def _openrouter_trace(task: str) -> dict[str, str] | None:
+    """OpenRouter's `trace` field for this call (OBS-06): metadata only, never prompt text.
+
+    OpenRouter broadcasts each call's own record — tokens and cost as it billed them — to Logfire,
+    and from there `wera telemetry archive` copies it into Postgres. `trace_id` makes that record
+    part of this task's trace and joins it to the `llm_calls` row; `wera_trace_id` says the same
+    under `trace.metadata.*`, in case OpenRouter keeps its own trace id. `parent_span_id` nests it
+    under this task's `llm {task}` span — without it the record sat beside that span at the
+    trace's root (15 Nov). The environment tells a live eval's calls — whose own rows are wiped
+    with the eval's database — from the app's.
+    """
+    context = trace.get_current_span().get_span_context()
+    if not context.is_valid:
+        return None
+    trace_id = format(context.trace_id, "032x")
+    return {
+        "trace_id": trace_id,
+        "parent_span_id": format(context.span_id, "016x"),
+        "generation_name": task,
+        "environment": get_settings().environment,
+        "wera_trace_id": trace_id,
+    }
 
 
 def _trace_id() -> str | None:
@@ -575,7 +616,10 @@ def _structured[Out: BaseModel](
     ceiling = spec.max_tokens
     reasoning: Effort = spec.reasoning
     headroom = _HEADROOM[reasoning]
-    chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=reasoning, headroom=headroom)
+    trace = _openrouter_trace(task)
+    chain = _chain(
+        models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=reasoning, headroom=headroom, trace=trace
+    )
     messages = template(task).format_messages(**prompt_vars)
     errors: str | None = None
 
@@ -617,7 +661,9 @@ def _structured[Out: BaseModel](
             # helped by more room for the answer.
             ceiling *= TRUNCATION_RETRY_FACTOR
             headroom *= TRUNCATION_RETRY_FACTOR
-        chain = _chain(models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=reasoning, headroom=headroom)
+        chain = _chain(
+            models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=reasoning, headroom=headroom, trace=trace
+        )
         errors = None  # nothing was wrong with the shape; the reply never got as far as a shape
         return True
 

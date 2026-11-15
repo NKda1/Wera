@@ -58,7 +58,8 @@ def configure(app: FastAPI | None = None) -> None:
             service_name=SERVICE_NAME,
             service_version=_service_version(),
             # Demo data and real data are worth keeping apart; this is the same split as `wera reset`.
-            environment="demo" if s.wera_demo_mode else "real",
+            # A live eval is its own: real models, a throwaway database.
+            environment=s.environment,
             send_to_logfire="if-token-present" if s.logfire_enabled else False,
             data_dir=ROOT / ".logfire",
             # Warnings and errors print to the terminal; spans and info lines don't, so `pnpm dev`

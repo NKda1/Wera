@@ -107,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve":
         return _serve(args.reload)  # uvicorn builds the app, and `create_app` configures both
 
+    if args.cmd == "eval":
+        # Before anything reads the settings: Logfire's environment is fixed when it is configured
+        # just below, and every model call tells OpenRouter which environment it came from.
+        os.environ.setdefault("WERA_RUN_LABEL", "eval")
+
     # Every other command runs in this process, so it configures its own logging and tracing.
     # Without this `wera eval` and `wera discover` — the two commands that spend money on model
     # and Firecrawl calls — were the only ones producing no spans at all.
@@ -749,6 +754,28 @@ def _telemetry_archive(since: str | None) -> int:
     return 0
 
 
+def _openrouter_status() -> None:
+    """OBS-06: what OpenRouter itself billed this month, from its records in the archive."""
+    from datetime import UTC, datetime
+
+    from .services.analytics import openrouter_usage
+
+    start = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    usage = openrouter_usage(start)
+    if usage is None:
+        return
+    if not usage.calls:
+        print("OpenRouter: no calls in the archive this month yet (its Broadcast to Logfire: SPEC OBS-06).")
+        return
+    split = ", ".join(f"{env} {_usd(usd)}" for env, usd in sorted(usage.by_environment.items(), key=lambda kv: -kv[1]))
+    print(f"OpenRouter this month: {usage.calls:,} calls, {_usd(usage.cost_usd)} ({split}); last {_utc(usage.last)} UTC.")
+
+
+def _usd(amount: float) -> str:
+    """Cents once it's worth cents. A single call costs a fraction of one, and "$0.00" read as free."""
+    return f"${amount:,.2f}" if amount >= 1 else f"${amount:.4f}" if amount >= 0.0001 else f"${amount:.7f}"
+
+
 def _telemetry_status() -> int:
     from .services import telemetry_archive
 
@@ -764,6 +791,7 @@ def _telemetry_status() -> int:
             print(f"  {service:24} {count:9,}")
     if st.last_run_at:
         print(f"Last archive {_utc(st.last_run_at)} UTC added {st.last_added:,}; complete up to {_utc(st.archived_until)} UTC.")
+    _openrouter_status()
     reason = telemetry_archive.refusal()
     if reason:
         print(f"The archive can't run here: {reason}", file=sys.stderr)
