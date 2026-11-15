@@ -1,0 +1,57 @@
+{
+ "results": [
+  {
+   "jobId": 57544665,
+   "employerId": 702673,
+   "employerName": "Wissen Technology",
+   "employerProfileId": null,
+   "employerProfileName": null,
+   "jobTitle": "Software Engineer",
+   "locationName": "E14AA",
+   "minimumSalary": 40000.0,
+   "maximumSalary": 55000.0,
+   "currency": "GBP",
+   "expirationDate": "21/12/2026",
+   "date": "09/11/2026",
+   "jobDescription": "The Wissen team continues to expand its footprint in the USA, Canada, UK, Australia, and India. More openings to come as we continue to grow the team! Please read below for a brilliant career opportunity. Seeking a Java Developer with 3-7 years' experience to join our London engineering team. Strong hands-on experience in Java, Spring Boot, Microservices, and Cloud technologies is required. Design, develop, test, and maintain Java applications. ... ",
+   "applications": 46,
+   "jobUrl": "https://www.reed.co.uk/jobs/software-engineer/57544665"
+  },
+  {
+   "jobId": 57457146,
+   "employerId": 696833,
+   "employerName": "The Business Connection Group",
+   "employerProfileId": null,
+   "employerProfileName": null,
+   "jobTitle": "Associate Backend Software Engineer",
+   "locationName": "London",
+   "minimumSalary": 55000.0,
+   "maximumSalary": 65000.0,
+   "currency": "GBP",
+   "expirationDate": "25/11/2026",
+   "date": "14/10/2026",
+   "jobDescription": "Associate Software Engineer | 50,000 - 60,000 | Remote We are partnering with a globally recognised advanced technology leader \u2014 a pioneer in high-performance communications and intelligent networking platforms for aerospace, satellite and large-scale global connectivity. Built on world-renowned engineering heritage, our client is at the forefront of next-generation network design across terrestrial, airborne, orbital and deep-space environments... ",
+   "applications": 273,
+   "jobUrl": "https://www.reed.co.uk/jobs/associate-backend-software-engineer/57457146"
+  },
+  {
+   "jobId": 57415289,
+   "employerId": 679387,
+   "employerName": "SPEC Engineering Ltd",
+   "employerProfileId": null,
+   "employerProfileName": null,
+   "jobTitle": "Static Equipment Design Engineer",
+   "locationName": "KT227LP",
+   "minimumSalary": 30000.0,
+   "maximumSalary": 40000.0,
+   "currency": "GBP",
+   "expirationDate": "13/11/2026",
+   "date": "02/10/2026",
+   "jobDescription": "\u2022 Responsible for Pressure Vessel Engineering Deliverables including but not limited to: o Pressure Vessel Calculations o Datasheets o Pressure Vessel General Arrangement Drawings o Pressure Vessel Detailed Fabrication Drawings o Pressure Vessel Testing Requirements o Any ladders or structures directly attached to Vessel o Internals Selection, if applicable o Coating Specifications o Preparation of Specifications o Special Studies \u2022 Responsible ... ",
+   "applications": 13,
+   "jobUrl": "https://www.reed.co.uk/jobs/static-equipment-design-engineer/57415289"
+  }
+ ],
+ "ambiguousLocations": [],
+ "totalResults": 181
+}

@@ -1,7 +1,8 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { cn } from "./cn";
+import { revealInline, useScrollEdges } from "./scrollEdges";
 
 export function Tabs<T extends string>({
   tabs,
@@ -17,6 +18,11 @@ export function Tabs<T extends string>({
   idPrefix: string;
 }) {
   const list = useRef<HTMLDivElement>(null);
+  const fade = useScrollEdges(list, tabs.map((t) => t.label).join("|"));
+  // On a phone the third tab can sit past the edge; a chosen tab is always brought into view.
+  useEffect(() => {
+    revealInline(list.current, list.current?.querySelector<HTMLElement>(`#${idPrefix}-tab-${value}`) ?? null);
+  }, [value, idPrefix]);
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
     const i = tabs.findIndex((t) => t.id === value);
@@ -25,7 +31,7 @@ export function Tabs<T extends string>({
     list.current?.querySelector<HTMLElement>(`#${idPrefix}-tab-${next.id}`)?.focus();
   };
   return (
-    <div ref={list} role="tablist" aria-label={label} onKeyDown={onKey} className="scrollbar-none flex gap-6 overflow-x-auto border-b border-line">
+    <div ref={list} role="tablist" aria-label={label} onKeyDown={onKey} style={fade} className="scrollbar-none flex gap-6 overflow-x-auto border-b border-line">
       {tabs.map((t) => {
         const active = t.id === value;
         return (

@@ -24,7 +24,9 @@ def job(**over) -> Job:
         "id": over.pop("id", "job-a"),
         "dedupe_key": over.pop("dedupe_key", "url:https://x.example/1"),
         "title": "ML Engineer, Graduate",
-        "company": "Fernhill AI",
+        # Not the seed's Fernhill AI: the seed has this title there at Greenhouse, and the same job
+        # on another site is now merged into it (NORM-06 across sites), not saved as new.
+        "company": "Saltmarsh Labs",
         "location": Location(city="London", country="UK", raw="London, UK"),
         "remote": "hybrid",
         "description_md": "We build guardrails for LLM products. Python and FastAPI. " * 5,
@@ -324,7 +326,7 @@ class TestARunSaysWhatItIsDoing:
 
         scoring = [detail for phase, detail in seen if phase == "scoring"]
         assert scoring, "scoring never reported"
-        assert any(d and "ML Engineer, Graduate" in d and "Fernhill AI" in d for d in scoring), scoring
+        assert any(d and "ML Engineer, Graduate" in d and "Saltmarsh Labs" in d for d in scoring), scoring
 
     def test_a_stale_detail_is_cleared_rather_than_left_behind(self, client, runs, channels):
         """A sentence from the previous phase is worse than no sentence: it says WERA is reading a
@@ -541,7 +543,9 @@ class TestAccountLevelFailures:
             for n in range(count)
         ]
 
-    def test_scoring_stops_at_the_first_credit_refusal(self, client, runs, channels, monkeypatch):
+    # A key past its own spending limit is refused on every job alike, like spent credit (15 Nov).
+    @pytest.mark.parametrize("code", ["LLM_QUOTA", "LLM_KEY_LIMIT"])
+    def test_scoring_stops_at_the_first_credit_refusal(self, client, runs, channels, monkeypatch, code):
         ids = runs(["board_search"])
         found = self.many(5)
         channels(from_board_search=lambda *a, **k: intake.ChannelOutcome(channel="board_search", jobs=found, results=5))
@@ -550,7 +554,7 @@ class TestAccountLevelFailures:
 
         def refuse(session, j, cv, *, model, now):
             attempts.append(j.id)
-            return None, False, "LLM_QUOTA"
+            return None, False, code
 
         monkeypatch.setattr(intake.fit, "evidence_for", refuse)
         summary = intake.run(["board_search"], ids)
@@ -558,7 +562,7 @@ class TestAccountLevelFailures:
         assert len(attempts) == 1  # not one per job
         assert summary["new_jobs"] == 5  # the jobs are kept, unscored, for when credit is back
         row = row_for(ids["board_search"])
-        assert [e["code"] for e in row.errors] == ["LLM_QUOTA"]
+        assert [e["code"] for e in row.errors] == [code]
         # All five, including the one that hit the refusal: none of them got a score.
         assert "5 job(s) were left unscored" in row.errors[0]["message"]
 
@@ -776,3 +780,39 @@ class TestProgress:
         monkeypatch.setattr(intake, "transaction", explode, raising=False)
         # `judge` needs real transactions, so only the reporter is broken here.
         intake.report({"board_search": "run-missing"}, phase="scoring", progress=0.5, done=1, total=2)
+
+
+class TestScoringSeveralAtOnce:
+    """13 Nov plan, A.4: scoring was a search's longest step at 12 s a job, one after another. It
+    runs `scoring_workers` at once now — after one job has answered, so a refused key is still
+    learned from a single call."""
+
+    def test_after_the_first_answer_three_are_scored_at_once(self, client, runs, channels, monkeypatch):
+        import threading
+        import time
+        from types import SimpleNamespace
+
+        ids = runs(["board_search"])
+        found = TestAccountLevelFailures.many(TestAccountLevelFailures(), 7)
+        channels(from_board_search=lambda *a, **k: intake.ChannelOutcome(channel="board_search", jobs=found, results=7))
+        # The pool's width as Postgres would have it; SQLite otherwise scores one at a time.
+        monkeypatch.setattr(intake, "engine", lambda: SimpleNamespace(dialect=SimpleNamespace(name="postgresql")))
+        lock, live, peak, order = threading.Lock(), [0], [], []
+        real = intake.fit.evidence_for
+
+        def slow(session, j, cv, *, model, now):
+            with lock:
+                live[0] += 1
+                peak.append(live[0])
+                order.append(live[0])
+            time.sleep(0.15)
+            try:
+                return real(session, j, cv, model=model, now=now)
+            finally:
+                with lock:
+                    live[0] -= 1
+
+        monkeypatch.setattr(intake.fit, "evidence_for", slow)
+        intake.run(["board_search"], ids)
+        assert order[0] == 1  # the first job alone
+        assert max(peak) == 3  # then three at a time, never more

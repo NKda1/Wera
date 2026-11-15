@@ -17,15 +17,28 @@ export const COUNTRY_NAMES: Record<string, string> = {
   ES: "Spain",
   CH: "Switzerland",
   CZ: "Czechia",
+  AT: "Austria",
+  IT: "Italy",
+  PL: "Poland",
+  PT: "Portugal",
+  SE: "Sweden",
   US: "United States",
   CA: "Canada",
+  MX: "Mexico",
+  BR: "Brazil",
   AU: "Australia",
+  NZ: "New Zealand",
+  SG: "Singapore",
+  IN: "India",
+  ZA: "South Africa",
 };
 
 export const REGION_NAMES: Record<string, string> = {
   europe: "Europe",
   north_america: "North America",
+  latin_america: "Latin America",
   apac: "Asia Pacific",
+  africa: "Africa",
   global: "Global",
 };
 

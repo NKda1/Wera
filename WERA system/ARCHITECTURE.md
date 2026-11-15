@@ -342,6 +342,8 @@ Logfire keeps thirty days; the archive keeps everything after that, and `pg_dump
 
 It is sized for Logfire's bill, which counts each metric point as a record against the same 10M a month as WERA's spans. Logfire's template (every database, every 10 s, per-table and per-index series) sent 32,757 points in six minutes here — about 7.8M a day. The config here sends **27 points a minute, about 1.2M a month**, measured from the collector's own `otelcol_exporter_sent_metric_points`. Per-table figures are a query away instead: `pg_stat_user_tables`.
 
+**Redis too** (OBS-05). The same collector runs the `redis` receiver (`infra/otel/redis.yaml`, merged with the Postgres config) as `service_name = 'redis'`, logged in as the ACL user `logfire_monitor` (`+info +config|get`, saved into `redis.conf` by `CONFIG REWRITE`; its password is `REDIS_MONITOR_PASSWORD` in `.env.local`). Every metric in Logfire's template is on, but every 5 minutes rather than 10 s: at 60 s they were 145 points a minute (measured 13 Nov), about 6.3M a month, mostly `redis.cmd.latency`'s three percentiles for each of the ~22 commands Redis has seen. At 5 minutes it is 150 points a scrape, 30 a minute (measured 13 Nov), ~1.3M a month, and Postgres and Redis together stay near a quarter of the allowance.
+
 **Looking at the data.** Connect as `wera_readonly` (`WERA_READONLY_URL`), which can read `public`, `telemetry` and `analytics` and write nothing:
 
 - `psql wera`, then `\dn`, `\dt public.*`, `\dv analytics.*`, `\d+ jobs`.

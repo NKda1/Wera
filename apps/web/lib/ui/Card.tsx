@@ -2,7 +2,7 @@ import type { ComponentProps } from "react";
 import { cn } from "./cn";
 
 export function Card({ className, ...props }: ComponentProps<"section">) {
-  return <section className={cn("rounded-card border border-line bg-white shadow-card", className)} {...props} />;
+  return <section className={cn("rounded-card border border-line bg-surface", className)} {...props} />;
 }
 
 export function CardHeader({ title, description, action, id }: { title: string; description?: React.ReactNode; action?: React.ReactNode; id?: string }) {

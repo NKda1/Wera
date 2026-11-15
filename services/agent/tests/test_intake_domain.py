@@ -216,6 +216,47 @@ class TestACityWrittenWithItsCountry:
         assert filters.wrong_location(melton, profile(locations=["London, UK"])) == "Melton"
 
 
+class TestWhatIsAndIsntAPlace:
+    """14 Nov: "Hybrid" was read as a place (21 jobs hidden) and "West End" wasn't read as London."""
+
+    @pytest.mark.parametrize("raw", ["West End, England, United Kingdom", "Canary Wharf", "City of London"])
+    def test_a_part_of_the_city_is_the_city(self, raw):
+        posting = job(location=Location(city=raw.split(",")[0], raw=raw), remote="onsite")
+        assert filters.wrong_location(posting, profile(locations=["London, UK"])) is None
+
+    @pytest.mark.parametrize("raw", ["Hybrid", "Flexible", "Multiple locations", "Hybrid (Flexible)"])
+    def test_a_working_pattern_is_not_a_place(self, raw):
+        posting = job(location=Location(city=raw, raw=raw), remote=None)
+        assert filters.wrong_location(posting, profile(locations=["London, UK"])) is None
+
+    def test_another_city_on_a_hybrid_pattern_is_still_another_city(self):
+        posting = job(location=Location(city="San Francisco", raw="San Francisco (Hybrid)"), remote="hybrid")
+        assert filters.wrong_location(posting, profile(locations=["London, UK"])) == "San Francisco"
+
+
+class TestNearMisses:
+    """14 Nov: 931 jobs hidden as "not one of your target titles", among them "Graduate Data
+    Engineer". A near miss is still hidden, but says so and is listed first."""
+
+    targets = ["Graduate Software Engineer", "Backend Engineer", "Software Engineer"]
+
+    @pytest.mark.parametrize("title", ["Graduate Data Engineer", "Software Engineering Intern (Summer 2027)"])
+    def test_close_titles_are_near_misses(self, title):
+        reason = filters.hidden_reason(job(title=title), profile(titles=self.targets))
+        assert reason == f"{filters.NEAR_MISS}: {title}"
+
+    @pytest.mark.parametrize("title", ["Account Executive", "Junior Credit Analyst", "Full Stack Engineer", "Sales Engineer"])
+    def test_other_work_is_not(self, title):
+        assert filters.hidden_reason(job(title=title), profile(titles=self.targets)) == f"Not one of your target titles: {title}"
+
+    def test_a_near_miss_somewhere_else_is_hidden_for_the_place(self):
+        far = job(title="Graduate Data Engineer", location=Location(city="Toronto", raw="Toronto"), remote="onsite")
+        assert (
+            filters.hidden_reason(far, profile(titles=self.targets, locations=["London, UK"]))
+            == "Not one of your target titles: Graduate Data Engineer"
+        )
+
+
 class TestHardFiltersContinued:
     def test_filtered_jobs_are_hidden_with_a_reason_not_dropped(self):
         """MATCH-01: a filter is a guess, so the person can see what it hid."""

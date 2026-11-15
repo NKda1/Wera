@@ -133,7 +133,7 @@ def search_boards(
         outcome.credits_used += credits_per_search
         for item in getattr(result, "web", None) or []:
             board = board_from_url(getattr(item, "url", None) or "")
-            if board is None or board in seen:
+            if board is None or board in seen or DEMO_TOKEN.search(board[1]):
                 continue
             seen.add(board)
             candidates.append(Candidate(vendor=board[0], token=board[1], matched=title))
@@ -144,6 +144,12 @@ def search_boards(
         queries=outcome.queries,
     )
     return candidates, outcome
+
+
+# An ATS vendor's own demo and test boards. They answer, carry hundreds of vacancies and are
+# indexed by Google, so discovery confirmed one: "Leverdemo 8" put 312 sample jobs (data entry
+# clerks, compensation associates) into a watchlist run on 14 Nov.
+DEMO_TOKEN = re.compile(r"(^|[-_])(demo|sandbox|test|example|sample)([-_]?\d+)?$|^(lever|greenhouse|ashby)demo", re.I)
 
 
 def confirm(candidate: Candidate, today: date) -> Company | None:

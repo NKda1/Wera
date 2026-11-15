@@ -40,12 +40,20 @@ class Target:
 
     url: str
     host: str
-    source: str  # "open" — a Google search; "board" — a `site:` search of a board in sites.yaml
+    # "open" — a Google search; "board" — a `site:` search of a board in sites.yaml; "feed" — a
+    # full-text job API (SRCH-31), read from the API rather than its page.
+    source: str
     query: str
     rank: int  # 0 is best: tier, then query, then the result's position
     title: str
     snippet: str
     date: str | None
+    # The job API it came from ("reed", "adzuna"), also for a snippet API's lead whose original
+    # posting was found (SRCH-32). Shown on the job as "via Reed". Defaulted, so postings queued
+    # before these fields existed still load.
+    via: str | None = None
+    # What a feed's own reader needs: Reed's job id, USAJOBS' whole posting.
+    payload: dict[str, Any] | None = None
 
 
 def plan_key(cv_version: int, profile_key: str) -> str:
@@ -125,6 +133,15 @@ class TargetQueue:
     def size(self) -> int:
         return int(self.r.llen(self.queue))
 
+    def note_postings(self, query: str, count: int) -> None:
+        """How many postings a page-1 query returned today, known or new (SRCH-26, tier 4)."""
+        key = f"{PREFIX}postings:{self.plan}"
+        self.r.hset(key, query, count)
+        self.r.expire(key, QUEUE_TTL_SECONDS)
+
+    def postings_by_query(self) -> dict[str, int]:
+        return {q: int(n) for q, n in (self.r.hgetall(f"{PREFIX}postings:{self.plan}") or {}).items()}
+
     def tiers_sent(self) -> set[int]:
         """The query tiers already sent for this plan today — what "Find more" moves past."""
         return {int(t) for t in self.r.smembers(self.tiers)}
@@ -143,8 +160,8 @@ class TargetQueue:
     def retire_others(self) -> int:
         """Delete every other plan's queue: a new CV or profile means their postings were found for
         a different question. Returns how many keys went."""
-        mine = {self.queue, self.queued, self.tiers}
-        patterns = (f"{PREFIX}targets:*", f"{PREFIX}queued:*", f"{PREFIX}tiers:*")
+        mine = {self.queue, self.queued, self.tiers, f"{PREFIX}postings:{self.plan}"}
+        patterns = (f"{PREFIX}targets:*", f"{PREFIX}queued:*", f"{PREFIX}tiers:*", f"{PREFIX}postings:*")
         stale = [k for pattern in patterns for k in self.r.scan_iter(match=pattern) if k not in mine]
         if stale:
             self.r.delete(*stale)

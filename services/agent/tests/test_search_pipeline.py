@@ -18,7 +18,7 @@ from wera_agent.errors import ApiError
 from wera_agent.graphs import intake, search_pipeline
 from wera_agent.services.store import Store
 from wera_agent.settings import get_settings
-from wera_agent.sources import extract, firecrawl_search, harvest
+from wera_agent.sources import extract, firecrawl_search, harvest, robots
 from wera_agent.sources.firecrawl_search import SearchCaps
 from wera_agent.sources.serper import Result
 from wera_agent.sources.targets import Target, TargetQueue
@@ -47,6 +47,7 @@ class FakeSerper:
 
     def __init__(self, *, max_queries: int, answers: dict[int, list[str]], planned):
         self.max_queries, self.sent, self.answered, self.errors, self.stopped = max_queries, 0, 0, [], None
+        self.cached = self.coalesced = 0
         self.asked: list[str] = []
         firsts = {}
         for q in planned:
@@ -88,6 +89,7 @@ def world(client, outbound, monkeypatch):
     redis = fakeredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(search_pipeline.targets, "connect", lambda: redis)
     monkeypatch.setattr(harvest, "Robots", AllowAll)
+    monkeypatch.setattr(robots, "Robots", AllowAll)  # and the plan's own check (SRCH-30)
     monkeypatch.setattr(firecrawl_search, "_client", lambda: pytest.fail("Firecrawl was asked"))
     events: list[str] = []
     read: list[str] = []
@@ -112,7 +114,7 @@ def world(client, outbound, monkeypatch):
             self.redis, self.events, self.read, self.serper = redis, events, read, None
 
         def answers(self, by_tier: dict[int, list[str]]) -> None:
-            def make(*, max_queries: int):
+            def make(*, max_queries: int, guard=None, window=None):
                 with transaction() as session:
                     planned, _ = Store(session).search_queries(refresh=False)
                 real_search = FakeSerper(max_queries=max_queries, answers=by_tier, planned=planned)
@@ -179,6 +181,33 @@ class TestEightToTwelve:
         assert out.tiers == [1, 2]
         assert out.surfaced == 9 and out.short is None
 
+    def test_the_job_apis_go_first_and_serper_only_when_they_leave_it_short(self, world, monkeypatch):
+        """SRCH-31: the APIs are tier 0. Three postings from them is short of eight, so Serper's first
+        tier is sent after; their jobs say who found them."""
+        monkeypatch.setattr(search_pipeline.feeds, "skipped", lambda f, **_k: None if f == "reed" else "off")
+        asked = []
+
+        def from_apis(planned, profile, *, queue, **_kw):
+            world.events.append("apis")
+            asked.append(True)
+            targets = [Target(posting(i), "builtinlondon.uk", "open", "Reed: x", i, "Graduate Software Engineer", "", None, via="reed") for i in range(20, 23)]  # fmt: skip
+            queue.push(targets)
+            return search_pipeline.strategist.FeedDiscovery(by_feed={"reed": {"queued": 3}}, queued=3)
+
+        monkeypatch.setattr(search_pipeline.strategist, "discover_feeds", from_apis)
+        scored, judge = [], intake.judge
+
+        def judging(jobs, **kw):
+            scored.extend(jobs)
+            return judge(jobs, **kw)
+
+        monkeypatch.setattr(intake, "judge", judging)
+        world.answers({1: [posting(i) for i in range(6)]})
+        out = world.run()
+        assert list(dict.fromkeys(e for e in world.events if e in ("apis", "discover"))) == ["apis", "discover"]
+        assert out.tiers == [1] and out.feeds == {"reed": {"queued": 3}}
+        assert [j.via for j in scored[:3]] == ["reed"] * 3 and all(j.via is None for j in scored[3:])
+
     def test_an_empty_market_ends_below_eight_and_says_why(self, world):
         world.answers({1: [posting(0)]})
         out = world.run()
@@ -213,6 +242,25 @@ class TestEightToTwelve:
         assert world.queue().size() == 8
 
 
+class TestABoardThatRefusesWera:
+    """SRCH-30: a board whose robots.txt refuses WERA isn't searched — every posting a `site:`
+    query found there was one the Harvester then had to turn down (Bright Network, 12 Nov)."""
+
+    def test_its_site_queries_are_dropped_and_open_searches_leave_it_out(self, world, monkeypatch):
+        class RefusesGradcracker:
+            def allows(self, url: str) -> bool:
+                return "gradcracker" not in url
+
+        monkeypatch.setattr(robots, "Robots", RefusesGradcracker)
+        world.answers({1: [posting(i) for i in range(4)]})
+        world.run()
+        asked = world.serper.asked
+        assert asked and not any(q.startswith("site:gradcracker.com") for q in asked)
+        assert any(q.startswith("site:builtinlondon.uk") for q in asked)  # the board that allows it stays
+        assert all("-site:gradcracker.com" in q for q in asked if not q.startswith("site:"))
+        assert world.redis.get("wera:robots:gradcracker.com") == "refuse"  # and isn't asked again this week
+
+
 class TestBeforeAnythingIsSpent:
     def test_redis_down_stops_the_search_and_nothing_is_asked(self, client, outbound, monkeypatch):
         monkeypatch.setenv("SERPER_API_KEY", "test-serper-key")
@@ -221,6 +269,32 @@ class TestBeforeAnythingIsSpent:
         monkeypatch.setattr(search_pipeline, "Serper", lambda **_k: pytest.fail("Serper was asked"))
         out = search_pipeline.run({}, now=1_762_850_000_000, caps=SearchCaps())
         assert [code for code, _ in out.errors] == ["REDIS_DOWN"]
+
+
+class TestFindMoreSaysWhenItIsUsedUp:
+    """SRCH-26 (14 Nov): runs 73–75 each started, sent nothing and failed. Knowable beforehand."""
+
+    def _sent(self, world, *, all_tiers: bool) -> None:
+        with transaction() as session:
+            planned, _ = Store(session).search_queries(refresh=False)
+        queue = world.queue()
+        tiers = sorted({0, *(q.tier for q in planned)})
+        for tier in tiers if all_tiers else tiers[:-1]:
+            queue.mark_tier_sent(tier)
+
+    def test_every_tier_sent_and_nothing_waiting_is_refused_with_why(self, world, monkeypatch):
+        monkeypatch.setattr(Store, "jobs_needing_score", lambda *_a, **_k: [])
+        self._sent(world, all_tiers=True)
+        with transaction() as session, pytest.raises(ApiError) as raised:
+            Store(session).start_score_more()
+        assert raised.value.code == "SEARCH_USED_UP"
+        assert "regenerate" in raised.value.message
+
+    def test_a_tier_left_to_send_still_runs(self, world, monkeypatch):
+        monkeypatch.setattr(Store, "jobs_needing_score", lambda *_a, **_k: [])
+        self._sent(world, all_tiers=False)
+        with transaction() as session:
+            assert Store(session).start_score_more().run_ids
 
 
 class TestTheRunRow:

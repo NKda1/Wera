@@ -365,10 +365,49 @@
       "title": "AtsKeyword",
       "type": "object"
     },
+    "AtsPart": {
+      "description": "One part of the ATS score (ATSC-07): its points out of its share of 100, and why.",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "id": {
+          "enum": [
+            "keywords",
+            "evidence",
+            "alignment",
+            "structure",
+            "length"
+          ],
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "max": {
+          "type": "number"
+        },
+        "points": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "points",
+        "max",
+        "detail"
+      ],
+      "title": "AtsPart",
+      "type": "object"
+    },
     "AtsReport": {
       "properties": {
         "backedCoverage": {
           "default": -1.0,
+          "type": "number"
+        },
+        "bestScore": {
           "type": "number"
         },
         "coverage": {
@@ -391,6 +430,23 @@
         },
         "pages": {
           "type": "number"
+        },
+        "parts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AtsPart"
+          },
+          "type": "array"
+        },
+        "score": {
+          "type": "number"
+        },
+        "suggestedSkills": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -398,7 +454,9 @@
         "coverage",
         "backedCoverage",
         "formatChecks",
-        "pages"
+        "pages",
+        "parts",
+        "suggestedSkills"
       ],
       "title": "AtsReport",
       "type": "object"
@@ -1067,6 +1125,7 @@
     },
     "HookType": {
       "enum": [
+        "Introduction",
         "Core-Metric",
         "Company-Mission",
         "Industry-Problem",
@@ -1316,6 +1375,9 @@
         "closedAt": {
           "type": "string"
         },
+        "closesAt": {
+          "type": "string"
+        },
         "company": {
           "type": "string"
         },
@@ -1415,6 +1477,9 @@
         },
         "title": {
           "type": "string"
+        },
+        "via": {
+          "type": "string"
         }
       },
       "required": [
@@ -1490,11 +1555,16 @@
         },
         "next": {
           "type": "null"
+        },
+        "possiblyClosed": {
+          "default": 0,
+          "type": "integer"
         }
       },
       "required": [
         "items",
-        "next"
+        "next",
+        "possiblyClosed"
       ],
       "title": "JobList",
       "type": "object"
@@ -1612,6 +1682,23 @@
         "level"
       ],
       "title": "Language",
+      "type": "object"
+    },
+    "LearnedRank": {
+      "description": "MATCH-12: how far a job moved in the order, and why. Never part of `fit.total`.",
+      "properties": {
+        "adjustment": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "adjustment",
+        "reason"
+      ],
+      "title": "LearnedRank",
       "type": "object"
     },
     "LetterSection": {
@@ -1938,6 +2025,43 @@
       "title": "Person",
       "type": "object"
     },
+    "PlaceOption": {
+      "description": "SRCH-11: a country the profile can target, and what would search it there.\n\nOffered whether or not a reviewed board covers it \u2014 the open web search reaches every one,\nand the job APIs most \u2014 so the picker is no longer limited to where the boards happen to be.",
+      "properties": {
+        "boards": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "code": {
+          "type": "string"
+        },
+        "feeds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "name",
+        "region",
+        "boards",
+        "feeds"
+      ],
+      "title": "PlaceOption",
+      "type": "object"
+    },
     "PlannedQuery": {
       "description": "One search the Strategist will send (SRCH-20, stage 1). Built in code from the parsed CV and\nthe profile, never by a model, and stored on the plan so the queries a search used can be read\nback \u2014 and so a new CV, which makes a new plan, can never search with the last CV's words.",
       "properties": {
@@ -2040,6 +2164,31 @@
         "cvVersion"
       ],
       "title": "ProfileProposalResult",
+      "type": "object"
+    },
+    "QuickWin": {
+      "description": "A skill the posts ask for that the CV backs in a line but doesn't list as a skill: the\ncheapest point on the ATS score (ATSC-07), and only the person can decide to claim it.",
+      "properties": {
+        "jobs": {
+          "type": "integer"
+        },
+        "line": {
+          "type": "string"
+        },
+        "share": {
+          "type": "number"
+        },
+        "term": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "term",
+        "jobs",
+        "share",
+        "line"
+      ],
+      "title": "QuickWin",
       "type": "object"
     },
     "Recency": {
@@ -2302,6 +2451,9 @@
         "closedAt": {
           "type": "string"
         },
+        "closesAt": {
+          "type": "string"
+        },
         "company": {
           "type": "string"
         },
@@ -2325,6 +2477,10 @@
             "missing"
           ],
           "type": "string"
+        },
+        "evergreen": {
+          "default": false,
+          "type": "boolean"
         },
         "firstSeen": {
           "type": "string"
@@ -2353,6 +2509,9 @@
         "lastSeen": {
           "type": "string"
         },
+        "learned": {
+          "$ref": "#/$defs/LearnedRank"
+        },
         "linkedinUrl": {
           "type": "string"
         },
@@ -2361,6 +2520,10 @@
         },
         "location": {
           "$ref": "#/$defs/Location"
+        },
+        "possiblyClosed": {
+          "default": false,
+          "type": "boolean"
         },
         "postedAt": {
           "type": "string"
@@ -2410,6 +2573,9 @@
         },
         "urgency": {
           "$ref": "#/$defs/Urgency"
+        },
+        "via": {
+          "type": "string"
         }
       },
       "required": [
@@ -2429,7 +2595,9 @@
         "status",
         "fit",
         "urgency",
-        "liveness"
+        "liveness",
+        "possiblyClosed",
+        "evergreen"
       ],
       "title": "ScoredJob",
       "type": "object"
@@ -2615,10 +2783,18 @@
         "inbox": {
           "$ref": "#/$defs/InboxSettings"
         },
+        "learnedRanking": {
+          "default": true,
+          "type": "boolean"
+        },
         "models": {
           "$ref": "#/$defs/TierModels"
         },
         "redactContact": {
+          "type": "boolean"
+        },
+        "scheduledIntake": {
+          "default": false,
           "type": "boolean"
         },
         "searchSchedule": {
@@ -2644,7 +2820,9 @@
         "models",
         "weights",
         "inbox",
-        "searchSchedule"
+        "searchSchedule",
+        "scheduledIntake",
+        "learnedRanking"
       ],
       "title": "Settings",
       "type": "object"
@@ -2671,6 +2849,10 @@
         "inbox": {
           "$ref": "#/$defs/InboxSettings"
         },
+        "learnedRanking": {
+          "default": true,
+          "type": "boolean"
+        },
         "llmLastCheckedAt": {
           "type": "string"
         },
@@ -2681,6 +2863,10 @@
           "$ref": "#/$defs/TierModels"
         },
         "redactContact": {
+          "type": "boolean"
+        },
+        "scheduledIntake": {
+          "default": false,
           "type": "boolean"
         },
         "searchSchedule": {
@@ -2710,6 +2896,8 @@
         "weights",
         "inbox",
         "searchSchedule",
+        "scheduledIntake",
+        "learnedRanking",
         "secrets",
         "llmProvider",
         "allowClearJobs"
@@ -2757,6 +2945,10 @@
         "hiddenTotal": {
           "type": "integer"
         },
+        "nearMisses": {
+          "default": 0,
+          "type": "integer"
+        },
         "rejected": {
           "type": "integer"
         },
@@ -2769,6 +2961,7 @@
         "channels",
         "hidden",
         "hiddenTotal",
+        "nearMisses",
         "awaitingScore",
         "awaiting",
         "findMoreSize",
@@ -2955,8 +3148,68 @@
       "title": "SubScore",
       "type": "object"
     },
+    "Suggestion": {
+      "description": "MATCH-13: a change to the search profile that the person's decisions point at. Nothing\nchanges until they accept it (PRF-04).",
+      "properties": {
+        "evidence": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SuggestionKind"
+        },
+        "message": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "value",
+        "message",
+        "evidence"
+      ],
+      "title": "Suggestion",
+      "type": "object"
+    },
+    "SuggestionKind": {
+      "enum": [
+        "exclude_term",
+        "remove_title",
+        "add_title",
+        "add_location"
+      ],
+      "type": "string"
+    },
+    "SuggestionList": {
+      "properties": {
+        "decisions": {
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/Suggestion"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items",
+        "decisions"
+      ],
+      "title": "SuggestionList",
+      "type": "object"
+    },
     "Summary": {
       "properties": {
+        "generated": {
+          "type": "boolean"
+        },
         "id": {
           "type": "string"
         },
@@ -3119,6 +3372,128 @@
         "bulletIds"
       ],
       "title": "Trait",
+      "type": "object"
+    },
+    "Upskill": {
+      "description": "One skill the CV doesn't show, and how much the person's market wants it.",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/KeywordCategory"
+        },
+        "closeTo": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "examples": {
+          "items": {
+            "$ref": "#/$defs/UpskillJob"
+          },
+          "type": "array"
+        },
+        "jobs": {
+          "type": "integer"
+        },
+        "previous": {
+          "type": "integer"
+        },
+        "recent": {
+          "type": "integer"
+        },
+        "requiredShare": {
+          "type": "number"
+        },
+        "score": {
+          "type": "number"
+        },
+        "share": {
+          "type": "number"
+        },
+        "spellings": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "term": {
+          "type": "string"
+        },
+        "trend": {
+          "enum": [
+            "new",
+            "rising",
+            "steady",
+            "falling"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "term",
+        "spellings",
+        "jobs",
+        "share",
+        "requiredShare",
+        "score",
+        "trend",
+        "recent",
+        "previous",
+        "closeTo",
+        "examples"
+      ],
+      "title": "Upskill",
+      "type": "object"
+    },
+    "UpskillJob": {
+      "properties": {
+        "company": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "company"
+      ],
+      "title": "UpskillJob",
+      "type": "object"
+    },
+    "UpskillsReport": {
+      "properties": {
+        "jobsConsidered": {
+          "type": "integer"
+        },
+        "missing": {
+          "items": {
+            "$ref": "#/$defs/Upskill"
+          },
+          "type": "array"
+        },
+        "quickWins": {
+          "items": {
+            "$ref": "#/$defs/QuickWin"
+          },
+          "type": "array"
+        },
+        "windowDays": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "windowDays",
+        "jobsConsidered",
+        "missing",
+        "quickWins"
+      ],
+      "title": "UpskillsReport",
       "type": "object"
     },
     "Urgency": {

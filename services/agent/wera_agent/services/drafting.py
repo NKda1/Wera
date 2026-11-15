@@ -18,7 +18,7 @@ from ..errors import ApiError
 from ..llm.demo import PackInput
 from ..nodes.analyse import analyse as analyse_job
 from ..nodes.answers import answers as draft_answers
-from ..nodes.ats import build_ats, reconcile_skills
+from ..nodes.ats import build_ats, place_required, reconcile_skills
 from ..nodes.tailor import letter as write_letter
 from ..nodes.tailor import tailor as tailor_cv
 from ..schemas.pack import CoverLetter, JobAnalysis, TailoredCV
@@ -36,6 +36,7 @@ def step_cv(session: Session, app_id: str, *, note: str | None) -> None:
     inp = store.draft_input(app_id, note=note)
     analysis = _analyse(session, store, app_id, inp)
     doc = tailor_cv(session, inp)
+    doc = place_required(doc, cv=inp.cv, evidence=inp.evidence)
     doc = reconcile_skills(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, threshold=wera().ats_threshold)
     # Both saved after the model calls, never between them: a save takes SQLite's one write lock,
     # and saving the analysis first held it through the tailoring call.

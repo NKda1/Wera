@@ -12,11 +12,14 @@ import type {
   JobList,
   MasterCV,
   NavCounts,
+  PlaceOption,
   ScoredJob,
   SearchProfile,
   SettingsResponse,
   ShortlistMeta,
   SiteOption,
+  SuggestionList,
+  UpskillsReport,
 } from "../types";
 import { agentConfig } from "./env";
 import { ApiError } from "./http";
@@ -44,13 +47,17 @@ function timeoutFor(path: string): number {
   return SLOW_ROUTES.some((re) => re.test(path)) ? SLOW_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
 }
 
-async function call(path: string, init: { method?: string; body?: string } = {}): Promise<Response> {
+async function call(path: string, init: { method?: string; body?: string; headers?: Record<string, string> } = {}): Promise<Response> {
   const { url, token } = agentConfig();
   if (!token) throw new ApiError(503, "AGENT_NOT_CONFIGURED", "AGENT_TOKEN isn't set on the web server. Start WERA with `pnpm dev`.");
   try {
     return await fetch(`${url}${path}`, {
       method: init.method ?? "GET",
-      headers: { authorization: `Bearer ${token}`, ...(init.body !== undefined ? { "content-type": "application/json" } : {}) },
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
+        ...init.headers,
+      },
       body: init.body,
       cache: "no-store",
       signal: AbortSignal.timeout(timeoutFor(path)),
@@ -76,11 +83,22 @@ async function json<T>(path: string): Promise<T> {
 /** Encodes one path segment, so an id can never reach a different agent route. */
 export const seg = (value: string) => encodeURIComponent(value);
 
+// SRCH-32: Careerjet's terms ask for the IP address and browser of the person whose action
+// triggered a search, so the routes that start one pass them on. The first X-Forwarded-For hop
+// when a proxy sets it; on this machine, with no proxy, the browser connected over loopback.
+const SEARCH_ROUTES = [/^\/intake\/(run|score-more)$/];
+
+export function personHeaders(req: Request): Record<string, string> {
+  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || "127.0.0.1";
+  return { "x-wera-person-ip": ip, "x-wera-person-ua": req.headers.get("user-agent") ?? "" };
+}
+
 /** Route handlers: pass this request to the same-shaped agent route and return its answer as is. */
 export async function forward(req: Request, path: string): Promise<Response> {
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : await req.text();
+  const headers = SEARCH_ROUTES.some((re) => re.test(path)) ? personHeaders(req) : undefined;
   try {
-    const res = await call(`${path}${new URL(req.url).search}`, { method: req.method, body: body || undefined });
+    const res = await call(`${path}${new URL(req.url).search}`, { method: req.method, body: body || undefined, headers });
     return new Response(await res.text(), {
       status: res.status,
       headers: { "content-type": res.headers.get("content-type") ?? "application/json", "cache-control": "no-store" },
@@ -94,7 +112,12 @@ export async function forward(req: Request, path: string): Promise<Response> {
 export const agent = {
   navCounts: () => json<NavCounts>("/nav"),
   sites: () => json<SiteOption[]>("/sites"),
+  /** SRCH-11: the countries a profile can target, with what searches each. */
+  places: () => json<PlaceOption[]>("/places"),
   listJobs: (status = "new", sort: "score" | "date" = "score") => json<JobList>(`/jobs?status=${seg(status)}&sort=${sort}`).then((r) => r.items),
+  /** LIFE-03: the list with its count of possibly closed jobs, or (`only`) just those jobs. */
+  jobList: (status = "new", possiblyClosed?: "only") =>
+    json<JobList>(`/jobs?status=${seg(status)}&sort=score${possiblyClosed ? `&possiblyClosed=${possiblyClosed}` : ""}`),
   getJob: (id: string) => json<ScoredJob>(`/jobs/${seg(id)}`),
   shortlistMeta: () => json<ShortlistMeta>("/jobs/meta"),
   listApplications: () => json<ApplicationList>("/applications").then((r) => r.items),
@@ -104,4 +127,7 @@ export const agent = {
   getContact: () => json<Contact>("/cv/contact"),
   getProfile: () => json<SearchProfile>("/profile"),
   getSettings: () => json<SettingsResponse>("/settings"),
+  upskills: (days = 60) => json<UpskillsReport>(`/upskills?days=${days}`),
+  /** MATCH-13: profile changes the person's Gate 1 decisions point at. */
+  learningSuggestions: () => json<SuggestionList>("/learning/suggestions"),
 };

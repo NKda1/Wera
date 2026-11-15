@@ -99,10 +99,11 @@ class TestKeywordMatrix:
         assert "good docs" in culture
         assert not {c.casefold() for c in culture} & {k.term.casefold() for k in keywords}
 
-    def test_extraction_caps_each_bucket_separately(self):
-        raw = {"keywords": [{"term": f"T{i}", "weight": "nice", "category": "tool"} for i in range(34)]}
-        with pytest.raises(Exception, match="At most 33"):
-            KeywordList.model_validate(raw)
+    def test_a_long_extraction_is_kept_not_refused(self):
+        """14 Nov: 34 terms used to refuse the whole reply and leave the job unscored. The caps
+        are `keywords_for`'s, per bucket, so the extraction itself takes them all."""
+        raw = {"keywords": [{"term": f"T{i}", "weight": "nice", "category": "tool"} for i in range(40)]}
+        assert len(KeywordList.model_validate(raw).keywords) == 40
 
     def test_the_matrix_groups_keywords_by_category(self):
         evidence = _evidence(
@@ -234,3 +235,39 @@ class TestCvProfile:
         before = profile_calls()
         assert client.get("/cv/profile").json() == body
         assert profile_calls() == before
+
+
+class TestKeywordsAreReadOncePerPost:
+    """What a post asks for is a fact about the post, so a re-score after a CV edit reuses the
+    keywords its last report read rather than paying `keywords.extract` again (13 Nov plan, A.2)."""
+
+    def test_a_new_cv_version_rescores_without_reading_the_post_again(self, client, monkeypatch):
+        from wera_agent.nodes import fit
+
+        calls = []
+        real = fit.keywords_for
+
+        def counting(session, job, cv):
+            calls.append(cv.version)
+            return real(session, job, cv)
+
+        monkeypatch.setattr(fit, "keywords_for", counting)
+        with transaction() as session:
+            store = Store(session)
+            job = store._job(store._job_row("job-fernhill-mle"))
+            cv = store.cv()
+            first, _, _ = fit.evidence_for(session, job, cv, model="demo", now=0)
+            newer = cv.model_copy(update={"version": cv.version + 1})
+            second, scored_now, _ = fit.evidence_for(session, job, newer, model="demo", now=0)
+        assert scored_now and calls in ([], [cv.version])  # read at most once, for the first CV
+        assert [k.term for k in second.keywords] == [k.term for k in first.keywords]
+
+    def test_a_changed_post_is_read_again(self, client, monkeypatch):
+        from wera_agent.nodes import fit
+
+        with transaction() as session:
+            store = Store(session)
+            job = store._job(store._job_row("job-fernhill-mle"))
+            fit.evidence_for(session, job, store.cv(), model="demo", now=0)
+            edited = job.model_copy(update={"description_md": (job.description_md or "") + " Also Terraform."})
+            assert fit.known_keywords(session, edited) is None

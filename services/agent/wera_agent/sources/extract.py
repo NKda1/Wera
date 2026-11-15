@@ -36,7 +36,7 @@ import logfire
 from selectolax.lexbor import LexborHTMLParser
 
 from ..http import request
-from .ats_feeds import html_to_text, remote_mode
+from .ats_feeds import html_to_text, remote_mode, without_leading_chrome
 from .browser import Fetcher
 
 # How a card was read, for the run's own telemetry. The point of recording it is that "the local
@@ -277,6 +277,7 @@ def _card_from_posting(posting: dict[str, Any]) -> dict[str, Any] | None:
         "location": _place(posting) or "Not stated",
         "remote": _remote_of(posting) or "",
         "postedAt": _string(posting.get("datePosted")).strip(),
+        "closesAt": _string(posting.get("validThrough")).strip(),  # LIFE-02, schema.org's deadline
         "description": html_to_text(_string(posting.get("description"))),
     }
 
@@ -336,7 +337,8 @@ def _string(value: Any) -> str:
 
 def _from_model(html: str, parse: Callable[[str], dict[str, Any] | None]) -> dict[str, Any] | None:
     """`job.normalise` over the page's text. The last rung before anything is paid for."""
-    text = html_to_text(html)[:TEXT_FOR_MODEL]
+    # The menus go before the cut, so the model's 12,000 characters are spent on the posting.
+    text = without_leading_chrome(html_to_text(html))[:TEXT_FOR_MODEL]
     if len(text) < MIN_DESCRIPTION:
         return None  # nothing rendered; a model would be guessing from navigation
     try:
@@ -361,6 +363,7 @@ def _from_model(html: str, parse: Callable[[str], dict[str, Any] | None]) -> dic
         "location": _place_of(found.get("location")) or "Not stated",
         "remote": _string(found.get("remote")).strip(),
         "postedAt": _string(found.get("postedAt")).strip(),
+        "closesAt": _string(found.get("closesAt")).strip(),
         # The page's own text, not the model's summary of it: the description is what later
         # prompts quote from (LTR-02), so a paraphrase would make a "verbatim" quote a lie.
         "description": text,

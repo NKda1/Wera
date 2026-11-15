@@ -2,22 +2,28 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
-import { api, ApiRequestError, type Decision } from "@/lib/api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api, ApiRequestError, type Decision, type ReasonCode } from "@/lib/api";
 import { formatDate, formatLocation, formatPostedAge, isNew, URGENCY_GROUPS } from "@/lib/format";
-import type { IntakeChannel, IntakeRun, ScoredJob, SearchProfile, ShortlistMeta } from "@/lib/types";
+import type { IntakeChannel, IntakeRun, PlaceOption, ScoredJob, SearchProfile, ShortlistMeta, SuggestionList } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
+import { LearningCard } from "./LearningCard";
 import { Card } from "@/lib/ui/Card";
 import { cn } from "@/lib/ui/cn";
 import { Dialog } from "@/lib/ui/Dialog";
-import { Label, Select, Textarea } from "@/lib/ui/Field";
+import { Label, Textarea } from "@/lib/ui/Field";
 import { Pill } from "@/lib/ui/Pill";
 import { ScoreRing } from "@/lib/ui/ScoreRing";
+import { useScrollEdges } from "@/lib/ui/scrollEdges";
 import { useToast } from "@/lib/ui/Toast";
-import { ImportDialog } from "./ImportDialog";
+import dynamic from "next/dynamic";
 import { JobCard } from "./JobCard";
 import { ProfileCard, type SiteOption } from "./ProfileCard";
-import { RunPanel, SearchDialog } from "./SearchRun";
+import { RunPanel } from "./SearchRun";
+
+// Opened on a click, so loaded on one: the dialogs stay out of the shortlist's first bundle.
+const ImportDialog = dynamic(() => import("./ImportDialog").then((m) => m.ImportDialog));
+const SearchDialog = dynamic(() => import("./SearchRun").then((m) => m.SearchDialog));
 
 type Meta = ShortlistMeta;
 /** "urgency" groups rather than re-sorting; see the `groups` memo below. */
@@ -106,7 +112,15 @@ function facetsFor(jobs: ScoredJob[]): Facet[] {
   return out;
 }
 
-const REJECT_REASONS = ["Wrong level", "Wrong location", "Not my field", "Pay too low", "Already applied elsewhere"];
+// MATCH-11: each chip is sent as its code, and anything typed as a note beside it — the dialog
+// used to send one or the other, and only the code is something WERA can learn from.
+const REJECT_REASONS: { code: ReasonCode; label: string }[] = [
+  { code: "wrong_level", label: "Wrong level" },
+  { code: "wrong_location", label: "Wrong location" },
+  { code: "not_my_field", label: "Not my field" },
+  { code: "pay_too_low", label: "Pay too low" },
+  { code: "applied_elsewhere", label: "Already applied elsewhere" },
+];
 
 const NEW_FROM: Record<string, string> = {
   board_search: "the search",
@@ -133,13 +147,21 @@ export function JobsScreen({
   meta,
   profile,
   sites,
+  places,
   cvVersion,
   today,
+  possiblyClosed = 0,
+  showingPossiblyClosed = false,
+  suggestions,
 }: {
+  possiblyClosed?: number;
+  showingPossiblyClosed?: boolean;
+  suggestions?: SuggestionList;
   jobs: ScoredJob[];
   meta: Meta;
   profile: SearchProfile;
   sites: SiteOption[];
+  places: PlaceOption[];
   cvVersion: number;
   today: string;
 }) {
@@ -165,6 +187,7 @@ export function JobsScreen({
   // load, because a card that jumped down the list the moment it was clicked would be worse.
   const [seen, setSeen] = useState<Set<string>>(new Set());
   const [newOnly, setNewOnly] = useState(false);
+  const [openGroups, setOpenGroups] = useState<Set<FacetGroup>>(new Set());
 
   const live = jobs.filter((j) => !removed.has(j.id));
   const fresh = (j: ScoredJob) => isNew(j) && !seen.has(j.id);
@@ -172,6 +195,8 @@ export function JobsScreen({
   // Rank is the fit position in the whole shortlist, so it stays stable under filters.
   const rankOf = useMemo(() => new Map([...live].sort((a, b) => b.fit.total - a.fit.total).map((j, i) => [j.id, i + 1])), [live]);
   const facets = useMemo(() => facetsFor(live), [live]);
+  const chipRow = useRef<HTMLDivElement>(null);
+  const chipFade = useScrollEdges(chipRow, `${facets.length}|${[...openGroups].join()}|${freshJobs.length}`);
   const visible = useMemo(() => {
     // Grouped first, so chips within a group are an "either" and groups are an "and". An id with
     // no matching facet — a place that has dropped off the shortlist since it was picked — simply
@@ -196,6 +221,17 @@ export function JobsScreen({
       jobs: visible.filter((j) => j.urgency === group.id).sort((a, b) => Number(isNew(b)) - Number(isNew(a))),
     })).filter((g) => g.jobs.length);
   }, [visible, sort]);
+  // Lazy: the first `PAGE` cards render, then more as the end comes into view (`useProgressive`).
+  const { limit, sentinel } = useProgressive(visible.length, `${sort}|${filters.join(",")}|${newOnly}`);
+  const shownGroups = useMemo(() => {
+    if (!groups) return null;
+    let left = limit;
+    return groups.map((g) => {
+      const jobs = g.jobs.slice(0, Math.max(left, 0));
+      left -= g.jobs.length;
+      return { ...g, shown: jobs };
+    }).filter((g) => g.shown.length);
+  }, [groups, limit]);
   const top = [...visible].sort((a, b) => b.fit.total - a.fit.total).slice(0, 3);
 
   const markSeen = (job: ScoredJob) => {
@@ -304,6 +340,9 @@ export function JobsScreen({
       const { runIds: ids } = await api.scoreMore();
       setRunIds(ids);
     } catch (err) {
+      // SRCH-26: every search sent and nothing waiting. The near misses are the next place to
+      // look, so the hidden list opens on them rather than leaving the person to find it.
+      if (err instanceof ApiRequestError && err.code === "SEARCH_USED_UP" && meta.nearMisses > 0) setShowHidden(true);
       toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't find more jobs." });
     } finally {
       setScoringMore(false);
@@ -325,9 +364,13 @@ export function JobsScreen({
 
   const counts = meta.found;
 
+  // `@container`: this screen lays itself out by the width it has, not the window's. At 1024px
+  // the sidebar arrives and leaves the content narrower (656px) than a 768px tablet's (688px), so
+  // rows keyed to `lg:` switched on exactly when there was less room for them — the filter chips
+  // ran under the sort switch.
   return (
-    <div className="mx-auto max-w-[1080px]">
-      <header className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 lg:flex-nowrap">
+    <div className="@container mx-auto max-w-[1080px]">
+      <header className="flex flex-col gap-5 @3xl:flex-row @3xl:items-end @3xl:justify-between @3xl:gap-8">
         <div className="min-w-0 flex-1">
           <Pill tone="green">Gate 1 · waiting for you</Pill>
           <h1 className="mt-3 text-[34px] leading-[1.05] font-bold tracking-[-0.025em] sm:text-display">Today&apos;s shortlist</h1>
@@ -338,7 +381,11 @@ export function JobsScreen({
           {freshJobs.length ? (
             <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-small">
               <span className="font-semibold text-forest-900">{newSummary(freshJobs)}</span>
-              <button type="button" onClick={markAllSeen} className="font-semibold text-forest-700 underline underline-offset-2 hover:text-forest-900">
+              <button
+                type="button"
+                onClick={markAllSeen}
+                className="font-semibold text-forest-700 underline underline-offset-2 hover:text-forest-900 pointer-coarse:-my-3 pointer-coarse:py-3"
+              >
                 Mark all seen
               </button>
             </p>
@@ -359,66 +406,91 @@ export function JobsScreen({
             scored. Without it the shortlist only changed when the whole run finished, so a
             search produced nothing to look at for its first several minutes. */}
         {runIds.length ? <RunPanel runIds={runIds} onFinished={onRunsFinished} onBatch={() => router.refresh()} /> : null}
-        <ProfileCard profile={profile} channels={meta.channels} sites={sites} cvVersion={cvVersion} onPasteJob={() => setImporting(true)} />
+        <ProfileCard profile={profile} channels={meta.channels} sites={sites} places={places} cvVersion={cvVersion} onPasteJob={() => setImporting(true)} />
+        {suggestions ? <LearningCard suggestions={suggestions} /> : null}
+        {/* LIFE-03: jobs nothing has shown open for a week wait here, off the main list. */}
+        {showingPossiblyClosed ? (
+          <p className="text-small text-ink-2">
+            Showing jobs nothing has confirmed open in a week — opening one checks it.{" "}
+            <Link href="/jobs" className="font-semibold text-forest-700 underline underline-offset-2 hover:text-forest-900">
+              Back to the shortlist
+            </Link>
+          </p>
+        ) : possiblyClosed > 0 ? (
+          <p className="text-small text-ink-2">
+            {possiblyClosed} job{possiblyClosed === 1 ? "" : "s"} not confirmed open in a week {possiblyClosed === 1 ? "is" : "are"} left off this list.{" "}
+            <Link href="/jobs?show=possibly-closed" className="font-semibold text-forest-700 underline underline-offset-2 hover:text-forest-900">
+              Show possibly closed
+            </Link>
+          </p>
+        ) : null}
       </div>
 
-      <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
-        {/* Built from the shortlist, grouped, with counts. Counts are the part that makes a facet
-            usable: a chip that says "Bristol 12" is a decision you can make before clicking. */}
-        <div className="flex flex-col gap-2">
-          <div className="scrollbar-none -mx-4 flex gap-2 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:px-0" role="group" aria-label="Filter jobs">
-            <FilterChip
-              active={filters.length === 0 && !newOnly}
-              onClick={() => {
-                setFilters([]);
-                setNewOnly(false);
-              }}
-            >
-              All {live.length}
+      {/* One quiet toolbar instead of a stack of chip rows and a dropdown: the filters (groups
+          split by a hairline, each chip with its count, so it's a decision before a click), and
+          sort as a three-way switch. On a phone the chips are one row that scrolls sideways; with
+          room they wrap, and the sort switch sits beside them only once both fit — so no chip is
+          ever hidden behind it. */}
+      <div className="mt-12 flex flex-col gap-3 border-b border-line pb-4 @4xl:flex-row @4xl:items-start @4xl:justify-between @4xl:gap-6">
+        <div
+          ref={chipRow}
+          style={chipFade}
+          className="scrollbar-none -mx-4 flex min-w-0 items-center gap-1.5 overflow-x-auto px-4 sm:mx-0 sm:px-0 @xl:flex-wrap @xl:overflow-visible @4xl:flex-1"
+          role="group"
+          aria-label="Filter jobs"
+        >
+          <FilterChip
+            active={filters.length === 0 && !newOnly}
+            onClick={() => {
+              setFilters([]);
+              setNewOnly(false);
+            }}
+          >
+            All <Count>{live.length}</Count>
+          </FilterChip>
+          {freshJobs.length ? (
+            <FilterChip active={newOnly} onClick={() => setNewOnly((n) => !n)}>
+              New <Count>{freshJobs.length}</Count>
             </FilterChip>
-            {freshJobs.length ? (
-              <FilterChip active={newOnly} onClick={() => setNewOnly((n) => !n)}>
-                New only {freshJobs.length}
-              </FilterChip>
-            ) : null}
-          </div>
+          ) : null}
           {(Object.keys(GROUP_LABELS) as FacetGroup[]).map((group) => {
             const options = facets.filter((f) => f.group === group);
             if (options.length < 2) return null; // one option filters nothing out
+            // The five biggest, plus any already chosen; "+N" opens the rest of this group in place.
+            const shown = openGroups.has(group) ? options : options.filter((f, i) => i < FACETS_SHOWN || filters.includes(f.id));
+            const hidden = options.length - shown.length;
             return (
-              <div
-                key={group}
-                className="scrollbar-none -mx-4 flex items-center gap-2 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:px-0"
-                role="group"
-                aria-label={GROUP_LABELS[group]}
-              >
-                <span className="shrink-0 text-small text-ink-2">{GROUP_LABELS[group]}</span>
-                {options.map((f) => (
+              <span key={group} className="flex shrink-0 items-center gap-1.5" role="group" aria-label={GROUP_LABELS[group]}>
+                <span className="mx-1.5 h-5 w-px bg-line" aria-hidden="true" />
+                {shown.map((f) => (
                   <FilterChip
                     key={f.id}
                     active={filters.includes(f.id)}
                     onClick={() => setFilters((fs) => (fs.includes(f.id) ? fs.filter((x) => x !== f.id) : [...fs, f.id]))}
                   >
-                    {f.label} <span className="font-normal opacity-70">{f.count}</span>
+                    {f.label} <Count>{f.count}</Count>
                   </FilterChip>
                 ))}
-              </div>
+                {hidden > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setOpenGroups((g) => new Set(g).add(group))}
+                    className="min-h-9 shrink-0 px-2 text-[13px] font-semibold text-forest-700 hover:underline pointer-coarse:min-h-11"
+                    aria-label={`Show ${hidden} more ${GROUP_LABELS[group].toLowerCase()}`}
+                  >
+                    +{hidden}
+                  </button>
+                ) : null}
+              </span>
             );
           })}
         </div>
-        <label className="flex items-center gap-2 text-small text-ink-2">
-          Sort
-          <Select value={sort} onChange={(e) => setSort(e.target.value as Sort)} className="min-w-36 text-[14px]">
-            <option value="score">Best match</option>
-            <option value="date">Newest</option>
-            <option value="urgency">By urgency</option>
-          </Select>
-        </label>
+        <SortSwitch value={sort} onChange={setSort} />
       </div>
 
       <section aria-label="Shortlisted jobs" className="mt-4 flex flex-col gap-4">
-        {groups
-          ? groups.map((group) => (
+        {shownGroups
+          ? shownGroups.map((group) => (
               <section key={group.id} aria-labelledby={`group-${group.id}`} className="flex flex-col gap-4">
                 <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-line pb-2">
                   <h2 id={`group-${group.id}`} className="text-h2">
@@ -427,7 +499,7 @@ export function JobsScreen({
                   <span className="text-small font-semibold text-forest-700">{group.jobs.length}</span>
                   <span className="text-small text-ink-2">{group.hint}</span>
                 </div>
-                {group.jobs.map((job) => (
+                {group.shown.map((job) => (
                   <JobCard
                     key={job.id}
                     job={job}
@@ -442,7 +514,7 @@ export function JobsScreen({
                 ))}
               </section>
             ))
-          : visible.map((job) => (
+          : visible.slice(0, limit).map((job) => (
               <JobCard
                 key={job.id}
                 job={job}
@@ -455,6 +527,9 @@ export function JobsScreen({
                 onReject={() => setRejecting(job)}
               />
             ))}
+        {limit < visible.length ? (
+          <div ref={sentinel} className="h-24 animate-pulse border border-line bg-surface" aria-label="Loading more jobs" />
+        ) : null}
         {live.length > 0 ? (
           <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 py-2">
             <Button variant="secondary" onClick={findMore} busy={scoringMore} disabled={runIds.length > 0}>
@@ -508,6 +583,7 @@ export function JobsScreen({
           <button type="button" onClick={() => setShowHidden((s) => !s)} aria-expanded={showHidden} className="font-semibold text-forest-700 underline underline-offset-2">
             {meta.hiddenTotal} hidden by your profile
           </button>
+          {meta.nearMisses > 0 ? <> ({meta.nearMisses} close to your titles, listed first)</> : null}
           {" · "}
           {/* SRCH-13. Free — employers' own feeds, plain HTTP and a headless browser for the
               boards that render their closure in JavaScript — so there is nothing to confirm
@@ -541,7 +617,7 @@ export function JobsScreen({
         {showAwaiting ? (
           <ul className="space-y-2">
             {meta.awaiting.map((j) => (
-              <li key={j.id} className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-line bg-white px-4 py-2.5">
+              <li key={j.id} className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-line bg-surface px-4 py-2.5">
                 {/* No score ring, for the same reason the hidden list has none: nothing has
                     judged this job yet, and a zero would read as a verdict rather than a queue
                     position. */}
@@ -575,7 +651,7 @@ export function JobsScreen({
         {showHidden ? (
           <ul className="space-y-2">
             {meta.hidden.map((j) => (
-              <li key={j.id} className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-line bg-white px-4 py-2.5">
+              <li key={j.id} className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-line bg-surface px-4 py-2.5">
                 {/* No score ring: these were filtered before any model call (MATCH-01), so
                     there is no fit to show. The ring used to render `fit.total` next to the
                     words "Filtered before any model call", which was a score nothing produced. */}
@@ -607,7 +683,7 @@ export function JobsScreen({
 
       {importing ? <ImportDialog onClose={() => setImporting(false)} /> : null}
       {searching ? <SearchDialog profile={profile} onClose={() => setSearching(false)} onStart={startSearch} /> : null}
-      {rejecting ? <RejectDialog job={rejecting} onClose={() => setRejecting(undefined)} onReject={(reason) => (setRejecting(undefined), decide(rejecting, { action: "reject", reason }))} /> : null}
+      {rejecting ? <RejectDialog job={rejecting} onClose={() => setRejecting(undefined)} onReject={(reasonCode, reason) => (setRejecting(undefined), decide(rejecting, { action: "reject", reasonCode, reason }))} /> : null}
 
       <Dialog
         open={topN}
@@ -679,8 +755,8 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
       aria-pressed={active}
       onClick={onClick}
       className={cn(
-        "min-h-11 shrink-0 rounded-full border px-4 text-[14px] font-semibold transition-colors",
-        active ? "border-forest-700 bg-forest-700 text-white" : "border-line bg-white text-ink hover:border-mint-200 hover:bg-mint-50",
+        "inline-flex min-h-9 shrink-0 items-center gap-1.5 border px-3 text-[13px] font-semibold transition-colors duration-150 pointer-coarse:min-h-11",
+        active ? "border-forest-700 bg-accent text-white" : "border-line bg-surface text-ink hover:border-forest-700 hover:text-forest-700",
       )}
     >
       {children}
@@ -688,8 +764,61 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
   );
 }
 
-function RejectDialog({ job, onClose, onReject }: { job: ScoredJob; onClose: () => void; onReject: (reason?: string) => void }) {
-  const [reason, setReason] = useState<string>();
+function Count({ children }: { children: React.ReactNode }) {
+  return <span className="font-normal tabular-nums opacity-70">{children}</span>;
+}
+
+const FACETS_SHOWN = 5;
+
+const SORTS: { id: Sort; label: string }[] = [
+  { id: "score", label: "Best match" },
+  { id: "date", label: "Newest" },
+  { id: "urgency", label: "By urgency" },
+];
+
+/** Sort as a switch, not a dropdown: three choices are faster to see than to open. */
+function SortSwitch({ value, onChange }: { value: Sort; onChange: (v: Sort) => void }) {
+  return (
+    <div role="radiogroup" aria-label="Sort" className="inline-flex shrink-0 self-start border border-line">
+      {SORTS.map((s) => (
+        <button
+          key={s.id}
+          type="button"
+          role="radio"
+          aria-checked={value === s.id}
+          onClick={() => onChange(s.id)}
+          className={cn(
+            "min-h-9 px-3.5 text-[13px] font-semibold transition-colors duration-150 pointer-coarse:min-h-11",
+            value === s.id ? "bg-ink text-surface" : "text-ink-2 hover:bg-mint-50 hover:text-ink",
+          )}
+        >
+          {s.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Twelve cards first, then twelve more as the end of the list comes into view: a long shortlist
+// paints at once instead of laying out every card before the first is visible.
+const PAGE = 12;
+
+function useProgressive(total: number, resetKey: string) {
+  const [limit, setLimit] = useState(PAGE);
+  const sentinel = useRef<HTMLDivElement>(null);
+  useEffect(() => setLimit(PAGE), [resetKey]);
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!el || limit >= total) return;
+    const io = new IntersectionObserver((entries) => entries[0]?.isIntersecting && setLimit((n) => n + PAGE), { rootMargin: "600px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [limit, total]);
+  return { limit, sentinel };
+}
+
+function RejectDialog({ job, onClose, onReject }: { job: ScoredJob; onClose: () => void; onReject: (reasonCode?: ReasonCode, note?: string) => void }) {
+  const [reason, setReason] = useState<ReasonCode>();
   const [other, setOther] = useState("");
   return (
     <Dialog
@@ -697,13 +826,13 @@ function RejectDialog({ job, onClose, onReject }: { job: ScoredJob; onClose: () 
       onClose={onClose}
       size="sm"
       title={`Reject ${job.title}?`}
-      description="A reason is optional. WERA uses your decisions to tune the scoring weights later."
+      description="A reason is optional. WERA learns from it: jobs like this move down your list, and it may suggest a change to your profile."
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="dark" onClick={() => onReject(other.trim() || reason)}>
+          <Button variant="dark" onClick={() => onReject(reason, other.trim() || undefined)}>
             Reject
           </Button>
         </>
@@ -713,8 +842,8 @@ function RejectDialog({ job, onClose, onReject }: { job: ScoredJob; onClose: () 
         <legend className="mb-2 text-[14px] font-semibold">Reason</legend>
         <div className="flex flex-wrap gap-2">
           {REJECT_REASONS.map((r) => (
-            <FilterChip key={r} active={reason === r} onClick={() => setReason(reason === r ? undefined : r)}>
-              {r}
+            <FilterChip key={r.code} active={reason === r.code} onClick={() => setReason(reason === r.code ? undefined : r.code)}>
+              {r.label}
             </FilterChip>
           ))}
         </div>

@@ -59,7 +59,7 @@ export function Menu({
           aria-label={label}
           onKeyDown={onMenuKey}
           className={cn(
-            "absolute z-30 mt-1.5 min-w-44 animate-fade-in rounded-control border border-line bg-white p-1 shadow-pop",
+            "absolute z-30 mt-1.5 min-w-44 animate-fade-in rounded-control border border-line bg-surface p-1 shadow-pop",
             align === "end" ? "right-0" : "left-0",
           )}
         >
@@ -72,7 +72,7 @@ export function Menu({
                 setOpen(false);
                 item.onSelect();
               }}
-              className="flex min-h-11 w-full items-center justify-between gap-4 rounded-md px-3 text-left text-[15px] hover:bg-mint-100 focus-visible:bg-mint-100"
+              className="flex min-h-11 w-full items-center justify-between gap-4 rounded-none px-3 text-left text-[15px] hover:bg-mint-100 focus-visible:bg-mint-100"
             >
               <span>{item.label}</span>
               {item.hint ? <span className="text-small text-ink-2">{item.hint}</span> : null}

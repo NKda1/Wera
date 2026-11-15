@@ -27,9 +27,13 @@ class TestDemoMode:
 
 
 class TestSchedule:
+    def test_by_default_only_backups_and_the_archive_run(self):
+        """SCH-05 (14 Nov): nothing goes out to the internet on its own until the person says so."""
+        assert {job.id for job in scheduler.build().get_jobs()} == {"nightly-backup", "telemetry-archive"}
+
     def test_the_watchlist_runs_each_morning_and_the_inbox_through_the_day(self):
-        """SCH-01."""
-        jobs = {job.id: job for job in scheduler.build().get_jobs()}
+        """SCH-01, once the daily intake is turned on (SCH-05)."""
+        jobs = {job.id: job for job in scheduler.build(intake=True).get_jobs()}
         assert set(jobs) == {"morning-watchlist", "inbox-check", "daily-recheck", "nightly-backup", "telemetry-archive"}
 
         # REL-05: the backup runs in the small hours, before anything scheduled starts writing.
@@ -61,7 +65,7 @@ class TestSchedule:
         Asserted over every job rather than against the one that used to carry it: the next
         channel added to the morning sweep should have to pass this too.
         """
-        for job in scheduler.build().get_jobs():
+        for job in scheduler.build(intake=True).get_jobs():
             assert job.id != scheduler.SEARCH_JOB
             for channels in job.args:
                 assert "board_search" not in channels, f"{job.id} would spend credits on its own"
@@ -139,7 +143,7 @@ class TestScheduledRun:
 class TestNow:
     def test_the_schedule_is_local_time(self):
         """ "06:30" means the person's morning, not UTC's."""
-        trigger = scheduler.build().get_job("morning-watchlist").trigger
+        trigger = scheduler.build(intake=True).get_job("morning-watchlist").trigger
         # APScheduler resolves a naive cron against the local zone, which is what we want here.
         assert trigger.timezone is not None
 
@@ -214,3 +218,23 @@ class TestTheScheduleSetting:
         assert api.ok("GET", "/settings")["searchSchedule"]["enabled"] is False
         saved = api.ok("PUT", "/settings", {"searchSchedule": {"enabled": True, "cron": "0 9 * * 1,3,5"}})
         assert saved["searchSchedule"]["enabled"] is True and saved["searchSchedule"]["cron"] == "0 9 * * 1,3,5"
+
+
+class TestTheDailyIntakeSwitch:
+    """SCH-05: the watchlist, the inbox and the open-job sweep run on their own only when the
+    person has turned them on, and saving the setting applies it at once."""
+
+    def test_it_is_off_until_turned_on(self, api):
+        assert api.ok("GET", "/settings")["scheduledIntake"] is False
+
+    def test_turning_it_on_and_off_adds_and_removes_the_jobs(self, monkeypatch):
+        built = scheduler.build()  # unstarted, as `TestTheScheduledSearch.pending`: no loop needed
+        monkeypatch.setattr(scheduler, "_scheduler", built)
+        scheduler.apply_intake_schedule(True)
+        assert set(scheduler.INTAKE_JOBS) <= {j.id for j in built.get_jobs()}
+        scheduler.apply_intake_schedule(False)
+        assert not set(scheduler.INTAKE_JOBS) & {j.id for j in built.get_jobs()}
+
+    def test_saving_it_is_remembered(self, api):
+        api.ok("PUT", "/settings", {"scheduledIntake": True})
+        assert api.ok("GET", "/settings")["scheduledIntake"] is True

@@ -31,35 +31,10 @@ watch_titles: []
 max_companies: 60
 discover_every_days: 7
 companies:
-- name: Catapult Sports
+- name: Fospha
   vendor: greenhouse
-  token: catapultsports
-  discovered_on: '2026-10-29'
-  matched: Graduate Software Engineer
-- name: Partly.Com
-  vendor: ashby
-  token: partly.com
-  discovered_on: '2026-10-29'
-  matched: Graduate Software Engineer
-- name: Graphcore Early Careers
-  vendor: greenhouse
-  token: graphcore-early-careers
-  discovered_on: '2026-10-29'
-  matched: Graduate Software Engineer
-- name: Graphcore
-  vendor: greenhouse
-  token: graphcore
-  discovered_on: '2026-10-29'
-  matched: Software Engineer
-- name: Blenheim Chalcot
-  vendor: greenhouse
-  token: blenheimchalcot
-  discovered_on: '2026-10-29'
-  matched: Junior Software Engineer
-- name: Leverdemo 8
-  vendor: lever
-  token: leverdemo-8
-  discovered_on: '2026-10-29'
+  token: fosphamarketing
+  discovered_on: '2026-11-13'
   matched: Junior Software Engineer
 - name: Wiz, Inc.
   vendor: greenhouse
@@ -71,24 +46,14 @@ companies:
   token: orbitalindustries
   discovered_on: '2026-10-29'
   matched: Backend Engineer
-- name: Monzo
-  vendor: greenhouse
-  token: monzo
-  discovered_on: '2026-10-29'
-  matched: Backend Engineer
 - name: Dualentry
   vendor: ashby
   token: dualentry
   discovered_on: '2026-10-29'
   matched: Backend Engineer
-- name: Rightmove Careers
+- name: Monzo
   vendor: greenhouse
-  token: rightmovecareers
-  discovered_on: '2026-10-29'
-  matched: Backend Engineer
-- name: Referrals Only
-  vendor: greenhouse
-  token: monzoreferrals
+  token: monzo
   discovered_on: '2026-10-29'
   matched: Backend Engineer
 - name: Capsa
@@ -96,21 +61,41 @@ companies:
   token: capsa
   discovered_on: '2026-10-29'
   matched: Backend Engineer
-- name: Intropic
-  vendor: lever
-  token: intropic
-  discovered_on: '2026-11-05'
+- name: Deducta
+  vendor: ashby
+  token: deducta
+  discovered_on: '2026-11-13'
+  matched: Backend Engineer
+- name: Referrals Only
+  vendor: greenhouse
+  token: monzoreferrals
+  discovered_on: '2026-10-29'
+  matched: Backend Engineer
+- name: Iwoca.Co.Uk
+  vendor: ashby
+  token: iwoca.co.uk
+  discovered_on: '2026-11-13'
   matched: Backend Engineer
 - name: Scale AI
   vendor: greenhouse
   token: scaleai
   discovered_on: '2026-11-05'
   matched: Backend Engineer
+- name: Deliveroo
+  vendor: greenhouse
+  token: deliveroo
+  discovered_on: '2026-11-13'
+  matched: Backend Engineer
 - name: Ripple
   vendor: greenhouse
   token: ripple
   discovered_on: '2026-10-29'
   matched: Software Engineer
+- name: Cloudflare
+  vendor: greenhouse
+  token: cloudflare
+  discovered_on: '2026-11-05'
+  matched: Systems Engineer
 - name: Anthropic
   vendor: greenhouse
   token: anthropic
@@ -126,9 +111,9 @@ companies:
   token: addepar1
   discovered_on: '2026-11-05'
   matched: Software Engineer
-- name: Robinhood
+- name: Graphcore
   vendor: greenhouse
-  token: robinhood
+  token: graphcore
   discovered_on: '2026-10-29'
   matched: Software Engineer
 - name: Clear Street
@@ -136,21 +121,21 @@ companies:
   token: clearstreet
   discovered_on: '2026-11-05'
   matched: Software Engineer
-- name: Cloudflare
+- name: Yext
   vendor: greenhouse
-  token: cloudflare
-  discovered_on: '2026-11-05'
-  matched: Systems Engineer
-- name: Lumaai
-  vendor: ashby
-  token: lumaai
-  discovered_on: '2026-11-05'
+  token: yext
+  discovered_on: '2026-11-13'
   matched: Systems Engineer
 - name: Cloudflare Events
   vendor: greenhouse
   token: careersday
   discovered_on: '2026-11-05'
   matched: Systems Engineer
+- name: Catapult Sports
+  vendor: greenhouse
+  token: catapultsports
+  discovered_on: '2026-10-29'
+  matched: Graduate Software Engineer
 - name: Sensor Tower
   vendor: ashby
   token: sensor-tower
@@ -161,23 +146,18 @@ companies:
   token: teza-technologies
   discovered_on: '2026-11-05'
   matched: DevOps Engineer
+- name: Ledgy
+  vendor: greenhouse
+  token: ledgy
+  discovered_on: '2026-11-13'
+  matched: DevOps Engineer
 - name: Walkme
   vendor: lever
   token: walkme
   discovered_on: '2026-11-05'
   matched: DevOps Engineer
-- name: Hasbro
-  vendor: greenhouse
-  token: hasbro
-  discovered_on: '2026-11-05'
-  matched: DevOps Engineer
 - name: Wiz
   vendor: greenhouse
   token: wizprivate
-  discovered_on: '2026-11-05'
-  matched: DevOps Engineer
-- name: Nearform
-  vendor: greenhouse
-  token: nearform
   discovered_on: '2026-11-05'
   matched: DevOps Engineer

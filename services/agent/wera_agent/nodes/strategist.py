@@ -44,7 +44,7 @@ from ..schemas.cv_profile import CvProfile
 from ..schemas.llm_outputs import PROPOSALS_PER_PLAN, StrategistOutput
 from ..schemas.profile import SearchProfile
 from ..schemas.strategy import LocalTerm, Market, PlannedQuery, TargetMatrix
-from ..sources import site_discovery
+from ..sources import feeds, site_discovery
 from ..sources.postings import classify, posting_links
 from ..sources.robots import USER_AGENT, Robots, refusal
 from ..sources.serper import Serper
@@ -64,17 +64,30 @@ COUNTRY_LANGUAGES = {
     "ES": ["es", "en"],
     "CH": ["de", "fr", "en"],
     "CZ": ["cs", "en"],
+    "AT": ["de", "en"],
+    "IT": ["it", "en"],
+    "PL": ["pl", "en"],
+    "PT": ["pt", "en"],
+    "SE": ["sv", "en"],
+    "MX": ["es", "en"],
+    "BR": ["pt", "en"],
 }
 
 
-# Cities a location may name without its country, for the countries WERA's boards cover. Only
+# Cities a location may name without its country, for the countries in `places.COUNTRIES`. Only
 # enough to read "London" or "Berlin, Remote" — anything else falls to the country names.
 CITY_COUNTRIES = {
     "london": "GB", "manchester": "GB", "edinburgh": "GB", "birmingham": "GB", "bristol": "GB", "leeds": "GB",
     "cambridge": "GB", "oxford": "GB", "glasgow": "GB", "dublin": "IE", "cork": "IE", "amsterdam": "NL",
     "rotterdam": "NL", "utrecht": "NL", "berlin": "DE", "munich": "DE", "hamburg": "DE", "frankfurt": "DE",
     "paris": "FR", "lyon": "FR", "brussels": "BE", "antwerp": "BE", "madrid": "ES", "barcelona": "ES",
-    "zurich": "CH", "geneva": "CH", "prague": "CZ", "new york": "US", "san francisco": "US",
+    "zurich": "CH", "geneva": "CH", "prague": "CZ", "vienna": "AT", "milan": "IT", "rome": "IT",
+    "warsaw": "PL", "krakow": "PL", "lisbon": "PT", "porto": "PT", "stockholm": "SE", "gothenburg": "SE",
+    "new york": "US", "san francisco": "US", "seattle": "US", "boston": "US", "chicago": "US", "austin": "US",
+    "los angeles": "US", "toronto": "CA", "vancouver": "CA", "montreal": "CA", "ottawa": "CA",
+    "mexico city": "MX", "sao paulo": "BR", "são paulo": "BR", "sydney": "AU", "melbourne": "AU",
+    "brisbane": "AU", "auckland": "NZ", "wellington": "NZ", "bengaluru": "IN", "bangalore": "IN",
+    "mumbai": "IN", "hyderabad": "IN", "johannesburg": "ZA", "cape town": "ZA",
 }  # fmt: skip
 
 
@@ -348,9 +361,58 @@ def queries(
                 if term.term.casefold() not in {t.casefold() for t in titles}:
                     both(term.title, term.term, 3, term.language, **where)
     # Tier 4: page 2 of tier 1. Google ranks a query the same way all day, so a second search the
-    # same day finds page 1 already saved — measured live, 21 of 61 results on a repeat run.
+    # same day finds page 1 already saved — measured live, 21 of 61 results on a repeat run. Sent
+    # only for queries whose page 1 was rich in postings (`page_two_worth_asking`).
     for q in [q for q in out if q.tier == 1]:
         out.append(q.model_copy(update={"tier": 4, "page": 2}))
+    return out
+
+
+# SRCH-30: how many refusing hosts an open search names with `-site:`. Each is a few characters of
+# a query Google caps at 32 words, and the eight cover every refusal seen so far.
+MAX_LEFT_OUT = 8
+
+
+def robots_probes(profile: SearchProfile, sites: list[Site], hint: dict[str, str]) -> dict[str, str]:
+    """Host → a posting URL there, for asking each host's robots.txt before a search (SRCH-30).
+
+    The boards this search would query, at their posting path when it is known; then the hosts in
+    `unreadable_hint`, which an open search returns often enough to be worth naming. A hint is
+    only a host to *ask* about — whether it is left out is the robots.txt's answer, every week.
+    """
+    out: dict[str, str] = {}
+    for board in usable_sites(profile, sites):
+        segment = board.posting_segment
+        out[board.domain.removeprefix("www.")] = (
+            f"https://{board.domain}/{segment}/wera-check" if segment else f"https://{board.domain}/"
+        )
+    for host, path in hint.items():
+        out.setdefault(host.removeprefix("www."), f"https://{host}{path}")
+    return out
+
+
+def leave_out(planned: list[PlannedQuery], refusing: Iterable[str]) -> list[PlannedQuery]:
+    """The plan without the hosts whose robots.txt refuses WERA (SRCH-30).
+
+    A `site:` query for a refusing board is dropped: every posting it finds is one the Harvester
+    must turn down (Bright Network answers its robots.txt with a 403, so all of them). An open
+    search asks Google to leave those hosts out, so its ten results are ten WERA can read.
+    Applying it twice changes nothing.
+    """
+    hosts = sorted({h.removeprefix("www.") for h in refusing})
+    if not hosts:
+        return planned
+    terms = [f"-site:{h}" for h in hosts[:MAX_LEFT_OUT]]
+    out: list[PlannedQuery] = []
+    for q in planned:
+        if q.source == "board":
+            domain = (q.domain or "").removeprefix("www.")
+            if any(domain == h or domain.endswith(f".{h}") for h in hosts):
+                continue
+            out.append(q)
+            continue
+        missing = [t for t in terms if t not in q.q.split()]
+        out.append(q.model_copy(update={"q": f"{q.q} {' '.join(missing)}"}) if missing else q)
     return out
 
 
@@ -439,6 +501,8 @@ class Discovery:
     tiers: list[int] = field(default_factory=list)
     results: int = 0
     kinds: Counter = field(default_factory=Counter)
+    # Postings each page-1 query returned, known or new: what decides whether its page 2 is sent.
+    postings_by_query: dict[str, int] = field(default_factory=dict)
     listings_read: int = 0
     listing_links: int = 0
     # Hosts that refused a results page this pass. Not asked again until the next run: a board
@@ -507,14 +571,19 @@ def discover(
                     break
                 continue
             out.results += len(results)
+            postings = 0
             for result in results:
                 kind = classify(result.url, title=result.title, sites=sites)
                 out.kinds[kind] += 1
+                postings += kind == "posting"
                 if kind == "posting":
                     keep(query, result.url, result.title, result.snippet, result.date)
                 elif kind == "listing" and out.listings_read < LISTINGS_PER_RUN:
                     for url, text in _listing_links(result.url, rules, read, out):
                         keep(query, url, text, "", None)
+            if query.page == 1:
+                out.postings_by_query[query.q] = postings
+                queue.note_postings(query.q, postings)
             out.queued += queue.push(found)
             found.clear()
 
@@ -533,6 +602,8 @@ def discover(
                 "refused_hosts": sorted(out.refused),
                 "queued": out.queued,
                 "serper_credits": serper.credits_used,
+                "serper_cached": serper.cached,
+                "serper_coalesced": serper.coalesced,
             }
         )
     return out
@@ -592,3 +663,175 @@ def _listing_html(url: str) -> str | None:
     if why:
         raise Refused(why)
     return html if response.status_code == 200 else None
+
+
+# ---------------------------------------------------------------------------
+# SRCH-31/32: the job APIs, asked before Serper
+
+# A search's searches for snippet leads' originals: their own cap, so they never eat discovery's.
+RESOURCE_QUERIES = 10
+# And no date filter on them: the lead's date is the API's, and the employer's page may have been
+# indexed weeks before it (13 Nov: with discovery's three weeks, 10 lookups found no original).
+RESOURCE_WINDOW = ""
+
+
+@dataclass
+class FeedDiscovery:
+    """What asking the job APIs found, per API, for the run's counts and Logfire."""
+
+    by_feed: dict[str, dict[str, object]] = field(default_factory=dict)
+    queued: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+def discover_feeds(
+    planned: list[PlannedQuery],
+    profile: SearchProfile | None,
+    *,
+    queue: TargetQueue,
+    known_urls: set[str],
+    sites: list[Site],
+    now: int,
+    redis: object | None,
+    person: feeds.Person | None = None,
+    resource: Serper | None = None,
+) -> FeedDiscovery:
+    """Ask every job API this search can use, all at once, and queue what they found.
+
+    The queries are the plan's titles (tier 1's first), at the person's level, in their city. The
+    same rules as `discover` decide what is queued — not known, not LinkedIn, not a title the
+    profile excludes, posted in the last 21 days — and at most `max_queued` a search from each,
+    so the open web and the reviewed boards still get their share of the 8–12. A full-text API's
+    postings are queued to be read from the API; a snippet API's leads are looked for where the
+    employer posted them (`feeds.resource`), with `resource` (a Serper client with its own cap).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ..domain.filters import RECENCY_MS
+    from ..http import is_denied
+    from ..sources.feeds import adzuna, careerjet, reed, usajobs
+    from ..sources.feeds import resource as finding
+    from ..sources.provider_guard import Guard
+
+    out = FeedDiscovery()
+    countries = sorted({q.gl for q in planned if q.gl} or {c.lower() for c in (profile.countries if profile else [])})
+    titles = list(dict.fromkeys(q.title for q in sorted(planned, key=lambda q: q.tier)))
+    cities = [loc.split(",")[0].strip() for loc in (profile.locations if profile else []) if loc.strip()]
+    levels = set(profile.seniority if profile else [])
+    queries = feeds.queries_for(titles, cities[:2], countries)
+    exclude = sorted(
+        {t.removeprefix("-site:") for q in planned if q.source == "open" for t in q.q.split() if t.startswith("-site:")}
+    )
+
+    asks: list[tuple[str, feeds.FeedQuery]] = []
+    for feed_id, feed in feeds.FEEDS.items():
+        why = feeds.skipped(feed_id, countries=set(countries), person=person)
+        if why is None and not feed.full_text and resource is None:
+            why = "no Serper to find the original postings with"
+        out.by_feed[feed_id] = {"skipped": why} if why else {"searches": 0, "leads": 0, "queued": 0, "how": Counter()}
+        if why is None:
+            # One search per question the API is actually asked: Reed and USAJOBS search the role,
+            # so "Graduate" and "Junior Software Engineer" are the same search there (13 Nov).
+            graduate = bool(levels & {"graduate", "intern", "entry"})
+            sent: set[tuple[object, ...]] = set()
+            mine = []
+            for q in queries:
+                asked_as = (q.role if feed_id == "usajobs" or (feed_id == "reed" and graduate and q.level) else q.title, q.level if feed_id == "adzuna" else None, q.city, q.country)  # fmt: skip
+                if q.country in feed.countries and asked_as not in sent:
+                    sent.add(asked_as)
+                    mine.append(q)
+            asks += [(feed_id, q) for q in mine[: feeds.config(feed_id).max_searches]]
+
+    def ask(feed_id: str, query: feeds.FeedQuery) -> tuple[list[feeds.Lead], str]:
+        guard = Guard(redis, feed_id)
+        if feed_id == "reed":
+            return reed.search(query, guard, graduate=bool(levels & {"graduate", "intern", "entry"}))
+        if feed_id == "usajobs":
+            return usajobs.search(query, guard, pathways=bool(levels & {"graduate", "intern"}))
+        if feed_id == "adzuna":
+            return adzuna.search(query, guard)
+        return careerjet.search(query, guard, person=person)  # type: ignore[arg-type]
+
+    with logfire.span("strategist feeds", asks=len(asks)) as span:
+        with ThreadPoolExecutor(max_workers=max(1, min(8, len(asks)))) as pool:
+            answers = list(pool.map(lambda a: (a, ask(*a)), asks))
+
+        known = {canonical_url(u) or u for u in known_urls}
+        taken: set[str] = set()
+        tried: set[str] = set()  # a lead two APIs (or one API twice) returned is looked for once
+        oldest = now - RECENCY_MS["21d"]
+        found: list[Target] = []
+        for (feed_id, query), (leads, how) in answers:
+            stats = out.by_feed[feed_id]
+            stats["searches"] += 1  # type: ignore[operator]
+            stats["leads"] += len(leads)  # type: ignore[operator]
+            stats["how"][how] += 1  # type: ignore[index]
+            cfg, feed = feeds.config(feed_id), feeds.FEEDS[feed_id]
+            for lead in leads:
+                if stats["queued"] >= cfg.max_queued:  # type: ignore[operator]
+                    break
+                same = f"{lead.company.lower()}|{lead.title.lower()}"
+                if same in tried or is_denied(lead.url) or (profile is not None and _excluded(lead.title, profile)):
+                    continue
+                if lead.date and _ms(lead.date) is not None and _ms(lead.date) < oldest:  # type: ignore[operator]
+                    continue
+                tried.add(same)
+                if feed.full_text:
+                    url, title, snippet, source, payload = lead.url, lead.title, lead.snippet, "feed", lead.payload
+                else:
+                    hit = finding.original(lead, serper=resource, sites=sites, gl=query.country, hl="en", exclude=exclude)  # type: ignore[arg-type]
+                    if hit is None or (profile is not None and _excluded(hit.title, profile)):
+                        stats["no_original"] = int(stats.get("no_original", 0)) + 1  # type: ignore[call-overload]
+                        continue
+                    url, title, snippet, source, payload = hit.url, hit.title, hit.snippet, "open", None
+                if (canonical_url(url) or url) in known or (canonical_url(url) or url) in taken:
+                    continue
+                taken.add(canonical_url(url) or url)
+                q = f"{feed.name}: {query.title}" + (f" in {query.city}" if query.city else "")
+                found.append(
+                    Target(
+                        url,
+                        host_of(url).removeprefix("www."),
+                        source,
+                        q,
+                        len(found),
+                        title,
+                        snippet,
+                        lead.date,
+                        via=feed_id,
+                        payload=payload,
+                    )
+                )
+                stats["queued"] += 1  # type: ignore[operator]
+
+        out.queued = queue.push(found)
+        if resource is not None:
+            out.errors += list(resource.errors)
+        flat = {
+            f"{feed_id}.{k}": (dict(v) if isinstance(v, Counter) else v)
+            for feed_id, stats in out.by_feed.items()
+            for k, v in stats.items()
+        }
+        span.set_attributes(flat | {"queued": out.queued, "resource_queries": resource.sent if resource else 0})
+    return out
+
+
+def _ms(day: str) -> int | None:
+    from ..clock import parse_ms
+
+    try:
+        return parse_ms(day)
+    except (TypeError, ValueError):
+        return None
+
+
+# SRCH-26 tier 4 is page 2 of a tier-1 query, and worth a credit only when page 1 was mostly
+# postings: a query whose first ten results held two postings won't hold more on its second ten.
+# Measured 13 Nov: 12 page-2 queries, sent for every tier-1 query, surfaced one job.
+PAGE_TWO_MIN_POSTINGS = 5
+
+
+def page_two_worth_asking(planned: list[PlannedQuery], postings: dict[str, int]) -> list[PlannedQuery]:
+    """The plan with each page-2 query kept only if its page 1 returned enough postings. A page 1
+    never sent (or not remembered) keeps its page 2 out: there is no evidence it is worth a credit."""
+    return [q for q in planned if q.page == 1 or postings.get(q.q, 0) >= PAGE_TWO_MIN_POSTINGS]

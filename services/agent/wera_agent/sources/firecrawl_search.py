@@ -25,6 +25,7 @@ import logfire
 
 from ..config import Site
 from ..config import usable_sites as config_usable_sites
+from ..domain.places import COUNTRIES
 from ..http import is_denied
 from ..logging import redact
 from ..schemas.profile import SearchProfile
@@ -82,6 +83,7 @@ CARD_SCHEMA: dict[str, Any] = {
         "location": {"type": "string"},
         "remote": {"type": "string"},
         "postedAt": {"type": "string"},
+        "closesAt": {"type": "string"},
         "description": {"type": "string"},
     },
     "required": ["title", "company"],
@@ -159,21 +161,8 @@ def _where(profile: SearchProfile) -> str:
     return " (" + " OR ".join(f'"{p}"' for p in places) + ")"
 
 
-# Enough to turn a profile's country codes into words a job ad would actually use. Only the
-# countries the boards in `config/sites.yaml` cover; an unknown code falls through as itself,
-# which is a poor search term but an honest one.
-COUNTRY_NAMES = {
-    "GB": "United Kingdom",
-    "IE": "Ireland",
-    "NL": "Netherlands",
-    "DE": "Germany",
-    "FR": "France",
-    "BE": "Belgium",
-    "ES": "Spain",
-    "CH": "Switzerland",
-    "CZ": "Czechia",
-    "US": "United States",
-}
+# The words a job ad would use for a profile's country codes.
+COUNTRY_NAMES = {code: country.name for code, country in COUNTRIES.items()}
 
 
 # Firecrawl's own scrape runs an LLM over the page, so it inherits LLM-grade latency — and the

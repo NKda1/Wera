@@ -15,6 +15,7 @@ Cancellation is checked between steps (UX-01): a person who changes their mind s
 to wait for a model call they no longer want.
 """
 
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -23,10 +24,10 @@ import logfire
 
 from ..clock import iso, now_ms, parse_ms
 from ..config import companies, companies_file, senders, sites, wera, write_companies
-from ..db.session import transaction
+from ..db.session import engine, transaction
 from ..domain import dedupe, filters
 from ..errors import ApiError
-from ..llm.gateway import AUTH, BUDGET, MESSAGES, QUOTA, RATE
+from ..llm.gateway import AUTH, BUDGET, KEY_LIMIT, MESSAGES, QUOTA, RATE
 from ..nodes import fit, prefilter
 from ..schemas.jobs import Job
 from ..schemas.llm_outputs import JobCardList
@@ -48,8 +49,9 @@ from ..sources.firecrawl_search import SearchCaps
 CHANNELS = ("board_search", "email_alert", "watchlist")
 
 # Conditions that belong to the account rather than to the job in front of them: a rejected key,
-# spent credit, a spent budget, a provider saying "slow down". Scoring stops at the first one.
-STOPS_THE_RUN = frozenset({AUTH, QUOTA, BUDGET, RATE})
+# a key past its own spending limit, spent credit, a spent budget, a provider saying "slow down".
+# Scoring stops at the first one.
+STOPS_THE_RUN = frozenset({AUTH, KEY_LIMIT, QUOTA, BUDGET, RATE})
 
 
 @dataclass
@@ -591,37 +593,69 @@ def judge(
             )
 
     scored: list[tuple[Job, Any]] = []
-    for position, job in enumerate(chosen):
-        # Reported before the call, not after: the first score takes about eleven seconds, and
-        # the screen should say what it is waiting for rather than show nothing until it lands.
-        report(
-            runs,
-            phase="scoring",
-            # `progress_from` is where searching left off: a quarter of the bar for an intake run,
-            # and zero for a re-score, which never searched for anything.
-            progress=progress_from + (progress_to - progress_from) * (position / max(len(chosen), 1)),
-            # The job being judged. Scoring is ~98% of a real run's wall clock at roughly eleven
-            # seconds a job, so "Scoring 3 / 40" alone leaves the longest phase in the product
-            # with nothing changing between one job and the next.
-            detail=f"{job.title} · {job.company}",
-            done=position,
-            total=len(chosen),
-        )
+
+    def score_one(job: Job) -> tuple[Any, bool, str | None]:
         with transaction() as session:
             _check_cancelled(session, list(runs.values()))
-            evidence, was_scored, code = fit.evidence_for(session, job, cv, model=model, now=now)
-        if evidence is None:
-            if code in STOPS_THE_RUN:
-                # The key, the credit and the budget are the same for every job in the list, so
-                # the other forty would fail identically. Stopping saves forty pointless round
-                # trips and leaves one legible error instead of forty copies of it.
-                remaining = len(chosen) - position
-                out.errors.append((code, f"{MESSAGES[code]} {remaining} job(s) were left unscored."))
-                break
-            out.errors.append((code or "SCORE_FAILED", f"{job.title} at {job.company} couldn't be scored."))
-            continue
-        out.scored += 1 if was_scored else 0
-        scored.append((job, fit.report_for(job, evidence, weights, now)))
+            return fit.evidence_for(session, job, cv, model=model, now=now)
+
+    # A few at once (`scoring_workers`): each job is its own transaction and its own model call,
+    # so nothing is shared but the run's progress, which is reported from this thread only.
+    workers = 1 if engine().dialect.name == "sqlite" else max(1, cfg.scoring_workers)
+    queue_ = iter(chosen)
+    pending: dict[Future, Job] = {}
+    done = 0
+    stopped = False
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="score") as pool:
+
+        def start_next() -> None:
+            job = next(queue_, None)
+            if job is None or stopped:
+                return
+            # Reported as a job starts, not when it lands: the first score takes seconds, and the
+            # screen should say what it is waiting for. Scoring is most of a run's wall clock, so
+            # "Scoring 3 / 12" alone would leave the longest phase with nothing changing.
+            report(
+                runs,
+                phase="scoring",
+                # `progress_from` is where searching left off: a quarter of the bar for an intake
+                # run, and zero for a re-score, which never searched for anything.
+                progress=progress_from + (progress_to - progress_from) * (done / max(len(chosen), 1)),
+                detail=f"{job.title} · {job.company}",
+                done=done,
+                total=len(chosen),
+            )
+            pending[pool.submit(score_one, job)] = job
+
+        # One first, then the rest: a refused key or a spent budget is the same for every job, so
+        # the run learns it from one call rather than from as many as there are workers.
+        start_next()
+        while pending:
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                job = pending.pop(future)
+                done += 1
+                evidence, was_scored, code = future.result()  # a cancellation raises here
+                if evidence is None:
+                    if code in STOPS_THE_RUN:
+                        # The key, the credit and the budget are the same for every job in the
+                        # list, so the rest would fail identically. Stopping saves the pointless
+                        # round trips and leaves one legible error instead of a copy per job.
+                        if not stopped:
+                            remaining = len(chosen) - done + 1 - len(pending)
+                            out.errors.append((code, f"{MESSAGES[code]} {remaining} job(s) were left unscored."))
+                        stopped = True
+                        continue
+                    out.errors.append((code or "SCORE_FAILED", f"{job.title} at {job.company} couldn't be scored."))
+                else:
+                    out.scored += 1 if was_scored else 0
+                    scored.append((job, fit.report_for(job, evidence, weights, now)))
+                    while len(pending) < workers - 1:  # widen once the provider has answered
+                        before = len(pending)
+                        start_next()
+                        if len(pending) == before:
+                            break
+                start_next()
 
     # Ranking is read back from the fit reports when the shortlist is listed, so the order here
     # only needs to exist — the store sorts on `fit.total`.

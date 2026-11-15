@@ -32,8 +32,9 @@ from ..config import sites, wera
 from ..db.session import transaction
 from ..errors import ApiError
 from ..nodes import strategist
-from ..sources import browser, harvest, targets
+from ..sources import browser, feeds, harvest, targets
 from ..sources.firecrawl_search import SearchCaps, SearchOutcome
+from ..sources.provider_guard import Guard
 from ..sources.serper import Serper
 from . import intake
 
@@ -67,6 +68,8 @@ class Piped:
     errors: list[tuple[str, str]] = field(default_factory=list)
     # Why the run stopped short of `surface.min`, in words; None when it didn't.
     short: str | None = None
+    # SRCH-31/32: what each job API did — searches, leads, queued, or why it was skipped.
+    feeds: dict[str, dict[str, object]] = field(default_factory=dict)
 
     @property
     def partial(self) -> bool:
@@ -148,24 +151,61 @@ def _run(
 
     # Redis and Serper are checked before anything is spent: a run that can't queue or can't ask
     # stops here, not after paying for half of it.
-    queue = targets.TargetQueue(targets.connect(), key)
-    serper = Serper(max_queries=caps.max_serper_queries)
+    client = targets.connect()
+    queue = targets.TargetQueue(client, key)
+    serper = Serper(max_queries=caps.max_serper_queries, guard=Guard(client, "serper"))
     queue.retire_others()
     boards = sites()
     tiers = sorted({q.tier for q in planned})
+    # SRCH-31: the job APIs are "tier 0", asked before Serper — free, full text or a lead to find —
+    # so Serper's first tier is only sent when they leave the search short of `surface.min`.
+    person = feeds.recall_person(client, list(run_ids.values()))
+    countries = {q.gl for q in planned if q.gl} or {c.lower() for c in (profile.countries if profile else [])}
+    if any(feeds.skipped(f, countries=countries, person=person) is None for f in feeds.FEEDS):
+        tiers = [0, *tiers]
     pending = [t for t in tiers if mode == "search" or t not in queue.tiers_sent()]
+    # Serper for finding snippet leads' originals (SRCH-32), on its own cap; made when tier 0 runs.
+    resource: list[Serper] = []
+
+    def sent() -> int:
+        return serper.sent + sum(r.sent for r in resource)
 
     def discover_next() -> bool:
         """Stage 2 for the next tier. False when there is no tier left or Serper stopped."""
         if not pending or serper.stopped:
             return False
         tier = pending.pop(0)
-        sending = sum(1 for q in planned if q.tier == tier)
+        if tier == 0:
+            intake.report(run_ids, phase="searching", progress=PLANNED_AT, detail="the job APIs")
+            resource.append(
+                Serper(max_queries=strategist.RESOURCE_QUERIES, window=strategist.RESOURCE_WINDOW, guard=Guard(client, "serper"))
+            )
+            asked = strategist.discover_feeds(
+                planned,
+                profile,
+                queue=queue,
+                known_urls=known,
+                sites=boards,
+                now=now,
+                redis=client,
+                person=person,
+                resource=resource[0],
+            )
+            queue.mark_tier_sent(0)
+            out.feeds = asked.by_feed
+            out.queries = sent()
+            out.errors += [("SEARCH", message) for message in asked.errors if ("SEARCH", message) not in out.errors]
+            return True
+        plan = planned if tier != 4 else strategist.page_two_worth_asking(planned, queue.postings_by_query())
+        sending = sum(1 for q in plan if q.tier == tier)
+        if not sending:
+            queue.mark_tier_sent(tier)  # no page 1 was rich enough for its page 2: nothing to pay for
+            return discover_next()
         intake.report(run_ids, phase="searching", progress=PLANNED_AT, detail=f"tier {tier} · {sending} searches")
-        found = strategist.discover(planned, [tier], serper=serper, queue=queue, known_urls=known, sites=boards, profile=profile)
+        found = strategist.discover(plan, [tier], serper=serper, queue=queue, known_urls=known, sites=boards, profile=profile)
         queue.mark_tier_sent(tier)
         out.tiers.append(tier)
-        out.queries = serper.sent
+        out.queries = sent()
         out.results += found.results
         out.kinds.update(found.kinds)
         out.listings_read += found.listings_read
@@ -203,6 +243,7 @@ def _run(
                 cache=cache,
                 fetch_html=fetch_html,
                 parse=intake.normalise_with_model,
+                redis=client,
             )
             out.read += len(batch) - read.put_back
             out.by_path.update(read.by_path)
@@ -242,6 +283,7 @@ def _run(
         surfaced=out.surfaced,
         queued=out.queued,
         short=out.short or "",
+        feeds=out.feeds,
     )
 
 
@@ -261,6 +303,10 @@ def _why_short(serper: Serper, pending: list[int], spend: SearchOutcome) -> str:
     """Which limit ended a search below `surface.min`, in the words the run row shows."""
     if serper.stopped == "cap":
         return f"the limit of {serper.max_queries} searches a run was reached"
+    if serper.stopped == "breaker":
+        return "Serper was rate-limiting or failing, so WERA is leaving it alone for a minute — try again shortly"
+    if serper.stopped == "daily_budget":
+        return "today's Serper budget for searches is spent — the scheduled runs keep the rest"
     if serper.stopped:
         return "Serper refused the key"
     if spend.capped:

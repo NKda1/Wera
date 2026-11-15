@@ -159,6 +159,14 @@ class DecisionRow(Base):
     decision: Mapped[str] = mapped_column(String(32))
     note: Mapped[str | None] = mapped_column(Text)
     decided_at: Mapped[str] = mapped_column(Iso)
+    # MATCH-11 (15 Nov): what learning reads. The reason as a code, separate from the free text;
+    # the CV version and fit total it was decided against; and a snapshot of the job (title
+    # tokens, sub-scores, place, pay, source), because the job row doesn't outlive a CV upload
+    # and the decision now does. Null on decisions before 0013.
+    reason_code: Mapped[str | None] = mapped_column(String(32))
+    cv_version: Mapped[int | None] = mapped_column(Integer)
+    fit_total: Mapped[float | None] = mapped_column(Float)
+    features: Mapped[dict[str, Any] | None]
 
 
 class IntakeRunRow(Base):
@@ -227,6 +235,10 @@ class LlmCallRow(Base):
     # The trace the call was made in, as Logfire writes trace ids (32 hex characters), so a call
     # joins the run or request around it — in Logfire, and in `telemetry.records` (OBS-02).
     trace_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    # Of `input_tokens`, those the provider served from its prompt cache; of `output_tokens`, those
+    # spent thinking. Null when the provider didn't say (and on every row before 0012).
+    cached_tokens: Mapped[int | None] = mapped_column(Integer)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer)
 
 
 class KvRow(Base):

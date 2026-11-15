@@ -66,7 +66,17 @@ def check_llm(env: Settings) -> TestResult:
     limit, usage = _money(data.get("limit")), _money(data.get("usage"))
     if limit is None:
         return TestResult(ok=True, message=f"{provider} accepted the key. No spending limit set on it.")
-    left = _money(max(0.0, float(data.get("limit") or 0) - float(data.get("usage") or 0)))
+    remaining = max(0.0, float(data.get("limit") or 0) - float(data.get("usage") or 0))
+    left = _money(remaining)
+    if remaining <= 0:
+        # The key works, and every model call will still be refused: OpenRouter checks the key's
+        # own limit before the account's credit, so a top-up doesn't help. Reported as a failure,
+        # because "accepted the key" is what this said on 15 Nov while every call was refused.
+        return TestResult(
+            ok=False,
+            code="LLM_KEY_LIMIT",
+            message=f"{provider}: no credit left on this key ({left} of {limit}). Raise its limit at openrouter.ai/settings/keys.",
+        )
     return TestResult(ok=True, message=f"{provider} accepted the key. {left} left of {limit} (used {usage}).")
 
 

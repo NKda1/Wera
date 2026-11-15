@@ -113,7 +113,9 @@ class TestTheMatrixOverTheApi:
             "GB",
             "DE",
         ]
-        assert strategist.target_countries(profile.model_copy(update={"countries": [], "locations": ["Austin, TX"]})) == []
+        # Whole words only: the "us" in Busan is not the United States. Austin is, as a known city.
+        assert strategist.target_countries(profile.model_copy(update={"countries": [], "locations": ["Busan"]})) == []
+        assert strategist.target_countries(profile.model_copy(update={"countries": [], "locations": ["Austin, TX"]})) == ["US"]
         assert strategist.target_countries(profile.model_copy(update={"countries": ["NL"]})) == ["NL"]
 
     def test_a_refresh_is_kept_until_the_profile_changes(self, client):

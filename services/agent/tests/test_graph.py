@@ -216,20 +216,33 @@ class TestCitationGuard:
         assert "guard.repair" not in asked, "a model was asked to repair a line with nothing to repair against"
         assert result.violations and result.violations[0].location == "p0"
 
-    def test_a_line_filed_under_the_wrong_role_fails_the_draft(self, client, approved, monkeypatch):
-        """A tailored CV would rather not exist than credit real work to the wrong employer."""
+    def test_a_line_filed_under_the_wrong_role_is_never_shown_there(self, client, approved, monkeypatch):
+        """Real work is never credited to the wrong employer. Since 14 Nov the misfiled line is
+        left out instead of the whole selection being rejected and paid for again (4 of 11
+        `cv.tailor` calls on 13 Nov), so the draft still completes — without that line there."""
         real = demo.respond
+        moved: list[str] = []
 
         def misfile(task, variables, context, demo_input=None):
             out = real(task, variables, context, demo_input)
             if task == "cv.tailor" and len(out["experience"]) > 1:
+                moved.extend(out["experience"][1]["bulletIds"])
                 out["experience"][0]["bulletIds"] = out["experience"][1]["bulletIds"]
             return out
 
         monkeypatch.setattr(demo, "respond", misfile)
         app_id = approved()
         run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
-        assert status_of(app_id) != "ready_for_review"
+        assert moved, "the demo tailor had a second role to misfile from"
+        with transaction() as session:
+            store = Store(session)
+            doc = store.load_document(app_id, "cv", TailoredCV)
+            cv = store.cv()
+        owner = {b.id: r.id for r in [*cv.experience, *cv.projects] for b in r.bullets}
+        shown = [
+            (item.role_id, i) for section in doc.sections for item in section.items for b in item.bullets for i in b.source_ids
+        ]
+        assert shown and all(owner.get(line) == role for role, line in shown)  # every line under its own role
 
     def test_a_quote_from_the_job_post_is_not_treated_as_a_claim(self, client, approved):
         """LTR-03: the letter quotes the employer's own words, numbers and all. Those are not
@@ -267,7 +280,8 @@ class TestLetterRedraft:
             if task == "letter.write":
                 calls.append(variables["note"])
                 if len(calls) == 1:
-                    for para in out["paragraphs"][:count]:
+                    # After the opening: a cut opening is replaced, not lost (LTR-02, 14 Nov).
+                    for para in out["paragraphs"][1 : 1 + count]:
                         para["text"] = f"{para['text']} I ran the Kubernetes platform for 40 teams."
             return out
 
@@ -312,7 +326,7 @@ class TestLetterRedraft:
             out = real(task, variables, context, demo_input)
             if task == "letter.write":
                 calls.append(1)
-                for para in out["paragraphs"][: 3 if len(calls) == 1 else 2]:
+                for para in out["paragraphs"][1 : 4 if len(calls) == 1 else 3]:
                     para["text"] = f"{para['text']} I ran the Kubernetes platform for 40 teams."
             return out
 
@@ -326,6 +340,49 @@ class TestLetterRedraft:
         assert len(letter.paragraphs) == 2  # the fuller of the two attempts
         assert not letter.guard.pass_
         assert letter.guard.violations
+
+
+class TestAShortLetter:
+    """LTR-01's 150-word floor: a letter the model wrote short is asked for once more, told its
+    own count, and never costs the pack — the longer attempt is kept either way."""
+
+    @staticmethod
+    def _shorten(times: int):
+        real = demo.respond
+        calls: list[str] = []
+
+        def respond(task, variables, context, demo_input=None):
+            out = real(task, variables, context, demo_input)
+            if task == "letter.write":
+                calls.append(variables["note"])
+                if len(calls) <= times:  # about 130 words: past the stub floor, short of LTR-01's
+                    each = 130 // len(out["paragraphs"])
+                    for para in out["paragraphs"]:
+                        para["text"] = " ".join(para["text"].split()[:each]).rstrip(".,;") + "."
+            return out
+
+        return respond, calls
+
+    def test_it_is_asked_for_again_with_its_word_count(self, client, approved, monkeypatch):
+        respond, calls = self._shorten(1)
+        monkeypatch.setattr(demo, "respond", respond)
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+        assert len(calls) == 2
+        assert "words (paragraph 1 has" in calls[1] and "150–230" in calls[1]
+        with transaction() as session:
+            letter = Store(session).load_document(app_id, "letter", CoverLetter)
+        assert letter.word_count >= 150  # the full second attempt, not the stub
+
+    def test_a_letter_that_stays_short_is_kept_rather_than_failing_the_pack(self, client, approved, monkeypatch):
+        respond, calls = self._shorten(2)
+        monkeypatch.setattr(demo, "respond", respond)
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+        assert len(calls) == 2  # never a third time
+        with transaction() as session:
+            letter = Store(session).load_document(app_id, "letter", CoverLetter)
+        assert letter.paragraphs and letter.word_count < 150
 
 
 class TestTheStoreRefusesADriftedCv:

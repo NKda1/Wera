@@ -76,13 +76,36 @@ async def _run_channels(channels: list[str]) -> None:
         logfire.exception("Scheduled intake for {channels} failed", channels=channels)
 
 
-def build() -> AsyncIOScheduler:
+# SCH-05: the jobs `scheduledIntake` turns on — off by default, every one of them.
+INTAKE_JOBS = ("morning-watchlist", "inbox-check", "daily-recheck")
+
+
+def build(*, intake: bool = False) -> AsyncIOScheduler:
     """The schedule, configured but not running.
 
     Separate from `start` because starting an asyncio scheduler needs a running event loop,
-    which the app's lifespan has and a test asserting on cron fields shouldn't need.
+    which the app's lifespan has and a test asserting on cron fields shouldn't need. Backups and
+    the telemetry archive are always on; the daily intake jobs only with `intake` (SCH-05).
     """
     scheduler = AsyncIOScheduler(job_defaults={"coalesce": True, "misfire_grace_time": GRACE_SECONDS, "max_instances": 1})
+    if intake:
+        _add_intake_jobs(scheduler)
+    scheduler.add_job(
+        _backup,
+        CronTrigger(hour=BACKUP_HOUR, minute=BACKUP_MINUTE),
+        id="nightly-backup",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _archive,
+        CronTrigger(hour=ARCHIVE_HOUR, minute=ARCHIVE_MINUTE),
+        id=ARCHIVE_JOB,
+        replace_existing=True,
+    )
+    return scheduler
+
+
+def _add_intake_jobs(scheduler: AsyncIOScheduler) -> None:
     scheduler.add_job(
         _run_channels,
         CronTrigger(hour=WATCHLIST_HOUR, minute=WATCHLIST_MINUTE),
@@ -104,19 +127,32 @@ def build() -> AsyncIOScheduler:
         id="daily-recheck",
         replace_existing=True,
     )
-    scheduler.add_job(
-        _backup,
-        CronTrigger(hour=BACKUP_HOUR, minute=BACKUP_MINUTE),
-        id="nightly-backup",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        _archive,
-        CronTrigger(hour=ARCHIVE_HOUR, minute=ARCHIVE_MINUTE),
-        id=ARCHIVE_JOB,
-        replace_existing=True,
-    )
-    return scheduler
+
+
+def apply_intake_schedule(enabled: bool) -> None:
+    """Add or remove the daily intake jobs to match the person's setting (SCH-05). At once."""
+    if _scheduler is None:
+        return
+    for job_id in INTAKE_JOBS:
+        if _scheduler.get_job(job_id) is not None:
+            _scheduler.remove_job(job_id)
+    if enabled:
+        _add_intake_jobs(_scheduler)
+    logfire.info("Daily intake (watchlist, inbox, open-job sweep) is {state}", state="on" if enabled else "off")
+
+
+def stored_intake_enabled() -> bool:
+    """The person's `scheduledIntake`: false when it has never been set, and false when it can't be
+    read — a run nobody can be sure was wanted is not one to start."""
+    from ..db import state
+    from ..db.session import transaction
+
+    try:
+        with transaction() as session:
+            return bool(state.settings_data(session).get("scheduledIntake", False))
+    except Exception:  # noqa: BLE001
+        logfire.exception("Couldn't read the daily intake setting")
+        return False
 
 
 SEARCH_JOB = "scheduled-search"
@@ -231,12 +267,14 @@ def start() -> AsyncIOScheduler | None:
         return None
     if _scheduler is not None:
         return _scheduler
-    scheduler = build()
+    intake = stored_intake_enabled()
+    scheduler = build(intake=intake)
     scheduler.start()
     _scheduler = scheduler
     logfire.info(
-        "Intake scheduled: watchlist at {hour}:{minute:02d}, inbox at {inbox}, lifecycle sweep at {recheck}:00, "
-        "backup at {backup}:00, telemetry archive at {archive}:{archive_minute:02d}.",
+        "Scheduled: backup at {backup}:00, telemetry archive at {archive}:{archive_minute:02d}; daily intake {intake}"
+        " (watchlist {hour}:{minute:02d}, inbox {inbox}, open-job sweep {recheck}:00).",
+        intake="on" if intake else "off (turn it on in Settings)",
         hour=WATCHLIST_HOUR,
         minute=WATCHLIST_MINUTE,
         inbox=INBOX_HOURS,

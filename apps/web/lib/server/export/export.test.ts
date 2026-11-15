@@ -53,7 +53,7 @@ const PACK: Pack = {
     wordCount: 268,
     guard: clean,
   },
-  ats: { keywords: [{ term: "FastAPI", weight: "required", matched: true, inMasterCv: true }], coverage: 0.82, backedCoverage: 1, formatChecks: [], pages: 1 },
+  ats: { keywords: [{ term: "FastAPI", weight: "required", matched: true, inMasterCv: true }], coverage: 0.82, backedCoverage: 1, formatChecks: [], pages: 1, parts: [], suggestedSkills: [] },
   answers: [],
 };
 

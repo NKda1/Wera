@@ -59,7 +59,23 @@ class TestPostedDate:
         assert round((self.NOW - parse_ms(out)) / 86_400_000) == days_ago
 
     def test_an_iso_date_is_left_alone(self):
-        assert normalise.parse_posted("2026-10-16T09:00:00Z", self.NOW) == "2026-10-16T09:00:00Z"
+        assert normalise.parse_posted("2026-10-12T09:00:00Z", self.NOW) == "2026-10-12T09:00:00Z"
+
+    def test_a_date_in_the_future_is_no_date(self):
+        """Three Gradcracker reads stored the application deadline as the posting date, which
+        put the posting weeks ahead; nothing is posted in the future (12 Nov review)."""
+        assert normalise.dated("2026-11-30", self.NOW) == (None, "unknown")
+        job = normalise.from_scrape(
+            {"title": "Graduate Software Engineer", "company": "Arm", "postedAt": "2026-11-30"},
+            url="https://www.gradcracker.com/hub/123/arm/graduate-job/45678/graduate-software-engineer",
+            site="gradcracker.com",
+            markdown="Build and operate production systems. " * 10,
+            now=self.NOW,
+        )
+        assert job is not None and (job.posted_at, job.posted_precision) == (None, "unknown")
+
+    def test_a_few_hours_ahead_is_a_clock_not_a_deadline(self):
+        assert normalise.parse_posted("2026-10-15T02:00:00Z", self.NOW) == "2026-10-15T02:00:00Z"
 
     @pytest.mark.parametrize("raw", ["Apply now", "", None, "Rolling deadline"])
     def test_something_unreadable_becomes_no_date_rather_than_a_crash(self, raw):

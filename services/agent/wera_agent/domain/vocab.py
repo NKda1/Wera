@@ -104,6 +104,36 @@ SYNONYMS: dict[str, list[str]] = {
         "performance optimization",
     ],
     "computer science": ["computer science", "comp sci", "cs degree", "software engineering degree"],
+    # ATSC-07 (14 Nov): the spellings recruiters and parsers treat as one requirement, from the
+    # 175 fit reports' keywords — "gcp" and "google cloud platform" were counted as two missing
+    # skills, and an ad saying "Amazon Web Services" didn't match a CV saying AWS.
+    "aws": ["aws", "amazon web services"],
+    "gcp": ["gcp", "google cloud", "google cloud platform"],
+    "azure": ["azure", "microsoft azure"],
+    "javascript": ["javascript", "js", "ecmascript"],
+    "typescript": ["typescript"],
+    "kubernetes": ["kubernetes", "k8s"],
+    "machine learning": ["machine learning", "ml"],
+    "artificial intelligence": ["artificial intelligence", "ai"],
+    "c++": ["c++", "cpp"],
+    "react": ["react", "react.js", "reactjs"],
+    "vue": ["vue", "vue.js", "vuejs"],
+    "object-oriented programming": [
+        "object-oriented programming",
+        "object oriented programming",
+        "oop",
+        "object-oriented design",
+    ],
+    "data structures and algorithms": ["data structures and algorithms", "data structures & algorithms", "dsa"],
+    "apis": ["api", "apis"],
+    "microservices": ["microservices", "microservice", "micro-services", "microservice architecture"],
+    "distributed systems": ["distributed systems", "distributed system", "distributed computing"],
+    "nlp": ["nlp", "natural language processing"],
+    "deep learning": ["deep learning", "neural network", "neural networks"],
+    "pytorch": ["pytorch", "torch"],
+    "scikit-learn": ["scikit-learn", "sklearn", "scikit learn"],
+    # Naming the tool is how a CV claims the practice, as with CI/CD above.
+    "observability": ["observability", "monitoring", "prometheus", "grafana", "opentelemetry", "datadog"],
 }
 
 # Aliases that are also ordinary English, and so only count written as the proper noun. `Go` is
@@ -118,7 +148,21 @@ SYNONYMS: dict[str, list[str]] = {
 # Each maps to the one written form that counts, because "capitalised" is not one rule: the
 # language is `Go` but the architecture is `REST`, and "Rest of the migration" at the start of a
 # bullet is exactly the false positive this exists to stop.
-CASE_SENSITIVE_ALIASES: dict[str, str] = {"go": "Go", "rest": "REST", "rag": "RAG", "jest": "Jest", "maven": "Maven"}
+CASE_SENSITIVE_ALIASES: dict[str, str] = {
+    "go": "Go",
+    "rest": "REST",
+    "rag": "RAG",
+    "jest": "Jest",
+    "maven": "Maven",
+    # 14 Nov: short forms that are ordinary letters or words in lower case ("ml" of water, "ai" in
+    # a name, "js" in a file path) only count as the acronym.
+    "ml": "ML",
+    "ai": "AI",
+    "js": "JS",
+    "oop": "OOP",
+    "dsa": "DSA",
+    "torch": "Torch",
+}
 
 # Aliases that are ordinary words with no cased form to tell them apart, so they count only when
 # the post itself wrote them — never as a synonym reached from another term. Measured: "Moved
@@ -129,7 +173,7 @@ CASE_SENSITIVE_ALIASES: dict[str, str] = {"go": "Go", "rest": "REST", "rag": "RA
 # Not "agent": the plural is the group's own name and matches "estate agents" either way, so
 # making the singular ambiguous protected nothing and cost the match between "agent tooling" in
 # a post and a post's own "Agents".
-AMBIGUOUS_ALIASES = frozenset({"tests", "containers", "threads", "threading", "concurrent", "profiling"})
+AMBIGUOUS_ALIASES = frozenset({"tests", "containers", "threads", "threading", "concurrent", "profiling", "monitoring", "torch"})
 
 # Qualifier tails a post hangs off a skill's name. "CI/CD pipelines", "Testing experience" and
 # "Python development" ask for the same thing as the bare term, but they are not the term, so
@@ -165,6 +209,34 @@ def _reductions(key: str) -> list[str]:
     while (stripped := QUALIFIER_TAIL.sub("", out[-1])) != out[-1]:
         out.append(stripped)
     return out
+
+
+# Not a skill a CV can claim or a course can teach: ways of working, generic traits, and fields of
+# study. Kept out of Upskills (UPSK-01) and out of a pack's suggested skills (ATSC-07) — a pack
+# suggested "Computer Science" and "Engineering" as skills to add on 14 Nov.
+NOT_A_SKILL = frozenset(
+    {
+        "problem solving", "problem-solving", "communication", "communication skills", "written communication",
+        "verbal communication", "teamwork", "collaboration", "analytical skills", "analytical thinking",
+        "attention to detail", "critical thinking", "time management", "ownership", "leadership", "adaptability",
+        "curiosity", "self-starter", "stakeholder management", "interpersonal skills", "scalable systems",
+        "best practices", "clean code", "software development", "software engineering", "engineering",
+        "programming", "coding", "technology", "computer science",
+        "mathematics", "maths", "math", "physics", "statistics degree", "stem", "degree", "bachelor's degree",
+        "master's degree", "engineering degree", "computer science degree",
+    }
+)  # fmt: skip
+
+
+def group_key(term: str) -> str:
+    """One key per requirement, for counting the same skill once however posts spell it (UPSK-01):
+    the group's first spelling for a term in a synonym group, else the term with one qualifier tail
+    peeled ("Kafka experience" → "kafka") — the same reach as `aliases_for`."""
+    chain = _reductions(term.lower().strip())
+    for form in chain:
+        if group := _GROUPS.get(form):
+            return group[0]
+    return chain[1] if len(chain) > 1 else chain[0]
 
 
 def aliases_for(term: str) -> list[str]:

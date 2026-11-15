@@ -22,8 +22,10 @@ from ..schemas.pack import JobAnalysis
 
 # What each slot is for, in the template's own terms (`cover_letter_template.body_segments`).
 SLOTS = {
-    1: "opening — core technical skill",
-    2: "opening — secondary technical skill",
+    # Both technical slots argue in the proof paragraph since 14 Nov: the opening introduces the
+    # applicant and why this company, before any stack (`prompts.LETTER_WRITE`, paragraph 1).
+    1: "proof — core technical skill",
+    2: "proof — secondary technical skill",
     3: "proof — core methodology or process",
     4: "proof — tool, software or framework",
     5: "why this company — a way of working the post asks for",
@@ -97,7 +99,7 @@ def plan(evidence: FitEvidence, cv: MasterCV) -> LetterPlan:
 # measured live, seven numbered slots each tied to a paragraph had the writing tier spend 10,787
 # output tokens — nearly all of it thinking — on a 264-word letter, cross-referencing numbers.
 # The same plan grouped by paragraph is one list per paragraph and nothing to look up.
-PARAGRAPH = {1: "Opening", 2: "Opening", 3: "Proof", 4: "Proof", 6: "Why this company", 7: "Why this company"}
+PARAGRAPH = {1: "Proof", 2: "Proof", 3: "Proof", 4: "Proof", 6: "Why this company", 7: "Why this company"}
 
 
 def keywords_text(p: LetterPlan) -> str:

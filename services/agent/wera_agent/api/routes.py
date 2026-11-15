@@ -4,7 +4,7 @@ browser never calls this service directly."""
 from collections.abc import Iterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Query, status
+from fastapi import APIRouter, Body, Depends, Query, Request, status
 
 from ..db.session import transaction
 from ..errors import ApiError
@@ -24,6 +24,7 @@ from ..schemas.api import (
     JobList,
     JobsCleared,
     NavCounts,
+    PlaceOption,
     ProfileProposalResult,
     RegenerateIn,
     RunIn,
@@ -37,10 +38,12 @@ from ..schemas.applications import ApplicationWithJob
 from ..schemas.cv import Contact, CvLine, MasterCV
 from ..schemas.cv_profile import CvProfile
 from ..schemas.jobs import ScoredJob
+from ..schemas.learning import SuggestionList
 from ..schemas.profile import SearchProfile
 from ..schemas.runs import Estimate, IntakeRun, RunIds
 from ..schemas.settings import SettingsPatch, SettingsResponse
 from ..schemas.strategy import TargetMatrix
+from ..schemas.upskills import UpskillsReport
 from ..services.store import Store
 
 # Aliased: this module already has a `get_settings` *route*, which would shadow it.
@@ -93,6 +96,12 @@ def list_sites(s: S) -> list[SiteOption]:
     return s.sites()
 
 
+@router.get("/places")
+def list_places(s: S) -> list[PlaceOption]:
+    """SRCH-11: the countries the profile can target, with what searches each. Free."""
+    return s.places()
+
+
 @router.post("/sites/{domain}/review")
 def review_site(s: S, domain: str, body: SiteReviewIn) -> list[SiteOption]:
     """SRCH-04/12: record that a person decided about a board WERA proposed.
@@ -116,14 +125,18 @@ def list_jobs(
     channel: str | None = None,
     location: str | None = None,
     remote: str | None = None,
+    possibly_closed: Annotated[str | None, Query(alias="possiblyClosed")] = None,
 ) -> JobList:
+    """`possiblyClosed`: absent for the main list, which leaves those jobs out (LIFE-03); `only`
+    for just them; `all` for both."""
     if status_ == "hidden":
         raise ApiError(400, "VALIDATION", "Hidden jobs have no score to rank. Read them from /jobs/meta instead.")
     st = status_ if status_ in STATUSES else "new"
+    which = {"only": True, "all": None}.get(possibly_closed or "", False)
+    filters = {"min_score": min_score, "channel": channel, "location": location, "remote": remote}
     return JobList(
-        items=s.list_jobs(
-            st, "date" if sort == "date" else "score", min_score=min_score, channel=channel, location=location, remote=remote
-        )
+        items=s.list_jobs(st, "date" if sort == "date" else "score", **filters, possibly_closed=which),
+        possibly_closed=len(s.list_jobs(st, "score", **filters, possibly_closed=True)) if which is False else 0,
     )
 
 
@@ -167,6 +180,14 @@ def decide(s: S, job_id: str, body: DecisionIn) -> ScoredJob:
     The decision is saved before the response goes out; the pack is drafted after it, by the
     application graph, so the person isn't left waiting on a model call.
     """
+    if body.action == "approve" and not environment().wera_demo_mode:
+        # LIFE-05: a pack is model calls and the person's time — make sure the job is still there
+        # first. Free (a feed or one page), and only a definite answer stops it: "gone" closes the
+        # job and `decide` then refuses with JOB_CLOSED; anything less goes ahead.
+        from ..graphs import recheck
+
+        if recheck.check_one(job_id, force=True) == "gone":
+            s.s.expire_all()
     job = s.decide(job_id, body)
     if body.action != "unhide":
         resume = {"action": body.action, "applicationId": s.started_application_id, "note": body.reason}
@@ -236,18 +257,60 @@ def estimate(s: S, channels: str | None = None) -> Estimate:
     return s.estimate(chosen)
 
 
+def _hand_person(request: Request, run_ids: list[str]) -> None:
+    """SRCH-32: who started this search, for Careerjet, handed to the run through Redis (an hour).
+    Only what the web proxy forwards; without it Careerjet is skipped and says why."""
+    from ..sources import feeds, targets
+
+    ip, agent = request.headers.get("x-wera-person-ip"), request.headers.get("x-wera-person-ua")
+    if not ip or not agent or environment().wera_demo_mode:
+        return
+    try:
+        client = targets.connect()
+    except ApiError:
+        return
+    for run_id in run_ids:
+        feeds.remember_person(client, run_id, feeds.Person(ip=ip, user_agent=agent))
+
+
 @router.post("/intake/run")
-def start_run(s: S, body: RunIn) -> RunIds:
+def start_run(s: S, body: RunIn, request: Request) -> RunIds:
     """UX-01: the run's rows exist before the response, so the UI can poll immediately; the
     fetching happens afterwards, outside this request's transaction."""
     chosen = [c for c in (body.channels if body.channels is not None else CHANNELS) if c in CHANNELS]
     if not chosen:
         raise ApiError(422, "VALIDATION", "Choose at least one channel.")
     ids = s.start_runs(chosen)
+    if "board_search" in ids:
+        _hand_person(request, [ids["board_search"]])
     if not environment().wera_demo_mode:
         # DEMO-02: demo runs are simulated against the fixtures and make no outbound request.
         s.defer(lambda: run_intake(chosen, ids), name=f"intake:{','.join(chosen)}")
     return RunIds(run_ids=list(ids.values()))
+
+
+@router.get("/upskills")
+def get_upskills(s: S, days: int = Query(60, ge=7, le=365)) -> UpskillsReport:
+    """UPSK-01: the skills the person's jobs ask for that their CV doesn't show. No model call."""
+    from ..services import upskills
+
+    return upskills.report(s.s, s.cv(), now=s.now, days=days)
+
+
+@router.get("/learning/suggestions")
+def learning_suggestions(s: S) -> SuggestionList:
+    """MATCH-13: profile changes the person's Gate 1 decisions point at. Nothing is applied."""
+    return s.learning_suggestions()
+
+
+@router.post("/learning/suggestions/{suggestion_id}/accept")
+def accept_suggestion(s: S, suggestion_id: str) -> SearchProfile:
+    return s.accept_suggestion(suggestion_id)
+
+
+@router.post("/learning/suggestions/{suggestion_id}/dismiss")
+def dismiss_suggestion(s: S, suggestion_id: str) -> SuggestionList:
+    return s.dismiss_suggestion(suggestion_id)
 
 
 @router.post("/jobs/seen")
@@ -264,6 +327,12 @@ def mark_seen(s: S, job_id: str) -> dict[str, bool]:
     body — even an empty string — is a response `fetch` refuses to construct.
     """
     s.mark_seen(job_id)
+    # LIFE-05: the person is looking at it, so find out whether it is still there — in the
+    # background, after the response, and only if nobody has asked in the last day.
+    if not environment().wera_demo_mode:
+        from ..graphs import recheck
+
+        s.defer(lambda: recheck.check_one_async(job_id), name=f"check:{job_id}")
     return {"seen": True}
 
 
@@ -289,7 +358,7 @@ def recheck_jobs(s: S) -> Started:
 
 
 @router.post("/intake/score-more")
-def score_more(s: S) -> RunIds:
+def score_more(s: S, request: Request) -> RunIds:
     """MATCH-05: call up the next batch from the broad search's pool.
 
     No channels and no fetching — the jobs are already stored, they just have no score yet. Like
@@ -297,6 +366,7 @@ def score_more(s: S) -> RunIds:
     """
     ids = s.start_score_more()
     run_id = ids.run_ids[0]
+    _hand_person(request, [run_id])
     if not environment().wera_demo_mode:
         # DEMO-02: a demo run is animated by `settle()` against the fixtures instead.
         s.defer(lambda: run_rescore(run_id, "score_more"), name=f"score_more:{run_id}")

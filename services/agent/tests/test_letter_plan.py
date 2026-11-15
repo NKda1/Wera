@@ -70,7 +70,8 @@ class TestThePlan:
         assert "Kubernetes" not in offered and "Kubernetes" in never
         # Grouped by paragraph, not by slot number: measured live, numbered slots made the writing
         # tier think for 10k tokens over a 264-word letter.
-        assert "- Opening: Python" in offered
+        # Technical keywords argue in the proof since 14 Nov; the opening introduces the applicant.
+        assert "- Proof: Python" in offered and "- Opening" not in offered
         assert "- Why this company: ownership" in offered
         assert "ATS_KEYWORD" not in text
 
@@ -134,7 +135,7 @@ class TestTheDraftedLetter:
 
     def test_the_letter_is_given_the_plan_and_the_posts_context(self, client, monkeypatch):
         app_id, seen = self._draft(monkeypatch)
-        assert "- Opening:" in seen["keywords"]
+        assert "- Proof:" in seen["keywords"] and "- Opening" not in seen["keywords"]
         with transaction() as session:
             pack = Store(session)._load_pack(app_id)
         assert pack is not None and pack.analysis is not None

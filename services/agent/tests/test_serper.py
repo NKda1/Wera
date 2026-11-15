@@ -113,3 +113,12 @@ class TestWhatItSpends:
         assert c.search("q", gl="gb", hl="en")
         assert json.loads(route.calls.last.request.content)["tbs"] == serper.FALLBACK_WINDOW
         assert c.window == serper.FALLBACK_WINDOW  # kept for the rest of the run
+
+
+class TestWithoutADateFilter:
+    @respx.mock
+    def test_an_empty_window_asks_without_one(self, key):
+        """SRCH-32: finding a lead's original; the employer's page may be older than three weeks."""
+        route = respx.post(serper.ENDPOINT).mock(return_value=httpx.Response(200, json=ORGANIC))
+        client(window="").search("q", gl="gb", hl="en")
+        assert "tbs" not in json.loads(route.calls.last.request.content)

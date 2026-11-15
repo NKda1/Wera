@@ -1,0 +1,11 @@
+{
+ "type": "JOBS",
+ "hits": 2,
+ "message": "2 matching jobs found",
+ "pages": 1,
+ "response_time": 0.04,
+ "jobs": [
+  {"title": "Graduate Software Engineer", "company": "Acme Robotics", "url": "https://jobviewtrack.com/en-gb/job-1a2b3c/test", "date": "Tue, 10 Nov 2026 09:00:00 GMT", "description": "Join our graduate scheme building warehouse robots in London...", "locations": "London", "salary": "GBP 32000 - 36000 per year", "salary_min": 32000, "salary_max": 36000, "salary_currency_code": "GBP", "salary_type": "Y"},
+  {"title": "Senior Software Engineer", "company": "Bigco", "url": "https://jobviewtrack.com/en-gb/job-4d5e6f/test", "date": "Mon, 09 Nov 2026 09:00:00 GMT", "description": "Lead a team...", "locations": "London", "salary": "", "salary_min": null, "salary_max": null, "salary_currency_code": "GBP", "salary_type": "Y"}
+ ]
+}

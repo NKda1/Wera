@@ -141,10 +141,15 @@ def dated(raw: str | None, now: int) -> tuple[str | None, PostedPrecision]:
         return None, "unknown"
     text = raw.strip()
     try:
-        parse_ms(text)
+        at = parse_ms(text)
     except (ValueError, TypeError):
         pass
     else:
+        # Nothing is posted in the future. A date more than a day ahead is some other date read
+        # as the posting's: three Gradcracker reads stored the application deadline (12 Nov
+        # review). A day's slack is for time zones and clocks, not for a different date.
+        if at > now + _RELATIVE_UNITS["day"]:
+            return None, "unknown"
         # A real timestamp in the source. Whether it is *authoritative* depends on who said it,
         # which is the caller's business — `from_feed` upgrades this to `exact`.
         return text, "approximate"
@@ -204,6 +209,7 @@ def _job(
     now: int,
     linkedin_url: str | None = None,
     posted_precision: PostedPrecision | None = None,
+    closes_at: str | None = None,
 ) -> Job:
     key = dedupe.dedupe_key(ats=ats, apply_url=apply_url, company=company, title=title, city=location.city)
     # Every builder funnels through here, so every posted date is one WERA can read — and every
@@ -230,6 +236,7 @@ def _job(
         last_seen=iso(now),
         status="new",
         seniority=infer_seniority(title, description),
+        closes_at=closes_at,
     )
 
 
@@ -253,6 +260,20 @@ def from_feed(feed: FeedJob, now: int) -> Job:
     )
 
 
+def closing_date(raw: object, now: int) -> str | None:
+    """LIFE-02: an application deadline as an ISO date, or None. Future dates are the point here,
+    so unlike `dated` nothing ahead of now is dropped — only what isn't a date at all."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if re.match(r"\d{4}-\d{2}-\d{2}", text):
+        return text[:10]  # as written: through `parse_ms` a bare date is local midnight, a day early in UTC
+    try:
+        return iso(parse_ms(text))[:10]
+    except (ValueError, TypeError):
+        return None
+
+
 def from_scrape(card: dict[str, Any], *, url: str, site: str, markdown: str | None, now: int) -> Job | None:
     """A board page WERA scraped. Without a title and a company there is no job here."""
     title = str(card.get("title") or "").strip()
@@ -272,7 +293,17 @@ def from_scrape(card: dict[str, Any], *, url: str, site: str, markdown: str | No
         source=JobSource(channel="board_search", detail=site, seen_at=iso(now)),
         posted_at=card.get("postedAt"),
         now=now,
+        closes_at=_closes(card, now),
     )
+
+
+def _closes(card: dict[str, Any], now: int) -> str | None:
+    """The card's closing date — or, when it has none, a "posted" date in the future: no job is
+    posted ahead of time, so that is the page's deadline read into the wrong field (12 Nov)."""
+    if when := closing_date(card.get("closesAt"), now):
+        return when
+    posted = closing_date(card.get("postedAt"), now)
+    return posted if posted and parse_ms(posted) > now + _RELATIVE_UNITS["day"] else None
 
 
 def from_pasted(text: str, *, title: str, company: str, location_raw: str | None, now: int) -> Job:

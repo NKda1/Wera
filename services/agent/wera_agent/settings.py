@@ -54,6 +54,19 @@ class Settings(BaseSettings):
     # robots.txt disallows `/search` for every agent, so this is the way to ask Google that
     # doesn't mean fetching a page that says no.
     serper_api_key: SecretStr | None = None
+    # SRCH-31/32: the job APIs (`sources/feeds`). Each is skipped, and says so, while its key is unset.
+    # Reed: the key is the Basic-auth username. USAJOBS: its key, and the email it was registered
+    # with, which USAJOBS requires as the User-Agent. Adzuna: an app id and key. Careerjet: the key,
+    # which only works from the IP addresses registered on the publisher account.
+    reed_api_key: SecretStr | None = None
+    usajobs_api_key: SecretStr | None = None
+    usajobs_email: str | None = None
+    adzuna_app_id: str | None = None
+    adzuna_app_key: SecretStr | None = None
+    careerjet_api_key: SecretStr | None = None
+    # Careerjet also wants a Referer: the site its searches are made from. WERA's own web app here;
+    # the public address once hosted ("Undeclared referrer" without one, 13 Nov).
+    careerjet_referer: str = "http://localhost:3000"
     # Where discovered postings wait for the Harvester (`sources.targets`). Loopback by default;
     # nothing in it outlives a week.
     redis_url: str = "redis://127.0.0.1:6379/0"

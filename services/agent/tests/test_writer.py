@@ -216,8 +216,11 @@ class TestSkillsReconciliation:
         job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
         doc = generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)).cv
         rebuilt = reconcile_skills(doc, cv=demo_cv, evidence=evidence, cv_pages=1, threshold=1.0)
-        assert set(rebuilt.skills) <= {s.name for s in demo_cv.skills}
-        assert "Docker" not in rebuilt.skills  # the fixture's unbacked keyword
+        names = {s.name for s in demo_cv.skills}
+        # Each is the CV's own skill — or, since 14 Nov, the post's spelling of one with the CV's in
+        # brackets ("Prompting (Prompt engineering)"), which claims nothing the CV doesn't list.
+        assert all(skill in names or skill.rsplit(" (", 1)[-1].rstrip(")") in names for skill in rebuilt.skills), rebuilt.skills
+        assert not any("Docker" in skill for skill in rebuilt.skills)  # the fixture's unbacked keyword
 
     def test_stops_at_the_threshold_rather_than_stuffing_the_line(self, demo_cv, demo_jobs):
         """A skills line carrying every term the post mentioned clears the robot and reads as
@@ -288,7 +291,7 @@ class TestTheLetterReadsLikeAPerson:
         assert "i am writing" not in opening
 
     def test_every_demo_letter_is_in_the_ltr_01_band(self, api):
-        """LTR-01: 180–260 words (shortened from 250–350 on 2026-11-10: a short letter from the CV's
+        """LTR-01: 150–230 words (shortened from 250–350 on 2026-11-10, then 180–260: a short letter from the CV's
         own lines is what is wanted, and what makes the letter affordable).
 
         Asserted over the packs the demo actually produces, not over `generate_pack` on arbitrary
@@ -299,7 +302,7 @@ class TestTheLetterReadsLikeAPerson:
             app = api.ok("GET", f"/applications/{item['id']}")
             letter = (app.get("pack") or {}).get("letter")
             if letter:
-                assert 180 <= letter["wordCount"] <= 260, f"{app['job']['company']}: {letter['wordCount']} words"
+                assert 150 <= letter["wordCount"] <= 230, f"{app['job']['company']}: {letter['wordCount']} words"
                 assert letter["guard"]["pass"], f"{app['job']['company']}: lengthening broke the guard"
 
     def test_the_salutation_is_never_a_dead_one(self):
@@ -385,3 +388,175 @@ def test_records_omitted_lines_so_they_can_be_added_back(pack, demo_cv):
 
 def test_uses_skill_aliases_when_matching(demo_cv):
     assert "Postgres" in skill_text(next(s for s in demo_cv.skills if s.name == "PostgreSQL"))
+
+
+class TestTheSummaryIsNeverLeftEmpty:
+    """TAIL-07 (14 Nov): WERA writes a general summary for a CV that has none; each pack writes one
+    for its job and falls back to that general one — never to nothing. A summary the applicant
+    wrote is used exactly as written."""
+
+    def _inp(self, demo_jobs, cv):
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        return PackInput(job=job, evidence=evidence, questions=questions, cv=cv, cv_pages=1)
+
+    def test_wera_s_own_summary_gets_a_per_job_profile(self, demo_cv, demo_jobs, store):
+        from wera_agent.nodes import tailor
+
+        generated = demo_cv.model_copy(update={"summary": demo_cv.summary.model_copy(update={"generated": True})})
+        doc = tailor.tailor(store.s, self._inp(demo_jobs, generated))
+        assert doc.summary.composed and doc.summary.text.strip()
+
+    def test_the_applicants_own_summary_is_used_as_written(self, demo_cv, demo_jobs, store):
+        from wera_agent.nodes import tailor
+
+        doc = tailor.tailor(store.s, self._inp(demo_jobs, demo_cv))
+        assert doc.summary.text == demo_cv.summary.text and not doc.summary.composed
+
+    def test_a_per_job_profile_that_fails_falls_back_to_wera_s_general_one(self, demo_cv, demo_jobs, monkeypatch, store):
+        from wera_agent.errors import ApiError
+        from wera_agent.nodes import tailor
+
+        real = tailor.structured
+
+        def no_profile(session, task, *a, **k):
+            if task == "summary.write":
+                raise ApiError(502, "LLM_BAD_OUTPUT", "no")
+            return real(session, task, *a, **k)
+
+        monkeypatch.setattr(tailor, "structured", no_profile)
+        generated = demo_cv.model_copy(update={"summary": demo_cv.summary.model_copy(update={"generated": True})})
+        doc = tailor.tailor(store.s, self._inp(demo_jobs, generated))
+        assert doc.summary.text == demo_cv.summary.text and not doc.summary.composed  # the general one, not nothing
+
+    def test_the_profile_is_only_offered_keywords_the_cv_backs(self, demo_cv, demo_jobs):
+        from wera_agent.nodes.tailor import _keywords
+        from wera_agent.schemas.jobs import JobKeyword
+
+        inp = self._inp(demo_jobs, demo_cv)
+        inp.evidence.keywords = [
+            JobKeyword(term="Python", weight="required"),
+            JobKeyword(term="Quantum Basket Weaving", weight="required"),
+        ]
+        assert "Quantum" in _keywords(inp) and "Quantum" not in _keywords(inp, backed_only=True)
+
+    def test_no_general_summary_is_written_in_demo_mode(self, demo_cv, store):
+        from wera_agent.nodes.tailor import compose_master_summary
+
+        assert compose_master_summary(store.s, demo_cv.model_copy(update={"summary": None})) is None
+
+
+class TestTheOpeningIntroducesTheApplicant:
+    """LTR-02 (14 Nov): paragraph 1 says who the applicant is and why this company before any
+    stack; what it says about the company is the post's own words, quoted, and so not a claim."""
+
+    def test_an_exact_quote_from_the_post_is_the_employers_words(self):
+        from wera_agent.nodes.tailor import post_quotes
+
+        post = "Fieldline's platform supports twelve thousand small businesses who run their week on it."
+        text = 'Their platform "supports twelve thousand small businesses", and “a figure the post never gave” too.'
+        assert post_quotes(text, post) == ["supports twelve thousand small businesses"]
+
+    def test_the_prompt_keeps_the_stack_out_of_the_opening(self):
+        from wera_agent.llm.prompts import template
+
+        system = template("letter.write").messages[0].prompt.template
+        assert "No tools, languages or stack here" in system and "`Introduction`" in system
+
+    def test_a_cut_opening_becomes_a_plain_introduction(self, demo_cv, demo_jobs, store, monkeypatch):
+        """14 Nov: the guard cut paragraph 1 in 3 of 6 letters, and each then opened on the stack."""
+        from wera_agent.nodes import tailor
+        from wera_agent.schemas.llm_outputs import LetterOutput, LetterParagraph
+        from wera_agent.schemas.pack import GuardResult, Violation
+
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        inp = PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)
+        quote = (job.description_md or "").split(".")[0].strip()
+        sections = ["opening_hook", "core_value_proposition", "call_to_action_and_close"]
+        out = LetterOutput.model_construct(
+            greeting="Dear Hiring Team,",
+            paragraphs=[
+                LetterParagraph.model_construct(text=f"Paragraph {i}.", source_ids=[], section=s, theme="")
+                for i, s in enumerate(sections)
+            ],
+            signoff="Best,",
+            hook_type="Introduction",
+            company_quote=quote,
+            policy_quote="",
+        )
+        cut = GuardResult.model_validate(
+            {"pass": False, "repaired": True, "violations": [Violation(location="p0", rule="dropped", detail="Left out.")]}
+        )
+        monkeypatch.setattr(tailor, "guard_and_repair", lambda *a, **k: (cut, {"p0": None}))
+
+        letter = tailor._guard_letter(store.s, out, inp)
+        opening = letter.paragraphs[0]
+        assert opening.section == "opening_hook" and len(letter.paragraphs) == 3
+        assert opening.text.startswith(f"I studied {demo_cv.education[0].degree}")
+        assert job.title in opening.text and "stack" not in opening.text.lower()
+        assert "plain introduction" in letter.guard.violations[0].detail
+
+    def test_the_technical_keywords_argue_in_the_proof(self):
+        from wera_agent.nodes.letter_plan import PARAGRAPH
+
+        assert PARAGRAPH[1] == PARAGRAPH[2] == "Proof"
+
+
+class TestSuggestedSkills:
+    """14 Nov: a pack suggested "Computer Science" and "Engineering", and both "REST APIs" and
+    "RESTful APIs"."""
+
+    def test_one_per_skill_and_no_fields_of_study(self, demo_cv):
+        from wera_agent.nodes.ats import suggested_skills
+        from wera_agent.schemas.pack import AtsKeyword
+
+        def kw(term: str) -> AtsKeyword:
+            return AtsKeyword(term=term, weight="required", matched=False, in_master_cv=True)
+
+        terms = ["Computer Science", "Engineering", "RESTful APIs", "REST APIs", "Microservices"]
+        assert suggested_skills(demo_cv.model_copy(update={"skills": []}), [kw(t) for t in terms]) == [
+            "RESTful APIs",
+            "Microservices",
+        ]
+
+
+class TestRaisingTheAtsScoreHonestly:
+    """ATSC-07 (14 Nov): no model call, nothing the CV doesn't say."""
+
+    def _pack(self, demo_cv, demo_jobs):
+        job, evidence, questions = seed_to_job(demo_jobs["shortlist"][FERNHILL], 0)
+        return job, evidence, generate_pack(PackInput(job=job, evidence=evidence, questions=questions, cv=demo_cv, cv_pages=1)).cv
+
+    def test_a_required_keyword_in_a_left_out_line_is_brought_in_verbatim(self, demo_cv, demo_jobs):
+        from wera_agent.nodes.ats import place_required
+        from wera_agent.schemas.jobs import JobKeyword
+
+        job, evidence, doc = self._pack(demo_cv, demo_jobs)
+        shown = {i for s in doc.sections for it in s.items for b in it.bullets for i in b.source_ids}
+        roles = {it.role_id for s in doc.sections for it in s.items}
+        left_out = next(b for r in demo_cv.experience if r.id in roles for b in r.bullets if b.id not in shown)
+        word = next(w for w in left_out.text.split() if len(w) > 6 and w.isalpha())
+        evidence.keywords = [JobKeyword(term=word, weight="required", category="hard_skill")]
+        placed = place_required(doc, cv=demo_cv, evidence=evidence)
+        lines = {b.source_ids[0]: b.text for s in placed.sections for it in s.items for b in it.bullets}
+        assert lines.get(left_out.id) == left_out.text  # copied verbatim, citing itself
+        assert left_out.id not in placed.omitted_bullet_ids
+
+    def test_the_post_spelling_leads_with_the_cvs_in_brackets(self, demo_cv, demo_jobs):
+        from wera_agent.nodes.ats import reconcile_skills
+        from wera_agent.schemas.jobs import JobKeyword
+
+        job, evidence, doc = self._pack(demo_cv, demo_jobs)
+        cv = demo_cv.model_copy(deep=True)
+        cv.skills[0].name = "K8s"  # the demo CV's lines don't mention it, so only the skills line can
+        evidence.keywords = [JobKeyword(term="Kubernetes", weight="required", category="tool")]
+        doc.skills = []
+        assert reconcile_skills(doc, cv=cv, evidence=evidence, cv_pages=1, threshold=1.0).skills[0] == "Kubernetes (K8s)"
+
+    def test_the_score_has_five_parts_and_says_why(self, demo_cv, demo_jobs):
+        from wera_agent.nodes.ats import PART_MAX, build_ats
+
+        job, evidence, doc = self._pack(demo_cv, demo_jobs)
+        report = build_ats(doc, cv=demo_cv, evidence=evidence, cv_pages=1, job=job)
+        assert [p.id for p in report.parts] == list(PART_MAX) and sum(p.max for p in report.parts) == 100
+        assert report.score == round(sum(p.points for p in report.parts)) and report.score <= report.best_score <= 100
+        assert all(p.detail for p in report.parts)

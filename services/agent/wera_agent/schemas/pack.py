@@ -74,7 +74,7 @@ class CompanyFact(Model):
 type LetterSection = Literal[
     "opening_hook", "core_value_proposition", "strategic_alignment_and_culture", "call_to_action_and_close"
 ]
-type HookType = Literal["Core-Metric", "Company-Mission", "Industry-Problem", "Referral"]
+type HookType = Literal["Introduction", "Core-Metric", "Company-Mission", "Industry-Problem", "Referral"]
 
 
 class Paragraph(Cited):
@@ -160,6 +160,16 @@ class FormatCheck(Model):
     message: str
 
 
+class AtsPart(Model):
+    """One part of the ATS score (ATSC-07): its points out of its share of 100, and why."""
+
+    id: Literal["keywords", "evidence", "alignment", "structure", "length"]
+    label: str
+    points: float
+    max: float
+    detail: str
+
+
 class AtsReport(Model):
     keywords: list[AtsKeyword]
     coverage: float  # 0–1, over every keyword the post asks for
@@ -180,6 +190,16 @@ class AtsReport(Model):
     letter_coverage: Opt[float] = None
     format_checks: list[FormatCheck]
     pages: float
+    # ATSC-07 (14 Nov): a 0–100 score in five parts, computed in code (`nodes.ats.ats_score`),
+    # and the score this CV could reach if every keyword it backs were placed — the gap between
+    # them is presentation, the gap above `best_score` is skills the CV doesn't have (Upskills).
+    # Absent on packs from before.
+    score: Opt[float] = None
+    best_score: Opt[float] = None
+    parts: list[AtsPart] = []
+    # Keywords the post asks for that the CV backs in a line but doesn't name as a skill: adding
+    # them to the CV's skills is the applicant's call, and the cheapest way to raise the score.
+    suggested_skills: list[str] = []
 
     @model_validator(mode="after")
     def _default_backed(self) -> "AtsReport":

@@ -14,7 +14,7 @@ export function ScoreRing({ score, roughOnly, size = "md", label }: { score: num
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center justify-center rounded-full border-[3.5px] bg-white font-bold tabular-nums text-ink",
+        "inline-flex shrink-0 items-center justify-center rounded-none border-[3.5px] bg-surface font-bold tabular-nums text-ink",
         size === "md" ? "size-16 text-[22px]" : "size-11 text-[15px] border-[3px]",
         ring[band],
       )}

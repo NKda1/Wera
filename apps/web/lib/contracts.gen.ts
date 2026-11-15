@@ -3,7 +3,7 @@
 
 export type Seniority = "intern" | "graduate" | "junior" | "entry" | "mid" | "senior" | "lead" | "principal";
 export type KeywordCategory = "hard_skill" | "methodology" | "tool";
-export type HookType = "Core-Metric" | "Company-Mission" | "Industry-Problem" | "Referral";
+export type HookType = "Introduction" | "Core-Metric" | "Company-Mission" | "Industry-Problem" | "Referral";
 export type LetterSection = "opening_hook" | "core_value_proposition" | "strategic_alignment_and_culture" | "call_to_action_and_close";
 export type ApplicationStatus =
   | "drafting"
@@ -42,6 +42,7 @@ export type SkillLevel = "familiar" | "proficient" | "expert";
 export type PostedPrecision = "exact" | "approximate" | "unknown";
 export type Recency = "24h" | "7d" | "21d";
 export type SecretStatus = "set" | "missing" | "invalid";
+export type SuggestionKind = "exclude_term" | "remove_title" | "add_title" | "add_location";
 
 /**
  * A line that states a number, with the numbers isolated from it.
@@ -131,11 +132,15 @@ export interface StrategicContext {
 }
 export interface AtsReport {
   backedCoverage: number;
+  bestScore?: number;
   coverage: number;
   formatChecks: FormatCheck[];
   keywords: AtsKeyword[];
   letterCoverage?: number;
   pages: number;
+  parts: AtsPart[];
+  score?: number;
+  suggestedSkills: string[];
 }
 export interface FormatCheck {
   id: string;
@@ -149,6 +154,16 @@ export interface AtsKeyword {
   matched: boolean;
   term: string;
   weight: "required" | "nice";
+}
+/**
+ * One part of the ATS score (ATSC-07): its points out of its share of 100, and why.
+ */
+export interface AtsPart {
+  detail: string;
+  id: "keywords" | "evidence" | "alignment" | "structure" | "length";
+  label: string;
+  max: number;
+  points: number;
 }
 export interface TailoredCV {
   cvVersion: number;
@@ -464,6 +479,7 @@ export interface Job {
   applyUrl?: string;
   ats?: Ats;
   closedAt?: string;
+  closesAt?: string;
   company: string;
   dedupeKey: string;
   descriptionMd: string | null;
@@ -488,6 +504,7 @@ export interface Job {
   sources: JobSource[];
   status: JobStatus;
   title: string;
+  via?: string;
 }
 export interface Salary {
   currency: string;
@@ -503,15 +520,18 @@ export interface JobSource {
 export interface JobList {
   items: ScoredJob[];
   next: null;
+  possiblyClosed: number;
 }
 export interface ScoredJob {
   applyUrl?: string;
   ats?: Ats;
   closedAt?: string;
+  closesAt?: string;
   company: string;
   dedupeKey: string;
   descriptionMd: string | null;
   descriptionStatus: "full" | "partial" | "missing";
+  evergreen: boolean;
   firstSeen: string;
   fit: FitReport;
   foundBy?: FoundBy;
@@ -521,9 +541,11 @@ export interface ScoredJob {
   lastCheckedAt?: string;
   lastConfirmedAt?: string;
   lastSeen: string;
+  learned?: LearnedRank;
   linkedinUrl?: string;
   liveness: Liveness;
   location: Location;
+  possiblyClosed: boolean;
   postedAt?: string;
   postedPrecision: "exact" | "approximate" | "unknown";
   remote: ("remote" | "hybrid" | "onsite") | null;
@@ -535,6 +557,14 @@ export interface ScoredJob {
   status: JobStatus;
   title: string;
   urgency: Urgency;
+  via?: string;
+}
+/**
+ * MATCH-12: how far a job moved in the order, and why. Never part of `fit.total`.
+ */
+export interface LearnedRank {
+  adjustment: number;
+  reason: string;
 }
 /**
  * SRCH-27: what "Clear jobs" removed — or, before it runs, what it would remove.
@@ -603,6 +633,7 @@ export interface Skill {
   name: string;
 }
 export interface Summary {
+  generated?: boolean;
   id: string;
   text: string;
 }
@@ -610,6 +641,19 @@ export interface NavCounts {
   demoMode: boolean;
   jobs: number;
   review: number;
+}
+/**
+ * SRCH-11: a country the profile can target, and what would search it there.
+ *
+ * Offered whether or not a reviewed board covers it — the open web search reaches every one,
+ * and the job APIs most — so the picker is no longer limited to where the boards happen to be.
+ */
+export interface PlaceOption {
+  boards: string[];
+  code: string;
+  feeds: string[];
+  name: string;
+  region: string;
 }
 /**
  * One search the Strategist will send (SRCH-20, stage 1). Built in code from the parsed CV and
@@ -659,6 +703,16 @@ export interface SearchProfile {
   titles: string[];
   updatedAt: string;
 }
+/**
+ * A skill the posts ask for that the CV backs in a line but doesn't list as a skill: the
+ * cheapest point on the ATS score (ATSC-07), and only the person can decide to claim it.
+ */
+export interface QuickWin {
+  jobs: number;
+  line: string;
+  share: number;
+  term: string;
+}
 export interface RunIds {
   runIds: string[];
 }
@@ -683,8 +737,10 @@ export interface Settings {
   cvPages: 1 | 2;
   demoMode: boolean;
   inbox: InboxSettings;
+  learnedRanking: boolean;
   models: TierModels;
   redactContact: boolean;
+  scheduledIntake: boolean;
   searchSchedule: SearchSchedule;
   spentThisWeekUsd: number;
   weeklyBudgetUsd: number;
@@ -702,10 +758,12 @@ export interface SettingsResponse {
   cvPages: 1 | 2;
   demoMode: boolean;
   inbox: InboxSettings;
+  learnedRanking: boolean;
   llmLastCheckedAt?: string;
   llmProvider: string;
   models: TierModels;
   redactContact: boolean;
+  scheduledIntake: boolean;
   searchSchedule: SearchSchedule;
   secrets: SecretsStatus;
   spentThisWeekUsd: number;
@@ -721,6 +779,7 @@ export interface ShortlistMeta {
   found: FoundCounts;
   hidden: Job[];
   hiddenTotal: number;
+  nearMisses: number;
   rejected: number;
   snoozed: number;
 }
@@ -737,6 +796,21 @@ export interface SiteOption {
   reviewed: boolean;
   robotsOk?: boolean;
 }
+/**
+ * MATCH-13: a change to the search profile that the person's decisions point at. Nothing
+ * changes until they accept it (PRF-04).
+ */
+export interface Suggestion {
+  evidence: number;
+  id: string;
+  kind: SuggestionKind;
+  message: string;
+  value: string;
+}
+export interface SuggestionList {
+  decisions: number;
+  items: Suggestion[];
+}
 export interface TargetMatrix {
   cvVersion: number;
   field: string;
@@ -750,4 +824,32 @@ export interface TestResult {
   code?: string;
   message: string;
   ok: boolean;
+}
+/**
+ * One skill the CV doesn't show, and how much the person's market wants it.
+ */
+export interface Upskill {
+  category?: KeywordCategory;
+  closeTo: string[];
+  examples: UpskillJob[];
+  jobs: number;
+  previous: number;
+  recent: number;
+  requiredShare: number;
+  score: number;
+  share: number;
+  spellings: string[];
+  term: string;
+  trend: "new" | "rising" | "steady" | "falling";
+}
+export interface UpskillJob {
+  company: string;
+  id: string;
+  title: string;
+}
+export interface UpskillsReport {
+  jobsConsidered: number;
+  missing: Upskill[];
+  quickWins: QuickWin[];
+  windowDays: number;
 }

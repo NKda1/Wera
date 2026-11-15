@@ -26,7 +26,7 @@ from ..domain.vocab import in_post
 from .base import Model, Opt, check, count, fail, required
 from .jobs import Location, RemoteMode, Salary, SubScore
 from .pack import HookType, LetterSection, StrategicContext
-from .profile import Recency, Seniority
+from .profile import Seniority
 
 Score = Annotated[float, check(lambda v: 0 <= v <= 10, "range", "Scores run from 0 to 10")]
 # A provider's strict mode ignores `maxLength`, so this limit has to be in the prompt as well —
@@ -50,7 +50,11 @@ Term = Annotated[str, required("This can't be empty")]
 # So: a letter under 150 words is a stub, and over 500 is an essay. Either is drift worth one
 # retry carrying the numbers back (§8.5 step 1), which is actionable in a way "write it well"
 # is not.
-# Moved with LTR-01's target (now 180–260): a stub is under 120, an essay over 400.
+# Moved with LTR-01's target (now 150–230): a stub is under 120, an essay over 400.
+# Not raised to meet the target, and measured why (2026-11-12): at a floor of 165, two of five
+# live letters failed both attempts and their packs came back with no letter at all. A short
+# letter is a letter the person can lengthen; a failed pack is nothing. Falling short of
+# LTR-01 is handled in `nodes.tailor.letter` instead, which asks once more and keeps the longer.
 LETTER_MIN_WORDS = 120
 LETTER_MAX_WORDS = 400
 
@@ -112,28 +116,42 @@ class Cites(Model):
 # ---- profile.generate (PRF-01) ----
 
 
+PROFILE_SKILLS = 15  # `SearchProfile.skills`' own limit
+
+
 class ProfileProposal(Model):
-    """A proposed search profile. Channels, sites and timestamps are set in code, not here."""
+    """A proposed search profile: what the CV says the person can do.
+
+    Where, how remote and how recent are the person's own and are carried from their profile in
+    code (`Store.generate_profile`), with channels, sites and timestamps. `locations` is asked for
+    only as a starting point for a profile that names nowhere, so an empty list is a fine answer.
+    """
 
     titles: Annotated[list[Term], count(1, 8, "Propose at least 1 title", "Propose at most 8 titles")]
-    skills: Annotated[list[Term], count(1, 15, "Propose at least 1 skill", "Propose at most 15 skills")]
-    locations: Annotated[list[Term], count(1, 8, "Propose at least 1 location", "Propose at most 8 locations")]
-    remote: Literal["any", "remote_only", "no_remote"]
+    # No ceiling here: an over-long list is cut to `PROFILE_SKILLS` below, after the unknowns go.
+    skills: Annotated[list[Term], count(1, None, "Propose at least 1 skill")]
+    locations: list[Term] = []
     seniority: list[Seniority]
     exclude: list[Term]
-    recency: Recency
 
     @field_validator("skills")
     @classmethod
     def _skills_from_cv(cls, v: list[Term], info: ValidationInfo) -> list[Term]:
-        """A profile skill has to be a skill the CV claims; the model can't add to it."""
+        """A profile skill has to be a skill the CV claims; the model can't add to it.
+
+        A filter and a cut rather than a veto (14 Nov): with a 25-skill CV the model proposed 16,
+        then on the retry one the CV doesn't name, and both answers were thrown away — twice in a
+        row, so the person couldn't regenerate their profile at all. What's left out is only
+        what was wrong; a reply with no skill from the CV at all is still refused.
+        """
         cv = _cv(info)
         if cv is not None:
             known = _known_skills(cv)
-            unknown = [s for s in v if s.casefold() not in known]
-            if unknown:
-                raise fail("skills", f"Not in the master CV's skills: {', '.join(unknown)}")
-        return v
+            kept = [s for s in v if s.casefold() in known]
+            if not kept:
+                raise fail("skills", f"None of the proposed skills is in the master CV's skills: {', '.join(v)}")
+            v = kept
+        return v[:PROFILE_SKILLS]
 
 
 # ---- cv.parse (CV-03) ----
@@ -243,9 +261,10 @@ class ExtractedKeyword(Model):
 
 
 class KeywordList(Model):
-    keywords: Annotated[
-        list[ExtractedKeyword], count(0, KEYWORD_LIMIT + CULTURE_LIMIT, "", f"At most {KEYWORD_LIMIT + CULTURE_LIMIT} terms")
-    ]
+    # No ceiling (14 Nov): a long post drew 34+ terms and the whole list was refused, three times
+    # in one run, leaving a job unscored. `fit.keywords_for` already keeps the first
+    # `KEYWORD_LIMIT` checkable terms and `CULTURE_LIMIT` soft ones, and `max_tokens` bounds the rest.
+    keywords: list[ExtractedKeyword]
 
     @field_validator("keywords")
     @classmethod
@@ -461,17 +480,19 @@ class RolePick(Model):
         Checking the pair rather than each id separately is what stops a bullet being filed under
         a role it did not come from: every id would still be "in the master CV", and the rendered
         CV would attribute real work to the wrong employer.
+
+        A filter, like `Cites`, not a veto (14 Nov). This raised, and on 13 Nov 4 of 11
+        `cv.tailor` calls were rejected whole — and paid for again — for one misfiled id or one
+        respelled skill, the rest of the selection sound. The line is still never shown under the
+        wrong employer: it is left out, and a role left with no lines is dropped by
+        `nodes.tailor._item`, so an invalid pick ends where the rejection would have put it.
         """
         cv = _cv(info)
         if cv is None:
             return self
         role = next((r for r in [*cv.experience, *cv.projects] if r.id == self.role_id), None)
-        if role is None:
-            raise fail("role_id", f"Not a role in the master CV: {self.role_id}")
-        mine = {b.id for b in role.bullets}
-        stray = [i for i in self.bullet_ids if i not in mine]
-        if stray:
-            raise fail("bullet_ids", f"Not lines of {self.role_id}: {', '.join(stray)}")
+        mine = {b.id for b in role.bullets} if role is not None else set()
+        self.bullet_ids = [i for i in self.bullet_ids if i in mine]
         return self
 
 
@@ -510,7 +531,7 @@ class TailorSelection(Model):
         if v and cv is not None:
             expected = cv.summary.id if cv.summary else None
             if v != expected:
-                raise fail("summary_id", "summaryId must be the master CV's own summary id, or null")
+                return None  # not the summary: no profile selected, and `nodes.tailor` falls back
         return v
 
     @field_validator("skills")
@@ -520,9 +541,7 @@ class TailorSelection(Model):
         cv = _cv(info)
         if cv is not None:
             known = _known_skills(cv)
-            unknown = [s for s in v if s.casefold() not in known]
-            if unknown:
-                raise fail("skills", f"Not in the master CV's skills: {', '.join(unknown)}")
+            return [s for s in v if s.casefold() in known]  # a skill it respelled or invented is left out
         return v
 
     @field_validator("omitted_bullet_ids")
@@ -532,9 +551,8 @@ class TailorSelection(Model):
         screen offers the person a bullet they can't add back."""
         cv = _cv(info)
         if cv is not None:
-            unknown = [i for i in v if i not in _known_bullet_ids(cv)]
-            if unknown:
-                raise fail("omitted_bullet_ids", f"Not in the master CV: {', '.join(unknown)}")
+            known = _known_bullet_ids(cv)
+            return [i for i in v if i in known]
         return v
 
 
@@ -586,7 +604,7 @@ class LetterOutput(Model):
     # Which opening the letter commits to. Also write-only, and also not decoration: the opening
     # used to be whatever the model drifted into, which was usually a restatement of the job title.
     # Choosing from a closed set forces a decision about what the first sentence is *for*.
-    hook_type: HookType = "Core-Metric"
+    hook_type: HookType = "Introduction"
     company_quote: str  # LTR-02: one fact quoted word for word from the post
     # LTR-06: a second verbatim fact, about how the company works — its remote or hybrid policy,
     # learning budget, sponsorship, how it's structured. Empty when the post states none, which
@@ -642,12 +660,18 @@ class AnswerDraft(Model):
     answer: str | None  # null = "your answer needed" (ANS-02/03)
     source_ids: list[str]
 
-    @field_validator("source_ids")
-    @classmethod
-    def _cited_when_answered(cls, v: list[str], info: ValidationInfo) -> list[str]:
-        if info.data.get("answer") and not v:
-            raise fail("source_ids", "An answer must cite the master CV, or be left for the person")
-        return v
+    @model_validator(mode="after")
+    def _cited_when_answered(self) -> "AnswerDraft":
+        """An answer must cite the master CV, or be left for the person (ANS-02/03).
+
+        Left for the person rather than rejected (14 Nov): this raised for the whole reply, and on
+        13 Nov 2 of 3 `answers.draft` calls were paid for twice because one answer of several
+        cited nothing. An uncited answer still never reaches the form — it becomes "your answer
+        needed", which is what a null answer already means.
+        """
+        if self.answer and not self.source_ids:
+            self.answer = None
+        return self
 
 
 class AnswersOutput(Model):
@@ -714,6 +738,8 @@ class NormalisedJob(Model):
     language: str
     seniority: Opt[Seniority] = None
     posted_at: Opt[str] = None
+    # LIFE-02: the closing date or application deadline, as YYYY-MM-DD, when the page states one.
+    closes_at: Opt[str] = None
 
 
 class JobCard(Model):

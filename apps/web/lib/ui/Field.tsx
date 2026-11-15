@@ -1,8 +1,10 @@
 import type { ComponentProps, ReactNode } from "react";
 import { cn } from "./cn";
 
+// 16px on phones, 15px from `sm`: iOS Safari zooms the whole page into any focused field set
+// smaller than 16px, and leaves it zoomed after the keyboard closes.
 const control =
-  "w-full rounded-control border border-line bg-white px-3.5 text-[15px] text-ink placeholder:text-ink-2/70 hover:border-mint-200 focus-visible:border-forest-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-forest-700/20 disabled:bg-mint-50 disabled:text-ink-2";
+  "w-full rounded-control border border-line bg-surface px-3.5 text-[16px] sm:text-[15px] text-ink placeholder:text-ink-2/70 hover:border-mint-200 focus-visible:border-forest-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-forest-700/20 disabled:bg-mint-50 disabled:text-ink-2";
 
 export function Label({ htmlFor, children, className }: { htmlFor?: string; children: ReactNode; className?: string }) {
   return (
@@ -59,7 +61,7 @@ export function Checkbox({
   return (
     <label className={cn("flex cursor-pointer items-start gap-3 py-1", props.disabled && "cursor-not-allowed", className)}>
       <span className="relative mt-0.5 inline-flex size-5 shrink-0">
-        <input type="checkbox" className="peer size-5 cursor-pointer appearance-none rounded-[5px] border border-line bg-white checked:border-forest-700 checked:bg-forest-700 disabled:cursor-not-allowed disabled:opacity-60" {...props} />
+        <input type="checkbox" className="peer size-5 cursor-pointer appearance-none rounded-none border border-line bg-surface checked:border-forest-700 checked:bg-accent disabled:cursor-not-allowed disabled:opacity-60" {...props} />
         <svg className="pointer-events-none absolute inset-0 m-auto size-3.5 text-white opacity-0 peer-checked:opacity-100" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="m3.5 8.5 3 3 6-7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>

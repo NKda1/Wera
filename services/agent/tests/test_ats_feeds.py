@@ -93,6 +93,30 @@ class TestLever:
         assert job.posted_at and job.posted_at.startswith("20")
         assert " " not in job.description  # non-breaking spaces become ordinary ones
 
+    @respx.mock
+    def test_the_lists_and_the_closing_part_are_the_description_too(self, outbound):
+        """Intropic's postings came through at 402 characters: Lever keeps the responsibilities
+        and requirements in `lists`, which WERA wasn't reading. Shape taken from the live feed."""
+        body = [{**LEVER_BODY[0],
+                 "lists": [{"text": "Responsibilities", "content": "<li><p>Build the pricing engine.</p></li><li><p>Own its tests.</p></li>"},
+                           {"text": "Requirements", "content": "<li><p>Python.</p></li>"}],
+                 "additionalPlain": "We sponsor visas."}]  # fmt: skip
+        respx.get(ats_feeds.LEVER.format(token="saltmarsh")).mock(return_value=httpx.Response(200, json=body))
+        (job,), _ = ats_feeds.fetch_company(LEVER)
+        assert job.description == (
+            "Join a scaling team. Python and FastAPI.\n\n"
+            "Responsibilities\n- Build the pricing engine.\n\n- Own its tests.\n\n"
+            "Requirements\n- Python.\n\n"
+            "We sponsor visas."
+        )
+
+    @respx.mock
+    def test_a_posting_with_only_lists_still_has_a_description(self, outbound):
+        body = [{**LEVER_BODY[0], "descriptionPlain": "", "lists": [{"text": "Requirements", "content": "<li>Rust</li>"}]}]
+        respx.get(ats_feeds.LEVER.format(token="saltmarsh")).mock(return_value=httpx.Response(200, json=body))
+        (job,), _ = ats_feeds.fetch_company(LEVER)
+        assert job.description == "Requirements\n- Rust"
+
 
 class TestAshby:
     @respx.mock

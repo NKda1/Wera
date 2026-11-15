@@ -186,3 +186,57 @@ def describe(last: dict[str, Any]) -> str:
 
 
 __all__ = ["describe", "due", "iso", "run", "run_async"]
+
+
+# LIFE-05 (14 Nov): one job, when the person is about to act on it. A job opened today was
+# probably checked by nobody — the daily sweep is off by default (SCH-05) — so the moments that
+# matter check for themselves: opening a job's details, and before a pack is drafted for it.
+RECHECK_ONE_AFTER_HOURS = 20
+
+
+# Before a pack, the person is waiting on the answer: a check that can't answer in this long is
+# "unknown", and the pack goes ahead.
+CHECK_ONE_TIMEOUT_SECONDS = 8.0
+
+
+def check_one(job_id: str, *, force: bool = False) -> str:
+    """Ask whether one job is still open, free: its employer's feed if it has one, else its page.
+    Returns the verdict ("open", "gone", "likely_gone", "unknown", or "skipped" when it was checked
+    in the last `RECHECK_ONE_AFTER_HOURS` and not forced). A `gone` closes the job (ATS-03)."""
+    from ..services.store import Store
+    from ..sources import ats_feeds
+    from ..sources import liveness as live
+
+    if get_settings().wera_demo_mode:
+        return "skipped"  # DEMO-02: no outbound request
+    now = now_ms()
+    with transaction() as session:
+        store = Store(session, now)
+        job = store._job(store._job_row(job_id))
+    if job.status in ("closed", "hidden", "rejected", "archived"):
+        return "skipped"
+    if not force and job.last_checked_at and now - parse_ms(job.last_checked_at) < RECHECK_ONE_AFTER_HOURS * 3_600_000:
+        return "skipped"
+    if job.ats is not None:
+        board = _board_of(job.ats)
+        result = ats_feeds.fetch_boards([board], limit=1)
+        if board in result.answered:
+            verdict = "gone" if ats_feeds.closed_tokens(result, {job.id: job.ats}) else "open"
+        else:
+            verdict = live.check(job.apply_url, timeout=CHECK_ONE_TIMEOUT_SECONDS)
+    else:
+        verdict = live.check(job.apply_url, timeout=CHECK_ONE_TIMEOUT_SECONDS)
+    with transaction() as session:
+        store = Store(session, now)
+        if verdict == "gone":
+            store.close_jobs([job.id])
+        else:
+            store.record_liveness(job.id, confirmed=verdict == "open")
+    logfire.info("Checked {job_id} before acting on it: {verdict}", job_id=job.id, verdict=verdict)
+    return verdict
+
+
+async def check_one_async(job_id: str) -> str:
+    import asyncio
+
+    return await asyncio.to_thread(check_one, job_id)

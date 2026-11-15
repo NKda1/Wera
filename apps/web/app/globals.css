@@ -5,35 +5,50 @@
  * Green means go. Amber means you need to look. Red only when something actually failed.
  * The default Tailwind palette is removed so only these tokens can be used.
  */
-@theme {
+/*
+ * WERA design system v0.2 — clean, sharp, quiet (14 Nov).
+ * Square corners, flat surfaces with a hairline border, generous space, and colour only where it
+ * means something: green means go, amber means look, red only when something failed.
+ * Every colour is a variable with a light and a dark value (`:root` / `.dark` below), so the same
+ * utilities draw both themes. The default Tailwind palette is removed so only these can be used.
+ */
+@theme inline {
   --color-*: initial;
-  --color-white: #ffffff;
+  --color-white: #ffffff; /* text on filled buttons and tags, in both themes */
   --color-transparent: transparent;
 
-  --color-forest-900: #0b4a2d; /* headings, dark fills */
-  --color-forest-800: #0f5a37; /* primary hover */
-  --color-forest-700: #146c43; /* primary */
-  --color-leaf-500: #4c9a6b; /* graphics only */
-  --color-mint-200: #cfe5d7; /* chip hover, progress track */
-  --color-mint-100: #e3f1e8; /* selected, chips */
-  --color-mint-50: #f3f8f4; /* app ground */
+  --color-surface: var(--c-surface); /* cards, dialogs, inputs */
+  --color-forest-900: var(--c-forest-900); /* headings and strong text */
+  --color-forest-800: var(--c-forest-800);
+  --color-forest-700: var(--c-forest-700); /* links, accents, focus */
+  --color-accent: var(--c-accent); /* primary fills */
+  --color-accent-hover: var(--c-accent-hover);
+  --color-accent-strong: var(--c-accent-strong); /* the darkest fills: tags, toasts */
+  --color-leaf-500: var(--c-leaf-500); /* graphics only */
+  --color-mint-200: var(--c-mint-200); /* hover, progress track */
+  --color-mint-100: var(--c-mint-100); /* selected, chips */
+  --color-mint-50: var(--c-mint-50); /* app ground */
 
-  --color-ink: #0e1f16; /* text */
-  --color-ink-2: #4a5d52; /* secondary text */
-  --color-line: #dce7df; /* borders */
+  --color-ink: var(--c-ink); /* text */
+  --color-ink-2: var(--c-ink-2); /* secondary text */
+  --color-line: var(--c-line); /* borders */
 
-  --color-amber-700: #7a4800; /* attention text */
-  --color-amber-500: #b87503; /* attention dot and ring, graphics only */
-  --color-amber-100: #fbe6c2; /* attention border */
-  --color-amber-50: #fff4e0; /* attention fill */
+  --color-amber-700: var(--c-amber-700); /* attention text */
+  --color-amber-500: var(--c-amber-500); /* attention dot and ring, graphics only */
+  --color-amber-100: var(--c-amber-100); /* attention border */
+  --color-amber-50: var(--c-amber-50); /* attention fill */
 
-  --color-red-700: #a3261b; /* failures only */
-  --color-red-50: #fcebe9;
+  --color-red-700: var(--c-red-700); /* failures only */
+  --color-red-50: var(--c-red-50);
 
-  --color-code: #0f2419; /* .env snippet ground */
+  --color-code: var(--c-code); /* .env snippet ground */
+}
 
-  --radius-control: 10px;
-  --radius-card: 16px;
+@theme {
+  /* Sharp everywhere. The two named radii stay as classes so components read the same; a dot is
+     the one thing that stays round (`rounded-dot`). */
+  --radius-control: 0px;
+  --radius-card: 0px;
 
   --text-display: 3rem;
   --text-display--line-height: 1.05;
@@ -56,8 +71,11 @@
   --text-tag: 0.6875rem;
   --text-tag--line-height: 1.3;
 
-  --shadow-card: 0 1px 2px rgb(14 31 22 / 0.04);
-  --shadow-pop: 0 12px 32px -8px rgb(14 31 22 / 0.18), 0 2px 6px rgb(14 31 22 / 0.08);
+  /* Flat: a card is a hairline, not a shadow. Lift is kept for what floats (menus, dialogs) and for
+     a hover, where it says "this does something". */
+  --shadow-card: none;
+  --shadow-pop: 0 16px 40px -12px rgb(0 0 0 / 0.28), 0 2px 6px rgb(0 0 0 / 0.08);
+  --shadow-lift: 0 6px 18px -8px rgb(0 0 0 / 0.22);
 
   --animate-fade-in: fade-in 160ms ease-out;
   --animate-slide-up: slide-up 200ms ease-out;
@@ -89,6 +107,58 @@
   --font-mono: var(--font-jetbrains), ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* The two themes. Light is the default; `.dark` on <html> is dark, set before paint by the script in
+   `app/layout.tsx` from the saved choice or, for "system", the OS setting. */
+:root {
+  color-scheme: light;
+  --c-surface: #ffffff;
+  --c-forest-900: #0b3d26;
+  --c-forest-800: #0f5a37;
+  --c-forest-700: #146c43;
+  --c-accent: #146c43;
+  --c-accent-hover: #0f5a37;
+  --c-accent-strong: #0b3d26;
+  --c-leaf-500: #4c9a6b;
+  --c-mint-200: #d4e6da;
+  --c-mint-100: #e9f2ec;
+  --c-mint-50: #f6f8f7;
+  --c-ink: #0e1a14;
+  --c-ink-2: #56665c;
+  --c-line: #e1e7e3;
+  --c-amber-700: #7a4800;
+  --c-amber-500: #b87503;
+  --c-amber-100: #f3dfb8;
+  --c-amber-50: #fff6e6;
+  --c-red-700: #a3261b;
+  --c-red-50: #fcebe9;
+  --c-code: #0f2419;
+}
+
+:root.dark {
+  color-scheme: dark;
+  --c-surface: #131a16;
+  --c-forest-900: #d3ecdc;
+  --c-forest-800: #a9d9bb;
+  --c-forest-700: #63c58f;
+  --c-accent: #23804f;
+  --c-accent-hover: #2b965d;
+  --c-accent-strong: #1b6640;
+  --c-leaf-500: #4fae78;
+  --c-mint-200: #2a3a31;
+  --c-mint-100: #1c2721;
+  --c-mint-50: #0c110e;
+  --c-ink: #e4ece6;
+  --c-ink-2: #98aa9f;
+  --c-line: #26312b;
+  --c-amber-700: #f1c27a;
+  --c-amber-500: #d99a2b;
+  --c-amber-100: #4f3c17;
+  --c-amber-50: #211a0d;
+  --c-red-700: #ff8f84;
+  --c-red-50: #2b1513;
+  --c-code: #080c0a;
+}
+
 @layer base {
   html {
     -webkit-text-size-adjust: 100%;
@@ -113,12 +183,22 @@
     background: var(--color-mint-200);
   }
 
+  /* Theme changes and hovers ease rather than snap. */
+  body,
+  section,
+  dialog {
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      color 160ms ease;
+  }
+
   dialog {
     color: var(--color-ink);
   }
 
   dialog::backdrop {
-    background: rgb(14 31 22 / 0.42);
+    background: rgb(0 0 0 / 0.5);
   }
 
   dialog[open] {
@@ -140,4 +220,9 @@
   &::-webkit-scrollbar {
     display: none;
   }
+}
+
+/* The one round thing left: status dots. */
+@utility rounded-dot {
+  border-radius: 9999px;
 }

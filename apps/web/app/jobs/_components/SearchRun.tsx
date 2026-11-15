@@ -201,7 +201,9 @@ export function RunPanel({
         }
         return;
       }
-      timer = setTimeout(poll, 600);
+      // 1.5 s: a run's phases last seconds, and each poll is a request the agent answers while
+      // the run itself is busy on its threads (the 14 Nov freezes).
+      timer = setTimeout(poll, 1500);
     };
     poll();
     return () => clearTimeout(timer);

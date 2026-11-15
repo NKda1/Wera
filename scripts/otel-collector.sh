@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs the OpenTelemetry Collector that sends Postgres server metrics to Logfire (OBS-04).
+# Runs the OpenTelemetry Collector that sends Postgres and Redis server metrics to Logfire
+# (OBS-04, OBS-05): one collector, the two configs in infra/otel/ merged.
 #
 #   scripts/otel-collector.sh             run in the foreground (Ctrl-C stops it)
 #   scripts/otel-collector.sh validate    check the config and the variables, send nothing
@@ -7,13 +8,14 @@
 #                                         restarted if it stops; logs in ~/Library/Logs/
 #   scripts/otel-collector.sh uninstall   stop it and remove the agent
 #
-# Reads POSTGRESQL_USERNAME and POSTGRESQL_PASSWORD (the `logfire_monitor` role) from .env.local,
+# Reads POSTGRESQL_USERNAME and POSTGRESQL_PASSWORD (the `logfire_monitor` role) and
+# REDIS_MONITOR_USERNAME and REDIS_MONITOR_PASSWORD (the `logfire_monitor` ACL user) from .env.local,
 # and the project write token from .logfire/logfire_credentials.json unless LOGFIRE_TOKEN is set.
 # The collector binary is `otelcol-contrib` on PATH, or OTELCOL_BIN.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-config="$root/infra/otel/postgresql.yaml"
+configs=(--config "$root/infra/otel/postgresql.yaml" --config "$root/infra/otel/redis.yaml")
 label="com.wera.otel-collector"
 plist="$HOME/Library/LaunchAgents/$label.plist"
 
@@ -35,6 +37,11 @@ export POSTGRESQL_PASSWORD="${POSTGRESQL_PASSWORD:-$(read_env POSTGRESQL_PASSWOR
 export POSTGRESQL_ENDPOINT="${POSTGRESQL_ENDPOINT:-$(read_env POSTGRESQL_ENDPOINT)}"
 export POSTGRESQL_ENDPOINT="${POSTGRESQL_ENDPOINT:-localhost:5432}"
 export POSTGRESQL_INSTANCE_ID="${POSTGRESQL_INSTANCE_ID:-$(hostname -s)-pg17}"
+export REDIS_MONITOR_USERNAME="${REDIS_MONITOR_USERNAME:-$(read_env REDIS_MONITOR_USERNAME)}"
+export REDIS_MONITOR_PASSWORD="${REDIS_MONITOR_PASSWORD:-$(read_env REDIS_MONITOR_PASSWORD)}"
+export REDIS_ENDPOINT="${REDIS_ENDPOINT:-$(read_env REDIS_ENDPOINT)}"
+export REDIS_ENDPOINT="${REDIS_ENDPOINT:-localhost:6379}"
+export REDIS_INSTANCE_ID="${REDIS_INSTANCE_ID:-$(hostname -s)-redis}"
 export LOGFIRE_INGEST_URL="${LOGFIRE_INGEST_URL:-$(read_env LOGFIRE_INGEST_URL)}"
 export LOGFIRE_INGEST_URL="${LOGFIRE_INGEST_URL:-https://logfire-eu.pydantic.dev}"
 if [ -z "${LOGFIRE_TOKEN:-}" ] && [ -f "$root/.logfire/logfire_credentials.json" ]; then
@@ -42,9 +49,9 @@ if [ -z "${LOGFIRE_TOKEN:-}" ] && [ -f "$root/.logfire/logfire_credentials.json"
 fi
 export LOGFIRE_TOKEN="${LOGFIRE_TOKEN:-}"
 
-for name in POSTGRESQL_USERNAME POSTGRESQL_PASSWORD LOGFIRE_TOKEN; do
+for name in POSTGRESQL_USERNAME POSTGRESQL_PASSWORD REDIS_MONITOR_USERNAME REDIS_MONITOR_PASSWORD LOGFIRE_TOKEN; do
   if [ -z "${!name}" ]; then
-    echo "$name is not set (see .env.example, 'Postgres metrics')." >&2
+    echo "$name is not set (see .env.example, 'Server metrics')." >&2
     exit 1
   fi
 done
@@ -56,11 +63,11 @@ if [ -z "$bin" ]; then
 fi
 
 if [ "${1:-}" = "validate" ]; then
-  exec "$bin" validate --config "$config"
+  exec "$bin" validate "${configs[@]}"
 fi
 
 if [ "${1:-}" = "install" ]; then
-  "$bin" validate --config "$config"
+  "$bin" validate "${configs[@]}"
   # The agent runs this script, not the collector, so the password and token are read from
   # .env.local and .logfire/ at each start and never written into the plist.
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
@@ -90,4 +97,4 @@ PLIST
   echo "Collector running under launchd ($label); logs: ~/Library/Logs/wera-otel-collector.log"
   exit 0
 fi
-exec "$bin" --config "$config"
+exec "$bin" "${configs[@]}"

@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS decisions (
 	decision VARCHAR(32) NOT NULL,
 	note TEXT,
 	decided_at VARCHAR(32) NOT NULL,
+	reason_code VARCHAR(32),
+	cv_version INTEGER,
+	fit_total FLOAT,
+	features JSONB,
 	PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS ix_decisions_job_id ON decisions (job_id);
@@ -104,6 +108,8 @@ CREATE TABLE IF NOT EXISTS llm_calls (
 	attempt INTEGER NOT NULL,
 	called_at VARCHAR(32) NOT NULL,
 	trace_id VARCHAR(32),
+	cached_tokens INTEGER,
+	reasoning_tokens INTEGER,
 	PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS ix_llm_calls_called_at ON llm_calls (called_at);

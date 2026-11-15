@@ -17,6 +17,7 @@ import type {
   Settings,
   SettingsResponse,
   SiteOption,
+  SuggestionList,
 } from "./types";
 
 export class ApiRequestError extends Error {
@@ -69,13 +70,18 @@ async function upload<T>(path: string, file: File): Promise<T> {
 }
 
 export type { Estimate };
-export type Decision = { action: "approve" | "snooze" | "reject" | "unhide"; days?: 1 | 3 | 7; reason?: string; force?: boolean };
+/** MATCH-11: the reject dialog's chips, as the codes WERA learns from. Free text goes in `reason`. */
+export type ReasonCode = "wrong_level" | "wrong_location" | "not_my_field" | "pay_too_low" | "applied_elsewhere";
+export type Decision = { action: "approve" | "snooze" | "reject" | "unhide"; days?: 1 | 3 | 7; reasonCode?: ReasonCode; reason?: string; force?: boolean };
 
 export const api = {
   decide: (jobId: string, d: Decision) => call<ScoredJob>(`/api/jobs/${jobId}/decision`, { method: "POST", body: d }),
   /** SRCH-25: the person opened this job, so its New tag goes. */
   markSeen: (jobId: string) => call<{ seen: boolean }>(`/api/jobs/${encodeURIComponent(jobId)}/seen`, { method: "POST", body: {} }),
   markAllSeen: () => call<{ marked: number }>("/api/jobs/seen", { method: "POST", body: {} }),
+  /** MATCH-13: a profile change the person's decisions point at — accepted, or not offered again. */
+  acceptSuggestion: (id: string) => call<SearchProfile>(`/api/learning/suggestions/${encodeURIComponent(id)}/accept`, { method: "POST", body: {} }),
+  dismissSuggestion: (id: string) => call<SuggestionList>(`/api/learning/suggestions/${encodeURIComponent(id)}/dismiss`, { method: "POST", body: {} }),
   /** SRCH-27: what "Clear jobs" would remove, and then removing it. A testing control. */
   clearPreview: () => call<JobsCleared>("/api/jobs/clear"),
   clearJobs: () => call<JobsCleared>("/api/jobs/clear", { method: "POST", body: {} }),

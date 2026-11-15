@@ -52,11 +52,14 @@ tasks:
   # The retry scales both now, but the setting stands on its own merits: there is nothing here
   # to reason about, because which line is a date is read, not deduced.
   cv.parse: { tier: writing, max_tokens: 6000, reasoning: "off" }
-  job.normalise: { tier: fast, max_tokens: 1200, reasoning: "off" }
+  # 1800, up from 1200: on 13 Nov two reads stopped at exactly 1,200 tokens and were retried.
+  # Only the tokens used are billed, so a ceiling with room costs nothing and saves the retry.
+  job.normalise: { tier: fast, max_tokens: 1800, reasoning: "off" }
   email.extract: { tier: fast, max_tokens: 1500, reasoning: "off" }
-  # 900, up from 600: each term now carries a category, and up to 8 soft skills ride along in
-  # their own bucket (`ExtractedKeyword`). 600 was sized for bare terms.
-  keywords.extract: { tier: fast, max_tokens: 900, reasoning: "off" }
+  # 1500, up from 900 (and 600 before that): each term carries a category, and up to 8 soft
+  # skills ride along in their own bucket (`ExtractedKeyword`). On 13 Nov 4 of 21 calls stopped at
+  # exactly 900 tokens on 1,800-token ads and were retried; the room is free unless it's used.
+  keywords.extract: { tier: fast, max_tokens: 1500, reasoning: "off" }
   # The job-description rubric, once per drafted pack (`nodes.analyse`). Short quotes and a few
   # labels; no thinking, because what it does is find sentences, not reason about them.
   job.analyse: { tier: fast, max_tokens: 900, reasoning: "off" }
@@ -67,11 +70,12 @@ tasks:
   # knowing that a German posting says "Softwareentwickler (m/w/d)" is recall, but choosing a
   # board for a trainee solicitor over a graduate board is judgement. Once per CV × profile.
   strategist.plan: { tier: scoring, max_tokens: 2400, reasoning: low }
-  # Measured on qwen3.8-27b against real 6–10k-char postings: a reply takes 1,200–1,500 tokens
-  # including its thinking, but how long it thinks swings call to call, and 1,200 + headroom cut
-  # off seven of eight jobs. 2,400 clears the observed range, and a cut-off reply retries once
-  # with double the room (gateway.TRUNCATION_RETRY_FACTOR). Only generated tokens are billed.
-  fit.score: { tier: scoring, max_tokens: 2400, reasoning: low }
+  # `reasoning: off` since 14 Nov, A/B on the golden set (`wera eval --set
+  # fit.score.reasoning=…`, 20 ads): `low` agreed with the hand scores on 42.1% (one ad unscored:
+  # its thinking overran even the 3,600-token retry, as it did on 3 calls of that run) for $0.079
+  # and 6 minutes; `off` agreed on 55.0%, all 20 scored, for $0.017 and 2 minutes. The thinking
+  # was most of a reply's 1,200–1,500 tokens and bought no agreement. 2,400 stays as headroom.
+  fit.score: { tier: scoring, max_tokens: 2400, reasoning: "off" }
   # The select tier, and 700 tokens rather than 4,500 — because the reply is now a list of ids.
   #
   # This was `{ tier: writing, max_tokens: 4500, reasoning: "on" }`, and it was the single
@@ -159,6 +163,60 @@ max_credits_per_week: 600
 # a four-board profile — and later tiers are only sent when a search is short of 8 jobs.
 max_serper_queries: 30
 
+# SRCH-33: what Redis remembers in front of each provider, shared by every search and person.
+# An answer from here is free and never counted against a cap. `daily` counts every run (UTC
+# days); a search stops at `stop_at` of it so the scheduled runs keep the rest. Serper's 150 is
+# five full searches; raise it with the plan you're on. `wera providers status` shows where each
+# provider stands.
+guard:
+  cache_minutes: 180 # 3h: the same query twice in an afternoon is free
+  lock_seconds: 15 # one caller asks; the others wait up to this for its answer
+  breaker:
+    failures: 3 # inside window_seconds, each after its own retries; a final 429 opens it at once
+    window_seconds: 60
+    open_seconds: 60
+  daily:
+    serper: 150
+  stop_at: 0.8
+
+# SRCH-31/32: the job APIs, asked before Serper's first tier (they are "tier 0"). Keys go in
+# .env.local. `terms_reviewed_on` IS THE GATE, as in sites.yaml: null means WERA never calls it.
+# Set it to the date you read that API's terms. `max_searches`: searches a search may send it (one
+# per title, best first); `max_queued`: its postings a search may queue, kept small so the open
+# web and the reviewed boards still get their share of the 8–12.
+#
+# * Reed (UK) and USAJOBS (US federal) give the full text, read from the API.
+# * Adzuna and Careerjet give a snippet behind a tracked link that WERA never opens; each lead's
+#   original posting is found with one Serper search (at most 10 a search, on their own cap).
+#   Adzuna's terms: an "Adzuna" label linked on each job it found (the card shows one), and
+#   commercial use needs a licence — a blocker before accounts. Careerjet needs the person's IP
+#   and browser on every call, so scheduled runs skip it, and its key works only from the IPs
+#   registered on the publisher account.
+feeds:
+  reed:
+    enabled: true
+    terms_reviewed_on: 2026-11-13
+    max_searches: 3
+    # 3, down from 6 (14 Nov): on 13 Nov the Reed jobs WERA queued were almost all eFinancialCareers
+    # reposts, and the 3 scored came in at 2.0–3.6 of 10. Its graduate filter is loose (AECOM
+    # was 49 of 71 fresh results), so fewer places for it leaves more for sources that score.
+    max_queued: 3
+  usajobs:
+    enabled: true
+    terms_reviewed_on: 2026-11-13
+    max_searches: 3
+    max_queued: 6
+  adzuna:
+    enabled: true
+    terms_reviewed_on: 2026-11-13
+    max_searches: 3
+    max_queued: 4
+  careerjet:
+    enabled: true
+    terms_reviewed_on: 2026-11-13
+    max_searches: 2
+    max_queued: 4
+
 # SRCH-10: a short-term cache in front of Firecrawl, so a run doesn't pay for the last one's
 # answers again. `known_urls` (SRCH-05) already stops a job being re-scraped; this covers the two
 # things it can't — the searches themselves, which are paid for before their results are
@@ -196,6 +254,12 @@ discovery_max_queries: 8
 # every "score more" — batching below changes *when* a job is paid for, never how many are.
 max_scored_per_day: 40
 
+# How many jobs are scored at once. Scoring sets a search's length — 12 s a job, one after
+# another, was 4 of a search's 11 minutes on 13 Nov — and it costs the same in parallel. Three,
+# not more: the weekly budget is checked before each call, so jobs in flight can overshoot it by
+# up to two calls. SQLite (the unit tests) always scores one at a time: one writer, fixed order.
+scoring_workers: 3
+
 # SRCH-26: how many jobs one search surfaces. It stops reading postings once `max` are scored,
 # and below `min` it goes on to the Strategist's next tier of queries until it gets there or a cap
 # stops it. The postings it found and didn't read wait in the queue for "Find more", so the
@@ -204,6 +268,19 @@ max_scored_per_day: 40
 surface:
   min: 8
   max: 12
+
+# SRCH-30: hosts an open search often returns, with a posting path on each. Their robots.txt is
+# asked before a search (weekly, cached in Redis), alongside every board the search would query,
+# and a host that refuses WERA is left out: its `site:` queries dropped, and `-site:` added to the
+# open ones. Listed here is only what to ask about — the robots.txt decides. Checked 13 Nov:
+# Indeed and ZipRecruiter (US) disallow their posting paths, and Milkround and CWJobs answer
+# their robots.txt with a 403; Totaljobs allows its postings, so it stays in.
+unreadable_hint:
+  indeed.com: /viewjob?jk=1
+  ziprecruiter.com: /c/x/Job/x/-in-x?jid=1
+  milkround.com: /job/x/x-job1
+  cwjobs.co.uk: /job/x/x-job1
+  totaljobs.com: /job/x/x-job1
 
 # LTR-04: phrases that make a cover letter read like a form. A hit triggers one rewrite, and the
 # phrase is quoted back so the model knows which words to lose rather than guessing at "be less

@@ -17,17 +17,17 @@ import { useToast } from "@/lib/ui/Toast";
 const LABELS: Record<string, string> = {
   titles: "Target titles",
   skills: "Top skills",
-  locations: "Locations",
+  locations: "Cities",
   seniority: "Seniority",
   exclude: "Excluding",
-  remote: "Remote",
-  recency: "Posted within",
 };
 
 const isList = (d: ListDiff | ScalarDiff): d is ListDiff => "added" in d;
 
-/** The fields the model proposes. `sites` and `channels` stay the person's own (see the agent). */
-type MergeableField = "titles" | "skills" | "locations" | "seniority" | "exclude" | "remote" | "recency";
+/** The fields the model proposes. Where, remote, recency, boards and channels stay the person's
+ *  own, and come back from the agent unchanged — except `locations`, offered only to a profile
+ *  that names nowhere (`Store.generate_profile`). */
+type MergeableField = "titles" | "skills" | "locations" | "seniority" | "exclude";
 
 type Choice = "mine" | "new";
 
@@ -52,10 +52,8 @@ export function RegenerateDialog({ result, current, onClose }: { result: Profile
         locations: pick("locations"),
         seniority: pick("seniority"),
         exclude: pick("exclude"),
-        remote: pick("remote"),
-        recency: pick("recency"),
       });
-      toast({ tone: "ok", message: "Search profile saved. The next search uses it." });
+      toast({ tone: "ok", message: fields.length ? "Search profile saved. The next search uses it." : "Profile marked up to date with your CV." });
       router.refresh();
       onClose();
     } catch (err) {
@@ -72,14 +70,17 @@ export function RegenerateDialog({ result, current, onClose }: { result: Profile
       onClose={onClose}
       size="lg"
       title="Regenerate from your CV"
-      description={`Proposed from master CV v${result.cvVersion}. Choose what to take, field by field. Nothing is saved until you press Save.`}
+      description={`Proposed from master CV v${result.cvVersion}. Choose what to take, field by field — where you search, remote and how recent stay as you set them. Nothing is saved until you press Save.`}
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={save} busy={saving} disabled={!fields.length}>
-            Save profile
+          {/* With nothing to change, saving still records the CV version it was checked against —
+              which is the only thing that clears the "this profile came from v4" banner. The
+              button used to be disabled here, so that banner could never be dismissed. */}
+          <Button onClick={save} busy={saving}>
+            {fields.length ? "Save profile" : "Mark up to date"}
           </Button>
         </>
       }
@@ -104,8 +105,8 @@ export function RegenerateDialog({ result, current, onClose }: { result: Profile
                         aria-checked={choice === option}
                         onClick={() => setChoices((c) => ({ ...c, [field]: option }))}
                         className={cn(
-                          "min-h-8 rounded-[8px] px-3 text-small font-semibold",
-                          choice === option ? "bg-white text-forest-900 shadow-sm" : "text-ink-2 hover:text-ink",
+                          "min-h-8 rounded-none px-3 text-small font-semibold pointer-coarse:min-h-11",
+                          choice === option ? "bg-surface text-forest-900 shadow-sm" : "text-ink-2 hover:text-ink",
                         )}
                       >
                         {option === "mine" ? "Keep mine" : "Use new"}
@@ -134,7 +135,11 @@ export function RegenerateDialog({ result, current, onClose }: { result: Profile
                         ))}
                       </ChipList>
                     ) : null}
-                    {change.kept.length ? <p className="text-small text-ink-2">{change.kept.length} unchanged</p> : null}
+                    {change.kept.length ? (
+                      <p className="text-small text-ink-2">
+                        Unchanged: {change.kept.join(", ")}
+                      </p>
+                    ) : null}
                   </div>
                 ) : (
                   <p className="mt-3 text-[15px]">

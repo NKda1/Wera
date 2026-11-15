@@ -40,5 +40,6 @@ export function Markdown({ source }: { source: string }) {
     }
   }
   flush();
-  return <div className="text-[14px] leading-relaxed text-ink">{blocks}</div>;
+  // A pasted URL is one unbroken word; without this it ran past the card on a phone.
+  return <div className="text-[14px] leading-relaxed text-ink [overflow-wrap:anywhere]">{blocks}</div>;
 }

@@ -632,6 +632,9 @@ class PackRow:
     # The share of what the CV can back that the pack covers — the half of coverage WERA is
     # accountable for, and the one `PackReport.passed` holds to the threshold.
     backed_coverage: float = 0.0
+    # ATSC-07: the 0–100 score and the best this CV could reach on the same post.
+    ats_score: float = 0.0
+    best_score: float = 0.0
     pages: float = 0.0
     letter_words: int = 0
     seconds: float = 0.0
@@ -695,6 +698,16 @@ class PackReport:
         return sum(r.backed_coverage for r in done) / len(done) if done else 0.0
 
     @property
+    def mean_ats_score(self) -> float:
+        done = self.completed
+        return sum(r.ats_score for r in done) / len(done) if done else 0.0
+
+    @property
+    def mean_best_score(self) -> float:
+        done = self.completed
+        return sum(r.best_score for r in done) / len(done) if done else 0.0
+
+    @property
     def guard_pass_rate(self) -> float:
         done = self.completed
         return 100.0 * sum(1 for r in done if r.guard_pass) / len(done) if done else 0.0
@@ -726,6 +739,8 @@ class PackReport:
             "meanBullets": round(self.mean_bullets, 1),
             "meanAtsCoverage": round(self.mean_coverage, 3),
             "meanBackedCoverage": round(self.mean_backed_coverage, 3),
+            "meanAtsScore": round(self.mean_ats_score, 1),
+            "meanBestScore": round(self.mean_best_score, 1),
             "failures": self.failures,
             "costUsd": round(self.cost_usd, 4),
             "calls": self.calls,
@@ -808,6 +823,8 @@ def run_packs(*, model: str | None = None, cv_path: Path | None = None, ads: int
                     row.guard_pass = pack.cv.guard.pass_ and pack.letter.guard.pass_
                     row.ats_coverage = pack.ats.coverage
                     row.backed_coverage = pack.ats.backed_coverage
+                    row.ats_score = pack.ats.score or 0.0
+                    row.best_score = pack.ats.best_score or 0.0
                     row.pages = pack.ats.pages
                     row.letter_words = pack.letter.word_count
             except _Skip:
@@ -869,6 +886,7 @@ def packs_as_markdown(report: PackReport) -> str:
         f"| Mean bullets selected | {report.mean_bullets:.1f} |",
         f"| Mean ATS coverage | {report.mean_coverage:.0%} |",
         f"| Mean backed coverage | {report.mean_backed_coverage:.0%} |",
+        f"| Mean ATS score | {report.mean_ats_score:.1f} of 100 (best this CV could reach: {report.mean_best_score:.1f}) |",
         f"| Model calls | {report.calls} |",
         f"| Cost | ${report.cost_usd:.4f} |",
         "",

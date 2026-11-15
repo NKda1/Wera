@@ -299,6 +299,47 @@ class LifecycleConfig(BaseModel):
     archive_after_days: int = 30
 
 
+class BreakerConfig(BaseModel):
+    """SRCH-33: when a provider that keeps failing is left alone for a while, by every caller."""
+
+    # This many failures (a rate limit, a server error, a timeout — each after its own retries)
+    # inside the window opens the breaker. A 429 opens it at once: the provider said "stop".
+    failures: int = 3
+    window_seconds: int = 60
+    open_seconds: int = 60
+
+
+class GuardConfig(BaseModel):
+    """SRCH-33: what WERA's Redis remembers in front of a paid or rate-limited provider."""
+
+    # A query's answer, shared by every search that asks it. Shorter than SRCH-10's six hours
+    # because this one is keyed on the query alone, not the run: three hours means the same
+    # question asked twice in an afternoon is free, and anything posted since is found by evening.
+    cache_minutes: int = 180
+    # How long a caller that is fetching an answer holds it for the others asking the same thing.
+    # Longer than one provider call with its retries, so the waiters rarely give up and pay too.
+    lock_seconds: int = 15
+    breaker: BreakerConfig = BreakerConfig()
+    # Units a day per provider (Serper: queries answered), every run and person counted. A search
+    # stops asking at `stop_at` of it, leaving the rest for the scheduled runs. Unlisted: no limit.
+    daily: dict[str, int] = {}
+    stop_at: float = 0.8
+
+
+class FeedConfig(BaseModel):
+    """SRCH-31/32: one job API. `terms_reviewed_on` is the gate, as it is for a board in sites.yaml:
+    `null` means WERA never calls it, whatever else is set."""
+
+    enabled: bool = True
+    terms_reviewed_on: date | None = None
+    # Searches one search may send to it, one per title (and city). Reading a posting's full text
+    # (Reed's details call) is bounded by `max_queued` instead: only queued postings are read.
+    max_searches: int = 3
+    # Its postings one search may queue. Small on purpose: the APIs are asked before Serper, and a
+    # search should still read the open web and the reviewed boards, not one API's results only.
+    max_queued: int = 6
+
+
 class WeraConfig(BaseModel):
     models: Models
     fallbacks: dict[str, list[str]] = {}
@@ -306,6 +347,8 @@ class WeraConfig(BaseModel):
     tasks: dict[str, Task]
     weights: Weights
     crawl_cache: CrawlCacheConfig = CrawlCacheConfig()
+    guard: GuardConfig = GuardConfig()
+    feeds: dict[str, FeedConfig] = {}
     lifecycle: LifecycleConfig = LifecycleConfig()
     max_queries: int = 20
     max_pages: int = 30
@@ -318,9 +361,14 @@ class WeraConfig(BaseModel):
     # SRCH-20: the most Serper queries one search may send, across every tier the 8–12 rule asks for.
     max_serper_queries: int = 30
     max_scored_per_day: int = 40
+    # Jobs scored at once (`intake.judge`); 1 on SQLite whatever this says.
+    scoring_workers: int = 3
     # SRCH-26: 8–12 jobs a search. Replaces MATCH-05's two batches of eight, which scored sixteen
     # whether anyone wanted them or not; `max_scored_per_day` is still the day's ceiling.
     surface: SurfaceConfig = SurfaceConfig()
+    # SRCH-30: hosts an open search often returns, each with a posting path there, whose robots.txt
+    # is asked before a search alongside the boards'. Those that refuse it are left out.
+    unreadable_hint: dict[str, str] = {}
 
     @property
     def scored_per_run(self) -> int:

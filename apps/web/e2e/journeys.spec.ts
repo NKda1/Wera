@@ -18,41 +18,46 @@ test.beforeEach(async ({ page }) => {
 test("J2: search, filter and approve from the shortlist", async ({ page }) => {
   await page.goto("/jobs");
   await expect(page.getByRole("heading", { name: "Today's shortlist" })).toBeVisible();
-  await expect(cards(page)).toHaveCount(12);
+  // LIFE-03: two seeded jobs were first seen over a week ago and never confirmed open, so they wait
+  // under "Show possibly closed" rather than on the shortlist.
+  await expect(cards(page)).toHaveCount(10);
+  await expect(page.getByRole("link", { name: "Show possibly closed" })).toBeVisible();
   await expect(page.getByText("8.6", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Search now" }).click();
   const dialog = page.getByRole("dialog", { name: "Search now" });
-  await expect(dialog.getByText(/20 queries/)).toBeVisible();
+  await expect(dialog.getByText(/Google searches to start/).first()).toBeVisible();
   await dialog.getByRole("button", { name: "Run search" }).click();
   await expect(page.getByRole("heading", { name: "Running your search…" })).toBeVisible();
   await expect(page.getByText("Search finished: 2 new jobs added.")).toBeVisible();
-  await expect(cards(page)).toHaveCount(14);
+  await expect(cards(page)).toHaveCount(12);
 
-  await page.getByRole("button", { name: "Score 8+" }).click();
+  await page.getByRole("group", { name: "Fit" }).getByRole("button", { name: /^8\+/ }).click();
   await expect(cards(page)).toHaveCount(2);
   await page.getByRole("button", { name: /^All/ }).click();
 
   const fernhill = page.getByRole("region", { name: "ML Engineer, Graduate" });
   await fernhill.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByText("Approved ML Engineer, Graduate. Drafting your pack…")).toBeVisible();
-  await expect(cards(page)).toHaveCount(13);
+  await expect(cards(page)).toHaveCount(11);
 
   const harbour = page.getByRole("region", { name: "Graduate Data Engineer" });
   await harbour.getByRole("button", { name: "Snooze" }).click();
   await page.getByRole("menuitem", { name: "3 days" }).click();
-  await expect(cards(page)).toHaveCount(12);
+  await expect(cards(page)).toHaveCount(10);
 });
 
 test("Urgency grouping files jobs by how old the posting is, and hedges where the date is a guess", async ({ page }) => {
   await page.goto("/jobs");
   const region = page.getByRole("region", { name: "Shortlisted jobs" });
+  // The route streams behind a skeleton (`app/jobs/loading.tsx`), so wait for the list itself.
+  await expect(region.getByRole("heading", { level: 3 }).first()).toBeVisible();
   const cardCount = await region.getByRole("heading", { level: 3 }).count();
 
   // Default: one flat list, no group headers.
   await expect(region.getByRole("heading", { level: 2 })).toHaveCount(0);
 
-  await page.getByLabel("Sort").selectOption("urgency");
+  await page.getByRole("radiogroup", { name: "Sort" }).getByRole("radio", { name: "By urgency" }).click();
   const groups = region.getByRole("heading", { level: 2 });
   await expect(groups.first()).toHaveText("Today and yesterday");
   // Grouping is a view, not a filter: every job is still on the page, just under a header.
@@ -74,7 +79,9 @@ test("J3: review the drafted pack, approve it and track it", async ({ page }) =>
   await row.click();
 
   await expect(page.getByText("Gate 2 · needs your approval")).toBeVisible();
-  await expect(page.getByText("86%")).toBeVisible();
+  // Coverage moved 86% → 85% on 14 Nov with the synonym groups and the post's spelling on the skills line.
+  await expect(page.getByText("85%")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "ATS score" })).toBeVisible(); // ATSC-07
   await expect(page.getByText("Docker", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Download Tailored CV as PDF" })).toBeDisabled();
 

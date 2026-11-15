@@ -26,7 +26,8 @@ export function ReviewList({ apps }: { apps: Item[] }) {
   // Drafts advance on the server; refresh until they land.
   useEffect(() => {
     if (!drafting.length) return;
-    const t = setInterval(() => router.refresh(), 900);
+    // Every 2 s, not every 0.9: each refresh re-reads every pack, and a pack takes ~20 s to draft.
+    const t = setInterval(() => router.refresh(), 2000);
     return () => clearInterval(t);
   }, [drafting.length, router]);
 
@@ -40,7 +41,7 @@ export function ReviewList({ apps }: { apps: Item[] }) {
         <Section title="Drafting">
           {drafting.map((a) => (
             <Card key={a.id} className="flex flex-wrap items-center justify-between gap-4 p-5">
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1 basis-64">
                 <h3 className="text-h2">{a.job.title}</h3>
                 <p className="text-small text-ink-2">
                   {a.job.company} · {formatLocation(a.job)}
@@ -124,7 +125,9 @@ function PackRow({ app, primary }: { app: Item; primary?: boolean }) {
           {app.coverage != null ? ` · ATS ${pct(app.coverage)}` : ""}
         </p>
       </div>
-      <ButtonLink href={`/review/${app.id}`} variant={primary ? "primary" : "secondary"}>
+      {/* Its own row on a phone: beside the text, the title and meta got ~100px and broke into
+          five lines, because a `flex-1` text column never lets the row wrap. */}
+      <ButtonLink href={`/review/${app.id}`} variant={primary ? "primary" : "secondary"} className="basis-full sm:basis-auto">
         {primary ? "Review pack" : "Open pack"}
       </ButtonLink>
     </Card>

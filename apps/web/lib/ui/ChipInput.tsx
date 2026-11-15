@@ -53,7 +53,7 @@ export function ChipInput({
       </div>
       <div
         className={cn(
-          "flex flex-wrap items-center gap-1.5 rounded-control border bg-white px-2 focus-within:border-forest-700 focus-within:ring-2 focus-within:ring-forest-700/20",
+          "flex flex-wrap items-center gap-1.5 rounded-control border bg-surface px-2 focus-within:border-forest-700 focus-within:ring-2 focus-within:ring-forest-700/20",
           compact ? "min-h-9 py-1" : "min-h-11 py-1.5",
           error ? "border-red-700" : "border-line",
         )}
@@ -62,15 +62,15 @@ export function ChipInput({
           <span
             key={v}
             className={cn(
-              "inline-flex items-center gap-1 rounded-full py-0.5 pr-1 pl-2.5 text-small",
-              variant === "mint" ? "bg-mint-100 text-ink" : "border border-line bg-white text-ink-2",
+              "inline-flex max-w-full items-center gap-1 rounded-none py-0.5 pr-1 pl-2.5 text-small [overflow-wrap:anywhere]",
+              variant === "mint" ? "bg-mint-100 text-ink" : "border border-line bg-surface text-ink-2",
             )}
           >
             {v}
             <button
               type="button"
               onClick={() => onChange(value.filter((x) => x !== v))}
-              className="inline-flex size-6 items-center justify-center rounded-full hover:bg-mint-200"
+              className="inline-flex size-6 items-center justify-center rounded-none hover:bg-mint-200 pointer-coarse:size-9"
               aria-label={`Remove ${v}`}
             >
               <X className="size-3.5" />
@@ -94,7 +94,7 @@ export function ChipInput({
           placeholder={full ? "Limit reached" : placeholder}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? `${id}-err` : hint ? `${id}-hint` : undefined}
-          className="min-w-28 flex-1 bg-transparent px-1.5 py-1 text-[15px] outline-none placeholder:text-ink-2/70 focus-visible:outline-none"
+          className="min-w-28 flex-1 bg-transparent px-1.5 py-1 text-[16px] outline-none sm:text-[15px] placeholder:text-ink-2/70 focus-visible:outline-none"
         />
       </div>
       {error ? (

@@ -36,6 +36,7 @@ class TestJsonLd:
             "location": "London, United Kingdom",
             "remote": "",
             "postedAt": "2026-10-20",
+            "closesAt": "",  # LIFE-02: this posting gives no validThrough
             "description": "We build guardrails.\n- Python\n- FastAPI",
         }
 
@@ -154,6 +155,50 @@ class TestTheLadderOrder:
         card, how = extract.card("https://board.example/jobs/1", parse=lambda t: asked.append(t) or None)
         assert card is None and how == "unreadable"
         assert asked == []
+
+
+class TestASitesMenusAreNotTheDescription:
+    """18 of 52 Gradcracker descriptions opened on the site's menus, an employer hub's tabs and a
+    breadcrumb — ~48 short lines, read off a rendered page by the model rung, ahead of the job."""
+
+    MENU = ["About Us", "The 5-Year Club", "For Employers", "Employer Dashboard", "New to Gradcracker?",
+            "For Universities", "Contact Us", "Login", "Register", "Graduate Jobs", "Placements/Internships",
+            "Degree Apprenticeships", "Company Hubs A-Z", "Hub Home", "Gradcracker Home", "- Software Engineer"]  # fmt: skip
+    JOB = "We're looking for Software Engineers who want to help us design and build the systems that run the firm."
+
+    def page(self, menu: list[str]) -> str:
+        layout = "<div> </div><li></li>" * 30  # what came through as hundreds of blank and "- " lines
+        items = "".join(f"<div>{m}</div>{layout}" for m in menu)
+        return f"<html><head><title>Software Engineer | Jane Street | Gradcracker</title></head><body>{items}<p>{self.JOB}</p>{'<p>More about the role and the team you would join here.</p>' * 6}<div>Deadline</div><div>Ongoing</div></body></html>"
+
+    def read(self, monkeypatch, html: str) -> tuple[dict, list[str]]:
+        monkeypatch.setattr(extract, "_get", lambda _url: html)
+        asked: list[str] = []
+        card, how = extract.card("https://www.gradcracker.com/hub/820/jane-street/graduate-job/82389/software-engineer",
+                                 parse=lambda t: asked.append(t) or {"title": "Software Engineer", "company": "Jane Street"})  # fmt: skip
+        assert how == "model"
+        return card, asked
+
+    def test_the_description_starts_at_the_job(self, monkeypatch):
+        card, asked = self.read(monkeypatch, self.page(self.MENU))
+        assert card["description"].startswith(self.JOB)
+        assert "Deadline\nOngoing" in card["description"]  # what follows the job is kept
+        assert asked[0].startswith(self.JOB)  # and the model's 12,000 characters go on the job
+
+    def test_a_few_facts_above_the_job_are_kept(self, monkeypatch):
+        card, _ = self.read(monkeypatch, self.page(["Salary", "£32,000", "Location", "London"]))
+        assert "Salary\n\n£32,000\n\nLocation\n\nLondon\n\n" + self.JOB in card["description"]
+
+    def test_a_page_title_is_not_mistaken_for_the_first_sentence(self):
+        from wera_agent.sources.ats_feeds import without_leading_chrome
+
+        title = "Broadcast and Media Systems Engineer Degree Apprenticeship - Level 6, Glasgow | BBC | Gradcracker"
+        assert without_leading_chrome("\n".join([title, *self.MENU, self.JOB])) == self.JOB
+
+    def test_layout_lines_are_gone_from_any_page_read_as_text(self):
+        from wera_agent.sources.ats_feeds import html_to_text
+
+        assert html_to_text("<div>One</div><div> </div><li></li><div> </div><div>Two</div>") == "One\n\nTwo"
 
 
 class TestAPageThatIsntAJob:

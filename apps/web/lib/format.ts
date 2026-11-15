@@ -47,9 +47,11 @@ export function formatPostedAge(job: Pick<Job, "postedAt" | "postedPrecision">, 
  * checked a job it never looked at would be a small lie told on every card.
  */
 export function formatLiveness(
-  job: Pick<ScoredJob, "liveness" | "lastConfirmedAt" | "closedAt">,
+  job: Pick<ScoredJob, "liveness" | "lastConfirmedAt" | "closedAt"> & Partial<Pick<ScoredJob, "possiblyClosed">>,
   now: Date = new Date(),
 ): string {
+  // LIFE-03: on the "Possibly closed" list, say why it is there before anything else.
+  if (job.possiblyClosed && job.liveness !== "gone") return "not confirmed open in over a week";
   if (job.liveness === "gone") {
     const when = formatAge(job.closedAt, now);
     return when === "date unknown" ? "no longer listed" : `no longer listed · closed ${when}`;
@@ -75,9 +77,13 @@ const ORIGIN: Record<Channel, string> = {
 };
 
 /** Where a job came from and when: "Search 11 Nov". Empty for a job saved before tagging. */
-export function formatOrigin(job: Pick<Job, "foundBy">): string {
+/** SRCH-31/32: the job APIs, as a job's origin names them ("Search 12 Nov · via Reed"). */
+export const VIA: Record<string, string> = { reed: "Reed", usajobs: "USAJOBS", adzuna: "Adzuna", careerjet: "Careerjet" };
+
+export function formatOrigin(job: Pick<Job, "foundBy" | "via">): string {
   if (!job.foundBy) return "";
-  return `${ORIGIN[job.foundBy.channel] ?? "Found"} ${formatDate(job.foundBy.at)}`;
+  const via = job.via ? ` · via ${VIA[job.via] ?? job.via}` : "";
+  return `${ORIGIN[job.foundBy.channel] ?? "Found"} ${formatDate(job.foundBy.at)}${via}`;
 }
 
 /** The urgency groups, in the order the Jobs screen shows them. Mirrors `domain.scoring.URGENCY`. */
@@ -181,4 +187,25 @@ export function slug(s: string): string {
 
 export function plural(n: number, word: string, pluralWord = `${word}s`): string {
   return `${n} ${n === 1 ? word : pluralWord}`;
+}
+
+/** A skill's place on the Upskills page, so a pack's "Missing" list links straight to it (UPSK-04). */
+export function upskillAnchor(term: string): string {
+  return `skill-${term.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+}
+
+/** LIFE-02: when applications close, when a source said. Empty without a date, or once it has passed
+ *  (the job is closed by then). */
+export function formatClosing(job: Pick<ScoredJob, "closesAt">, now: Date = new Date()): string {
+  if (!job.closesAt) return "";
+  const days = Math.round((Date.parse(`${job.closesAt.slice(0, 10)}T23:59:59`) - now.getTime()) / 86_400_000);
+  if (days < 0) return "";
+  if (days === 0) return "closes today";
+  if (days === 1) return "closes tomorrow";
+  return days <= 14 ? `closes in ${days} days` : `closes ${formatDate(job.closesAt)}`;
+}
+
+/** LIFE-04: open two months or more — often a standing advert rather than a vacancy. */
+export function formatEvergreen(job: Pick<ScoredJob, "evergreen">): string {
+  return job.evergreen ? "open 60+ days — may be a standing advert" : "";
 }

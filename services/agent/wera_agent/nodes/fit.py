@@ -111,6 +111,24 @@ def keywords_for(session: Session, job: Job, cv: MasterCV) -> tuple[list[JobKeyw
     return keywords, culture[:CULTURE_LIMIT]
 
 
+def known_keywords(session: Session, job: Job) -> tuple[list[JobKeyword], list[str]] | None:
+    """The keywords a fit report already holds for this very post, when it has any.
+
+    What a post asks for is a fact about the post: `keywords.extract` reads the ad alone (the CV
+    rides along only as validation context, and the validator checks against the post). So a
+    re-score after a CV edit, or with another model, reuses them instead of paying to read the ad
+    again — the old report's `job_hash` says whether the ad is the one it read.
+    """
+    row = session.get(FitReportRow, job.id)
+    if row is None or (row.job_hash or "") != job_hash(job):
+        return None
+    stored = FitEvidence.model_validate(row.evidence)
+    if not stored.keywords:
+        return None
+    logfire.info("Keywords for {job_id} reused from its last report", job_id=job.id)
+    return in_post(stored.keywords, job.description_md), stored.culture
+
+
 def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidence:
     """One job, judged by the scoring tier. The total is not asked for and not accepted."""
     verdict = structured(
@@ -120,7 +138,7 @@ def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidenc
         {"cv": cv_text(cv), "job": _job_block(job)},
         context={"cv": cv},
     )
-    keywords, culture = keywords_for(session, job, cv) if job.description_md else ([], [])
+    keywords, culture = known_keywords(session, job) or (keywords_for(session, job, cv) if job.description_md else ([], []))
     return FitEvidence(
         core=verdict.core,
         adjacent=verdict.adjacent,

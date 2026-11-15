@@ -45,7 +45,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
       } catch {
         /* keep polling */
       }
-    }, 700);
+    }, 1500);
     return () => clearInterval(t);
   }, [app.status, app.id, router]);
 
@@ -85,9 +85,11 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
     await run(`line-${bulletId}`, () => api.editDocument(`${app.id}.cv`, { target: action, bulletId }), action === "add" ? `Added ${bulletId} back.` : `Removed ${bulletId}. It's listed under "Left out".`);
   };
 
+  // `@container`: laid out by the width this screen has. Keyed to `lg:`, the checks rail arrived
+  // with the sidebar at 1024px and left the document ~316px; it now joins at 896px of content.
   return (
-    <div className="mx-auto max-w-[1180px]">
-      <Link href="/review" className="inline-flex min-h-8 items-center gap-1.5 text-small font-semibold text-forest-700 hover:text-forest-900">
+    <div className="@container mx-auto max-w-[1180px]">
+      <Link href="/review" className="inline-flex min-h-8 items-center gap-1.5 text-small font-semibold text-forest-700 hover:text-forest-900 pointer-coarse:min-h-11">
         <ArrowLeft className="size-4" aria-hidden="true" />
         Review
       </Link>
@@ -101,23 +103,35 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
             {app.status === "drafting" ? "drafting now" : `drafted ${formatAgo(draftedAt)}`}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        {/* On a narrow screen the primary action comes first and full width; it used to land
+            alone on a second row under Discard. First in the markup too, so it is first to tab
+            to; `@xl:order-last` puts it back at the end of the row where there is room. */}
+        <div className="flex flex-wrap gap-2 @max-xl:w-full">
           {editable ? (
             <>
-              <Button variant="ghost" onClick={() => setDiscarding(true)}>
+              <Button
+                busy={busy === "approve"}
+                onClick={() => run("approve", () => api.approvePack(app.id), "Pack approved. Downloads are unlocked.")}
+                className="@max-xl:w-full @xl:order-last"
+              >
+                Approve pack
+              </Button>
+              <Button variant="ghost" onClick={() => setDiscarding(true)} className="@max-xl:flex-1">
                 Discard
               </Button>
-              <Button variant="secondary" onClick={() => setAsking(true)}>
+              <Button variant="secondary" onClick={() => setAsking(true)} className="@max-xl:flex-1">
                 Request changes
-              </Button>
-              <Button busy={busy === "approve"} onClick={() => run("approve", () => api.approvePack(app.id), "Pack approved. Downloads are unlocked.")}>
-                Approve pack
               </Button>
             </>
           ) : app.status === "approved" ? (
             <>
               {app.job.applyUrl ? (
-                <a href={app.job.applyUrl} target="_blank" rel="noreferrer noopener" className="inline-flex min-h-11 items-center gap-2 rounded-control border border-line bg-white px-5 text-[15px] font-semibold text-forest-900 hover:bg-mint-50">
+                <a
+                  href={app.job.applyUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-control border border-line bg-surface px-5 text-[15px] font-semibold text-forest-900 hover:bg-mint-50 @max-xl:w-full"
+                >
                   Apply on the employer&apos;s site
                   <ExternalLink className="size-4" aria-hidden="true" />
                 </a>
@@ -125,6 +139,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
               <Button
                 busy={busy === "submit"}
                 onClick={() => run("submit", () => api.patchApplication(app.id, { status: "submitted" }), "Marked as submitted. Follow-up reminder set for 7 days.")}
+                className="@max-xl:w-full"
               >
                 I&apos;ve submitted it
               </Button>
@@ -154,7 +169,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
               ]}
             />
           </div>
-          <div className="mt-5 grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="mt-5 grid items-start gap-5 @4xl:grid-cols-[minmax(0,1fr)_320px]">
             <div role="tabpanel" id={`pack-panel-${tab}`} aria-labelledby={`pack-tab-${tab}`} className="min-w-0">
               {tab === "cv" ? (
                 <CvPaper doc={pack.cv} cv={cv} lines={lines} editable={editable} onSave={save("cv")} onToggleLine={toggleLine} />
@@ -256,7 +271,7 @@ function RequestChanges({ onClose, onSubmit, busy }: { onClose: () => void; onSu
             key={idea}
             type="button"
             onClick={() => setNote((n) => (n ? `${n.trim()} ${idea}.` : `${idea}.`))}
-            className="min-h-9 rounded-full border border-line bg-white px-3 text-small font-semibold text-ink-2 hover:bg-mint-50 hover:text-ink"
+            className="min-h-9 rounded-none border border-line bg-surface px-3 text-small font-semibold text-ink-2 hover:bg-mint-50 hover:text-ink"
           >
             {idea}
           </button>

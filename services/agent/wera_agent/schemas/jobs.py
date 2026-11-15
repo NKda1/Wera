@@ -3,6 +3,7 @@
 from typing import Literal
 
 from .base import Model, Opt
+from .learning import LearnedRank
 from .profile import Seniority
 
 type Channel = Literal["board_search", "email_alert", "watchlist", "manual"]
@@ -111,6 +112,10 @@ class Job(Model):
     # When the status became `closed`. Separate from `last_checked_at` because ATS-03 can close a
     # job from a feed's silence without any HTTP check having happened.
     closed_at: Opt[str] = None
+    # LIFE-02 (14 Nov): when applications close, when a source says — Reed's `expirationDate`,
+    # USAJOBS' `ApplicationCloseDate`, a page's `validThrough`, a deadline the page states. A job
+    # past it is closed without a check: the employer has said so in advance.
+    closes_at: Opt[str] = None
     status: JobStatus
     snoozed_until: Opt[str] = None
     hidden_reason: Opt[str] = None
@@ -120,6 +125,10 @@ class Job(Model):
     found_by: Opt[FoundBy] = None
     # When the person first opened the job's details or decided on it.
     seen_at: Opt[str] = None
+    # SRCH-31/32: the job API that found it ("reed", "usajobs", "adzuna", "careerjet"), when one
+    # did. Set when the job is first saved and kept through later sightings. A job found via
+    # Adzuna carries Adzuna's linked label on its card (their terms).
+    via: Opt[str] = None
 
 
 class SubScore(Model):
@@ -190,3 +199,11 @@ class ScoredJob(Job):
     urgency: Urgency
     # Same reasoning: derived from the three lifecycle fields at read time (SRCH-13, MATCH-10).
     liveness: Liveness
+    # LIFE-03: nothing has shown it open — no confirmation, no fresh sighting — for
+    # `PROOF_OF_LIFE_DAYS`. Off the main list, in "Possibly closed", until something does.
+    possibly_closed: bool = False
+    # LIFE-04: open `EVERGREEN_DAYS` or more. Often a standing advert rather than a vacancy.
+    evergreen: bool = False
+    # MATCH-12: moved in the order by what the person's decisions taught, and why. Absent when it
+    # wasn't moved, or learned ranking is off.
+    learned: Opt[LearnedRank] = None

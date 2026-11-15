@@ -1,5 +1,6 @@
 """The web app's store tests (Phase 1), now against the agent's HTTP API and database."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from wera_agent import clock
@@ -21,8 +22,12 @@ def approve_and_draft(api, drafted, job_id: str) -> dict:
 
 class TestGate1:
     def test_lists_the_shortlist_best_first(self, api):
-        jobs = api.ok("GET", "/jobs")["items"]
-        assert len(jobs) == 12
+        body = api.ok("GET", "/jobs")
+        jobs = body["items"]
+        # LIFE-03: two seeded jobs were first seen over a week ago and never confirmed open, so
+        # they wait under "Possibly closed" rather than on the main list.
+        assert (len(jobs), body["possiblyClosed"]) == (10, 2)
+        assert len(api.ok("GET", "/jobs?possiblyClosed=only")["items"]) == 2
         assert [j["fit"]["total"] for j in jobs[:5]] == [8.6, 8.1, 7.4, 7.0, 6.2]
         assert api.ok("GET", "/nav") == {"jobs": 12, "review": 2, "demoMode": True}
 
@@ -107,7 +112,8 @@ class TestIntake:
         clock.advance(7000)
         board = next(r for r in (api.ok("GET", f"/intake/runs/{i}") for i in run_ids) if r["channel"] == "board_search")
         assert (board["status"], board["newJobs"]) == ("succeeded", 2)
-        assert len(api.ok("GET", "/jobs")["items"]) == 14
+        listed = api.ok("GET", "/jobs")
+        assert len(listed["items"]) + listed["possiblyClosed"] == 14
         again = api.ok("POST", "/intake/run", {"channels": ["board_search"]})["runIds"]
         clock.advance(7000)
         repeat = api.ok("GET", f"/intake/runs/{again[0]}")
@@ -411,3 +417,51 @@ class TestAPartiallyDraftedPack:
             self.drop(store, app_id, kind)
         assert store._load_pack(app_id) is None
         assert next(a.id for a in store.list_applications() if a.id == app_id) == app_id
+
+
+class TestSavingACvWithoutASummary:
+    """TAIL-07 (14 Nov): saving a CV with no summary gets it one WERA wrote, in the same version.
+    Edited, it is the person's; removed, it isn't written again."""
+
+    @pytest.fixture
+    def composing(self, monkeypatch, cv_upload_mode):
+        from wera_agent.nodes import tailor
+        from wera_agent.schemas.cv import Summary
+
+        cv_upload_mode("rescore")
+        calls = []
+
+        def compose(session, cv):
+            calls.append(cv.version)
+            return Summary(id=tailor.GENERATED_SUMMARY_ID, text="Computer Science graduate building AI tooling.", generated=True)
+
+        monkeypatch.setattr(tailor, "compose_master_summary", compose)
+        return calls
+
+    def test_a_cv_without_one_is_saved_with_wera_s(self, store, composing):
+        version = store.put_cv(store.cv().model_copy(update={"summary": None}), rescore=False)
+        saved = store.cv()
+        assert saved.version == version and saved.summary.generated and composing == [version - 1]
+
+    def test_an_edit_makes_it_the_persons(self, store, composing):
+        store.put_cv(store.cv().model_copy(update={"summary": None}), rescore=False)
+        mine = store.cv()
+        mine.summary = mine.summary.model_copy(update={"text": "My own words now."})
+        store.put_cv(mine, rescore=False)
+        assert store.cv().summary.text == "My own words now." and not store.cv().summary.generated
+
+    def test_a_cv_arriving_with_wera_s_summary_keeps_it_marked(self, store, composing):
+        """Replacing a CV is not editing its summary: the flag stays on the one that arrived."""
+        from wera_agent.schemas.cv import Summary
+
+        theirs = store.cv().model_copy(
+            update={"summary": Summary(id="sum-wera", text="Another CV's profile, written by WERA.", generated=True)}
+        )
+        store.put_cv(theirs, rescore=False)
+        assert store.cv().summary.generated and composing == []
+
+    def test_removing_wera_s_summary_is_remembered(self, store, composing):
+        store.put_cv(store.cv().model_copy(update={"summary": None}), rescore=False)
+        store.put_cv(store.cv().model_copy(update={"summary": None}), rescore=False)  # cleared on the CV screen
+        store.put_cv(store.cv().model_copy(update={"summary": None}), rescore=False)
+        assert store.cv().summary is None and len(composing) == 1

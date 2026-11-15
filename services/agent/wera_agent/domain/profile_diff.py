@@ -9,15 +9,19 @@ from typing import Any
 
 from ..schemas.profile import SearchProfile
 
-# Fields the model proposes. `sites`, `countries` and `channels` are the person's own settings —
-# carried through unchanged by `generate_profile`, so there is nothing to diff — and
-# `generatedFromCvVersion`/`updatedAt` are bookkeeping.
+# Fields the model proposes. `sites`, `countries`, `locations`, `remote`, `recency` and `channels`
+# are the person's own settings — carried through unchanged by `generate_profile`, so there is
+# nothing to diff — and `generatedFromCvVersion`/`updatedAt` are bookkeeping.
 #
 # Anything carried through MUST be carried explicitly in `generate_profile`. A field that is
 # neither proposed nor carried is silently reset to its default and the diff cannot show it,
 # because a diff of two equal-by-default values is empty. That is how `countries` was lost.
-FIELDS = ("titles", "skills", "locations", "seniority", "exclude")
-SCALARS = ("remote", "recency")
+FIELDS = ("titles", "skills", "seniority", "exclude")
+# Carried, except for a profile that names no place at all, which is offered the CV's city as a
+# start. Diffed so that one case is shown like any other proposal.
+STARTERS = ("locations",)
+# None at the moment: `remote` and `recency` were proposed until 15 Nov, and a CV says neither.
+SCALARS: tuple[str, ...] = ()
 
 
 def _norm(value: str) -> str:
@@ -41,7 +45,7 @@ def profile_diff(current: SearchProfile, proposed: SearchProfile) -> dict[str, A
     Only fields that actually differ appear, so an empty dict means "nothing to review".
     """
     out: dict[str, Any] = {}
-    for field in FIELDS:
+    for field in (*FIELDS, *STARTERS):
         change = diff_lists(getattr(current, field), getattr(proposed, field))
         if change["added"] or change["removed"]:
             out[field] = change

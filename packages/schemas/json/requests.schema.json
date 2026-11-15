@@ -73,6 +73,9 @@
         "reason": {
           "maxLength": 200,
           "type": "string"
+        },
+        "reasonCode": {
+          "$ref": "#/$defs/ReasonCode"
         }
       },
       "required": [
@@ -167,6 +170,16 @@
       "title": "PatchWeights",
       "type": "object"
     },
+    "ReasonCode": {
+      "enum": [
+        "wrong_level",
+        "wrong_location",
+        "not_my_field",
+        "pay_too_low",
+        "applied_elsewhere"
+      ],
+      "type": "string"
+    },
     "RegenerateIn": {
       "properties": {
         "note": {
@@ -221,10 +234,16 @@
         "inbox": {
           "$ref": "#/$defs/InboxPatch"
         },
+        "learnedRanking": {
+          "type": "boolean"
+        },
         "models": {
           "$ref": "#/$defs/TierModels"
         },
         "redactContact": {
+          "type": "boolean"
+        },
+        "scheduledIntake": {
           "type": "boolean"
         },
         "searchSchedule": {

@@ -98,6 +98,15 @@ class Settings(Model):
     # factory rather than an instance: an instance is written into the JSON Schema as a default,
     # and the contract generator then emitted three copies of the type, one per use.
     search_schedule: SearchSchedule = Field(default_factory=lambda: SearchSchedule(enabled=False, cron=DEFAULT_SEARCH_CRON))
+    # SCH-05 (14 Nov): the daily jobs that go out to the internet on their own — the watchlist pull
+    # at 06:30, the inbox every three hours, the 07:00 open-job sweep (and its catch-up at start).
+    # Off unless the person turns it on, and off for every settings blob written before it existed:
+    # a run nobody asked for spends the day's scoring allowance and model budget before they sit
+    # down. Backups and the telemetry archive are not in it; they only copy WERA's own data.
+    scheduled_intake: bool = False
+    # MATCH-12 (15 Nov): order the shortlist with what the person's decisions have taught, as well
+    # as the fit total. On by default; the reason is shown on every job it moves.
+    learned_ranking: bool = True
 
 
 class SecretsStatus(Model):
@@ -159,3 +168,5 @@ class SettingsPatch(Model):
     weights: Opt[PatchWeights] = None
     inbox: Opt[InboxPatch] = None
     search_schedule: Opt[SearchSchedulePatch] = None
+    scheduled_intake: Opt[bool] = None
+    learned_ranking: Opt[bool] = None

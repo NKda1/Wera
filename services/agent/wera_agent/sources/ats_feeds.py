@@ -75,8 +75,45 @@ def html_to_text(raw: str | None) -> str:
     cleaned = TAGS.sub("", cleaned)
     # A second pass: entities inside the markup are only reachable once the tags are gone.
     cleaned = html.unescape(cleaned).replace("\xa0", " ")
-    cleaned = re.sub(r"[ \t]+", " ", cleaned)
-    return BLANKS.sub("\n\n", cleaned).strip()
+    return without_layout_lines(re.sub(r"[ \t]+", " ", cleaned))
+
+
+def without_layout_lines(text: str) -> str:
+    """Lines that are only a space, or the "- " of an empty list item, are layout: a rendered
+    Gradcracker page came through as hundreds of them, which `BLANKS` can't see past."""
+    lines = ("" if line.strip() in ("", "-") else line.strip() for line in text.split("\n"))
+    return BLANKS.sub("\n\n", "\n".join(lines)).strip()
+
+
+# A line of prose rather than a menu item: a sentence's worth of words, punctuated like one. The
+# punctuation is what tells a sentence from a page title ("Broadcast and Media Systems Engineer
+# Degree Apprenticeship - Level 6, Glasgow | BBC | Gradcracker" is fourteen words).
+PROSE_WORDS = 10
+SENTENCE = re.compile(r"[.!?:;](?:\s|$)")
+# How many short lines must come before the first prose line for them to be navigation. A
+# posting may open on a few facts ("Salary", "Location"); a site menu is dozens of lines — 48 on
+# the Gradcracker pages that came through with theirs (12 Nov review).
+CHROME_LINES = 12
+
+
+def without_leading_chrome(text: str) -> str:
+    """The page's text from where the posting starts, without the site's menus above it.
+
+    A page read as text (`extract`'s model rung) keeps everything the site puts above the job: its
+    own menus, an employer hub's tabs, a breadcrumb — 18 of 52 Gradcracker descriptions opened on
+    ~48 lines of them. Those arrive as a long run of short lines before the first sentence, so a
+    long run is dropped and a short one kept. Text with no prose line at all is returned as it came.
+
+    Not used on Firecrawl's Markdown, which is already read with `only_main_content`: tried on
+    the stored reads, it cut securityclearedjobs' facts line (employer, salary, closing date) and
+    Amex's "this job is no longer available" — link-heavy Markdown is short lines that matter.
+    Closed pages are caught before this runs (`extract._not_one_job`), on the whole page.
+    """
+    lines = text.split("\n")
+    first = next((i for i, line in enumerate(lines) if len(line.split()) >= PROSE_WORDS and SENTENCE.search(line)), None)
+    if first is None or sum(1 for line in lines[:first] if line.strip()) < CHROME_LINES:
+        return text
+    return "\n".join(lines[first:]).strip()
 
 
 def _location(raw: str | None) -> Location:
@@ -123,6 +160,22 @@ def _greenhouse(company: Company, body: dict[str, Any]) -> list[FeedJob]:
     return out
 
 
+def _lever_description(job: dict[str, Any]) -> str:
+    """The whole posting. Lever keeps it in three parts: the description, then `lists` — each a
+    heading and HTML ("Responsibilities", "Requirements") — then `additional`. Reading only the
+    first left Intropic's jobs at 402–1,647 characters, and one of them with an empty
+    `descriptionPlain` has nothing anywhere but its lists (checked live, 13 Nov)."""
+    parts = [html_to_text(job.get("descriptionPlain") or job.get("description"))]
+    for item in job.get("lists") or []:
+        if not isinstance(item, dict):
+            continue
+        body = html_to_text(item.get("content"))
+        if body:
+            parts.append(f"{(item.get('text') or '').strip()}\n{body}".strip())
+    parts.append(html_to_text(job.get("additionalPlain") or job.get("additional")))
+    return "\n\n".join(p for p in parts if p)
+
+
 def _lever(company: Company, body: list[dict[str, Any]]) -> list[FeedJob]:
     out = []
     for job in body or []:
@@ -139,7 +192,7 @@ def _lever(company: Company, body: list[dict[str, Any]]) -> list[FeedJob]:
                 company=company.name,
                 location=_location(categories.get("location")),
                 apply_url=job.get("hostedUrl") or job.get("applyUrl") or "",
-                description=html_to_text(job.get("descriptionPlain") or job.get("description")),
+                description=_lever_description(job),
                 posted_at=iso(int(created)) if isinstance(created, int | float) else None,
                 remote=remote_mode(job.get("workplaceType"), categories.get("location")),
             )

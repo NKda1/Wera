@@ -54,6 +54,10 @@ class Person(Model):
 class Summary(Model):
     id: NonEmpty
     text: str
+    # TAIL-07 (14 Nov): written by WERA from the CV's own lines, for a CV that came without one,
+    # and shown on the CV screen as such. Any edit makes it the person's (the editor drops the
+    # flag), and from then on it is used exactly as written. Absent on every summary before.
+    generated: Opt[bool] = None
 
 
 class Education(Model):

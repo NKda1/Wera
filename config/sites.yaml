@@ -116,3 +116,11 @@ sites:
   examples:
   - https://www.itjobswatch.co.uk/find/Graduate-Software-Engineer-jobs-in-London
   - https://www.itjobswatch.co.uk/jobs/uk/junior%20software%20engineer.do
+- domain: www.cwjobs.co.uk
+  name: www.cwjobs.co.uk
+  terms_reviewed_on: null
+  discovered_on: '2026-11-13'
+  matched: Graduate Software Engineer
+  examples:
+  - https://www.cwjobs.co.uk/jobs/contract/graduate-software-developer
+  - https://www.cwjobs.co.uk/jobs/junior-software-engineer/in-london?salary=35&salarytypeid=5

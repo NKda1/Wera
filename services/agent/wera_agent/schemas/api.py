@@ -7,6 +7,7 @@ from pydantic import Field
 from .applications import ApplicationListItem, ApplicationStatus
 from .base import Model, Opt, check, required
 from .jobs import Job, ScoredJob
+from .learning import ReasonCode
 from .profile import SearchProfile
 from .runs import ChannelSummary
 
@@ -42,6 +43,8 @@ class ShortlistMeta(Model):
     # the real figure.
     hidden: list[Job]
     hidden_total: int
+    # Of those, hidden only for not being a target title while plausibly the same work (14 Nov).
+    near_misses: int = 0
     # New jobs with no fit report yet: past the day's scoring cap (MATCH-05), or left unscored
     # by a run that stopped. They are not on the shortlist, and saying so beats their absence.
     awaiting_score: int
@@ -78,6 +81,20 @@ class SiteOption(Model):
     examples: list[str] = []  # real postings to look at before deciding
 
 
+class PlaceOption(Model):
+    """SRCH-11: a country the profile can target, and what would search it there.
+
+    Offered whether or not a reviewed board covers it — the open web search reaches every one,
+    and the job APIs most — so the picker is no longer limited to where the boards happen to be.
+    """
+
+    code: str  # ISO 3166-1 alpha-2, upper case
+    name: str
+    region: str
+    boards: list[str] = []  # reviewed boards that name this country
+    feeds: list[str] = []  # job APIs that would be asked here, from an interactive search
+
+
 class SiteReviewIn(Model):
     """SRCH-04: a recorded human decision about a board WERA proposed.
 
@@ -91,6 +108,9 @@ class SiteReviewIn(Model):
 class JobList(Model):
     items: list[ScoredJob]
     next: None = None
+    # LIFE-03: how many jobs in this status nothing has shown open for a week — left off the main
+    # list and listed with `?possiblyClosed=only`. Zero when this *is* that list.
+    possibly_closed: int = 0
 
 
 class ApplicationList(Model):
@@ -150,6 +170,9 @@ class ProfileProposalResult(Model):
 class DecisionIn(Model):
     action: Literal["approve", "snooze", "reject", "unhide"]
     days: Opt[Literal[1, 3, 7]] = None
+    # MATCH-11: the chip the person picked, and anything they wrote, kept apart — the dialog used
+    # to send one or the other, and learning can only read the first.
+    reason_code: Opt[ReasonCode] = None
     reason: Opt[Annotated[str, Field(max_length=200)]] = None
     force: Opt[bool] = None
 

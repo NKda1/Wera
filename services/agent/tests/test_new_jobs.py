@@ -10,7 +10,7 @@ from sqlalchemy import select
 from wera_agent.clock import iso, now_ms
 from wera_agent.db.models import ApplicationRow, IntakeRunRow, JobRow, LlmCallRow
 from wera_agent.db.session import transaction
-from wera_agent.schemas.jobs import Job, JobSource, Location
+from wera_agent.schemas.jobs import Ats, Job, JobSource, Location
 from wera_agent.services import store as store_module
 from wera_agent.services.store import Store
 
@@ -48,6 +48,13 @@ class TestTheNewTag:
         assert saved.found_by is not None
         assert (saved.found_by.run_id, saved.found_by.channel) == ("run-7", "board_search")
         assert saved.seen_at is None
+
+    def test_a_job_find_more_adds_names_find_mores_run(self, store):
+        """14 Nov: "Find more" runs as `score_more` but its jobs are board sightings, so the
+        channel lookup missed and four jobs were saved with no run."""
+        store.upsert_jobs([job()], run_ids={"score_more": "run-72"})
+        saved = stored(store, "job-new")
+        assert (saved.found_by.run_id, saved.found_by.channel) == ("run-72", "board_search")
 
     def test_seeing_it_again_keeps_its_first_tag(self, store):
         store.upsert_jobs([job()], run_ids={"board_search": "run-7"})
@@ -181,3 +188,51 @@ class TestRefilter:
     def test_a_job_hidden_as_not_a_posting_stays_hidden(self, store):
         store.upsert_jobs([job(status="hidden", hidden_reason="Not a job posting: a page of results")])
         assert store.refilter_hidden(apply=True) == []
+
+    def test_a_results_page_is_not_brought_back_and_says_why(self, store):
+        """The first refilter brought back `gradcracker.com/search/…` as "G-Research": past the
+        filters, but never a posting. Left hidden, with the reason that now applies."""
+        hidden = job(url="https://www.gradcracker.com/search/computing-technology/graduate-jobs?page=2",
+                     status="hidden", hidden_reason="Location isn't in your search: London")  # fmt: skip
+        store.upsert_jobs([hidden])
+        assert store.refilter_hidden() == []
+        assert stored(store, "job-new").hidden_reason == "Location isn't in your search: London"  # a dry run
+        store.refilter_hidden(apply=True)
+        assert stored(store, "job-new").hidden_reason == "Not a job posting: a page of results"
+        assert store.refilter_hidden(apply=True) == []
+
+    def test_a_summary_too_thin_to_judge_is_not_brought_back(self, store):
+        store.upsert_jobs([job(description_md="Graduate role in London. Apply now.", status="hidden",
+                               hidden_reason="Location isn't in your search: London")])  # fmt: skip
+        assert store.refilter_hidden(apply=True) == []
+        assert stored(store, "job-new").hidden_reason == "Not a job posting: too little description to judge"
+
+
+class TestTidy:
+    """What was saved before the 13 Nov reading rules, brought up to them."""
+
+    MENU = "\n".join(f" {m}\n \n - \n" for m in ["About Us", "For Employers", "Login", "Register", "Graduate Jobs",
+                     "Company Hubs A-Z", "Career Advice", "Webinars", "Toolkit", "Hub Home", "Our People", "Follow"])  # fmt: skip
+    BODY = "We are looking for graduates who want to build the systems that run the firm, from day one.\n" * 4
+
+    def test_a_deadline_stored_as_the_posting_date_is_dropped(self, store):
+        ahead = iso(now_ms() + 20 * 86_400_000)
+        store.upsert_jobs([job(posted_at=ahead, posted_precision="approximate")])
+        assert [f["id"] for f in store.tidy_saved()] == ["job-new"]
+        assert stored(store, "job-new").posted_at == ahead  # a dry run changes nothing
+        store.tidy_saved(apply=True)
+        assert (stored(store, "job-new").posted_at, stored(store, "job-new").posted_precision) == (None, "unknown")
+        assert store.tidy_saved() == []
+
+    def test_a_page_read_as_text_loses_the_sites_menus(self, store):
+        store.upsert_jobs([job(description_md=self.MENU + self.BODY)])
+        (found,) = store.tidy_saved(apply=True)
+        assert found["change"].startswith("menus and layout")
+        assert stored(store, "job-new").description_md == self.BODY.strip()
+
+    def test_an_employers_feed_keeps_its_opening_lines(self, store):
+        """Only the layout goes: a feed is the employer's own words from its first line."""
+        ats = Ats(vendor="greenhouse", board_token="fernhillai", job_id="1")
+        store.upsert_jobs([job(description_md=self.MENU + self.BODY, ats=ats)])
+        store.tidy_saved(apply=True)
+        assert stored(store, "job-new").description_md.startswith("About Us\n\nFor Employers")

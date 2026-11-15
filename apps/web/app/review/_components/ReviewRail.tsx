@@ -2,7 +2,9 @@
 
 import { Check, Download, Lock } from "lucide-react";
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { api } from "@/lib/api";
+import { upskillAnchor } from "@/lib/format";
 import type { AtsReport, FormatCheck, Pack } from "@/lib/types";
 import { buttonClass } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -27,8 +29,11 @@ export function ReviewRail({
   const edited = bullets.filter((b) => b.editedByUser).length + (pack.cv.summary.editedByUser ? 1 : 0) + pack.letter.paragraphs.filter((p) => p.editedByUser).length;
   const violations = [...pack.cv.guard.violations, ...pack.letter.guard.violations];
 
+  // A column beside the document; under it (below 896px of screen) two columns once there is room,
+  // rather than a single file of tablet-wide cards a long scroll from the CV.
   return (
-    <div className="flex flex-col gap-4">
+    <div className="grid items-start gap-4 @2xl:@max-4xl:grid-cols-2">
+      {pack.ats.score != null ? <AtsScoreCard ats={pack.ats} /> : null}
       <AtsCard ats={pack.ats} />
 
       <FormatChecksCard docId={`${appId}.cv`} cv={pack.cv} fallback={pack.ats.formatChecks} />
@@ -43,7 +48,7 @@ export function ReviewRail({
           </ul>
         </section>
       ) : (
-        <section className="rounded-card bg-forest-900 p-5 text-white">
+        <section className="rounded-card bg-accent-strong p-5 text-white">
           <h2 className="text-[16px] font-bold">Every line traced to your CV</h2>
           <p className="mt-1.5 text-[14px] leading-relaxed text-white/85">
             {cited} of {bullets.length} bullets cite a master-CV entry. Nothing new was invented. Click a tag to see the original line.
@@ -154,6 +159,68 @@ function DownloadLink({ docId, format, label, approved }: { docId: string; forma
   );
 }
 
+/** ATSC-07: the score a parser and a recruiter's search would give this CV, in five parts, each with
+ *  its reason. "Best this CV could reach" separates presentation (WERA's to fix) from skills the
+ *  CV doesn't have (the applicant's, on Upskills). Packs from before the score have none. */
+function AtsScoreCard({ ats }: { ats: AtsReport }) {
+  const score = Math.round(ats.score ?? 0);
+  const best = Math.round(ats.bestScore ?? score);
+  const good = score >= 70;
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-[16px] font-bold">ATS score</h2>
+        <span className={cn("text-[34px] leading-none font-bold tabular-nums", good ? "text-forest-700" : "text-amber-700")}>
+          {score}
+          <span className="text-[16px] font-semibold text-ink-2">/100</span>
+        </span>
+      </div>
+      <p className="mt-1 text-small text-ink-2">
+        {best > score
+          ? `This CV could reach ${best} on this post by showing what it already backs.`
+          : "As high as this CV can score on this post — the rest is skills it doesn't show yet."}
+      </p>
+      <ul className="mt-3 space-y-2.5">
+        {ats.parts.map((part) => (
+          <li key={part.id}>
+            <div className="flex items-baseline justify-between gap-3 text-[14px]">
+              <span className="font-semibold">{part.label}</span>
+              <span className="tabular-nums text-ink-2">
+                {Math.round(part.points * 10) / 10} / {part.max}
+              </span>
+            </div>
+            <div
+              className="mt-1 h-1.5 overflow-hidden rounded-none bg-mint-100"
+              role="progressbar"
+              aria-label={part.label}
+              aria-valuemin={0}
+              aria-valuemax={part.max}
+              aria-valuenow={part.points}
+            >
+              <div className="h-full rounded-none bg-accent" style={{ width: `${(100 * part.points) / Math.max(part.max, 1)}%` }} />
+            </div>
+            <p className="mt-0.5 text-small text-ink-2">{part.detail}</p>
+          </li>
+        ))}
+      </ul>
+      {ats.suggestedSkills.length ? (
+        <>
+          <p className="mt-4 mb-1.5 text-small text-ink-2">
+            In your CV&apos;s lines but not its skills list — <a href="/cv" className="underline hover:text-forest-700">add them on your CV</a> if you&apos;d claim them
+          </p>
+          <ChipList>
+            {ats.suggestedSkills.map((term) => (
+              <Chip key={term} variant="outline">
+                {term}
+              </Chip>
+            ))}
+          </ChipList>
+        </>
+      ) : null}
+    </Card>
+  );
+}
+
 function AtsCard({ ats }: { ats: AtsReport }) {
   const matched = ats.keywords.filter((k) => k.matched);
   const gaps = ats.keywords.filter((k) => !k.matched && !k.inMasterCv);
@@ -173,8 +240,8 @@ function AtsCard({ ats }: { ats: AtsReport }) {
         <h2 className="text-[16px] font-bold">ATS keyword coverage</h2>
         <span className={cn("text-[34px] leading-none font-bold tabular-nums", good ? "text-forest-700" : "text-amber-700")}>{value}%</span>
       </div>
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-mint-100" role="progressbar" aria-label="ATS keyword coverage" aria-valuemin={0} aria-valuemax={100} aria-valuenow={value}>
-        <div className={cn("h-full rounded-full", good ? "bg-forest-700" : "bg-amber-500")} style={{ width: `${value}%` }} />
+      <div className="mt-3 h-2 overflow-hidden rounded-none bg-mint-100" role="progressbar" aria-label="ATS keyword coverage" aria-valuemin={0} aria-valuemax={100} aria-valuenow={value}>
+        <div className={cn("h-full rounded-none", good ? "bg-accent" : "bg-amber-500")} style={{ width: `${value}%` }} />
       </div>
       <p className="mt-2 text-small text-ink-2">
         {matched.length} of {ats.keywords.length} terms this post asks for are on your CV.
@@ -210,12 +277,15 @@ function AtsCard({ ats }: { ats: AtsReport }) {
 
       {gaps.length ? (
         <>
-          <p className="mt-4 mb-1.5 text-small text-ink-2">Missing · {gaps.length} — add only if true</p>
+          <p className="mt-4 mb-1.5 text-small text-ink-2">
+            Missing · {gaps.length} — add only if true, or <Link href="/upskills" className="underline hover:text-forest-700">see what to learn</Link>
+          </p>
           <ChipList>
             {gaps.map((k) => (
-              <Chip key={k.term} variant="missing">
-                {k.term}
-              </Chip>
+              // UPSK-04: each gap opens the skill on Upskills — how many of your jobs ask for it.
+              <Link key={k.term} href={`/upskills#${upskillAnchor(k.term)}`} className="rounded-none hover:ring-2 hover:ring-amber-500/40">
+                <Chip variant="missing">{k.term}</Chip>
+              </Link>
             ))}
           </ChipList>
         </>

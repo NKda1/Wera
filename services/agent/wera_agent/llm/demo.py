@@ -16,7 +16,7 @@ from ..config import wera
 from ..domain.guard import check_cited
 from ..domain.questions import SENSITIVE, kind, links_answer
 from ..domain.vocab import master_cv_text, skill_text, text_has_term
-from ..nodes.ats import build_ats, reconcile_skills
+from ..nodes.ats import build_ats, place_required, reconcile_skills
 from ..schemas.cv import Bullet, MasterCV, Role
 from ..schemas.jobs import FitEvidence, Job
 from ..schemas.pack import (
@@ -301,7 +301,7 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
             parts.append(f"I also {lc_first(no_stop(second.text))}.")
         if idx == 0 and evidence.job_quote and job.description_md and evidence.job_quote in job.description_md:
             parts.append(f"That is close to what you describe as “{evidence.job_quote}”.")
-        # Two bullets per role. A third was added when LTR-01 wanted 250–350 words; at 180–260 it
+        # Two bullets per role. A third was added when LTR-01 wanted 250–350 words; at 150–230 it
         # pushed letters over the top, and a short letter is now the point.
         if idx == 1:
             overlap = _matched_skills(inp)
@@ -330,26 +330,15 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
     elif inp.profile and job.remote:
         fit.append(f"I'm open to remote, hybrid or on-site, so the {job.remote} arrangement you describe works either way.")
     # No "{city} is one of the places I'm searching" sentence any more: it was the longest thing in
-    # a close that LTR-01's shorter letter (180–260 words) has no room for.
+    # a close that LTR-01's shorter letter (150–230 words) has no room for.
     closing = " ".join(
         [*fit, f"I'd like to talk about where this would fit at {job.company}. I can make any afternoon next week."]
     )
-    extras = items[2].bullets[:2] if len(items) > 2 else []
-    if extras:
-        role = roles[items[2].role_id]
-        said = [f"Outside that, as {role.title} for {role.org}, I {lc_first(no_stop(extras[0].text))}."]
-        if len(extras) > 1:
-            said.append(f"I also {lc_first(no_stop(extras[1].text))}.")
-        said.append(closing)
-        paragraphs.append(
-            Paragraph(
-                text=" ".join(said), source_ids=[sid for b in extras for sid in b.source_ids], section="call_to_action_and_close"
-            )
-        )
-    else:
-        paragraphs.append(
-            Paragraph(text=closing, source_ids=[cv.summary.id] if cv.summary else [], section="call_to_action_and_close")
-        )
+    # No third role in the close any more: at LTR-01's 150–230 words it pushed every demo letter
+    # to ~250, and the real prompt's close is two sentences with no new evidence in it.
+    paragraphs.append(
+        Paragraph(text=closing, source_ids=[cv.summary.id] if cv.summary else [], section="call_to_action_and_close")
+    )
 
     contact = _named_contact(job.description_md)
     letter = CoverLetter(
@@ -364,7 +353,7 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
         company_fact=CompanyFact(quote=fact, policy_quote=policy),
         word_count=sum(words(p.text) for p in paragraphs),
         guard=GuardResult(pass_=True, violations=[], repaired=False),
-        hook_type="Company-Mission" if fact else "Core-Metric",
+        hook_type="Introduction",
     )
     letter.guard = guard_letter(letter, cv, evidence, job)
     return letter
@@ -430,6 +419,7 @@ def generate_pack(inp: PackInput) -> Pack:
     # steps the real path takes (`drafting.step_cv`), and for the same reason — the re-tailor
     # loop that used to be here is gone.
     doc = _build_cv(inp, _select_bullets(inp, total, per_role, []))
+    doc = place_required(doc, cv=inp.cv, evidence=inp.evidence)
     doc = reconcile_skills(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, threshold=wera().ats_threshold)
     letter = _build_letter(inp, doc)
     ats = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, letter=letter)
@@ -473,11 +463,9 @@ def _profile_proposal(cv: MasterCV) -> dict:
     return {
         "titles": _target_titles(cv),
         "skills": [s.name for s in cv.skills[:12]],
-        "locations": [cv.person.location],
-        "remote": "any",
+        "locations": [cv.person.location] if cv.person.location else [],
         "seniority": ["graduate", "junior", "entry"],
         "exclude": ["Senior", "Staff", "Principal", "Lead"],
-        "recency": "7d",
     }
 
 

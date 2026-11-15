@@ -53,15 +53,30 @@ def main(argv: list[str] | None = None) -> int:
     clear.add_argument("--yes", action="store_true", help="don't ask for confirmation")
     audit = jobs_sub.add_parser("audit-listings", help="find saved jobs that are really results pages (SRCH-21)")
     audit.add_argument("--apply", action="store_true", help="hide them (default: only list them)")
+    tidy = jobs_sub.add_parser("tidy", help="apply today's date and description rules to saved jobs")
+    tidy.add_argument("--apply", action="store_true", help="make the changes (default: only list them)")
+    dd = jobs_sub.add_parser("dedupe", help="merge saved jobs that are one job seen on two sites (NORM-06)")
+    dd.add_argument("--apply", action="store_true", help="merge them (default: only list them)")
     refilter = jobs_sub.add_parser("refilter", help="re-apply your filters to hidden jobs and bring back what they now keep")
     refilter.add_argument("--apply", action="store_true", help="bring them back (default: only list them)")
     tg = sub.add_parser("targets", help="the Strategist's job discovery: Serper searches into the Redis queue (SRCH-20)")
     tg_sub = tg.add_subparsers(dest="targets_cmd", required=True)
     tg_disc = tg_sub.add_parser("discover", help="send the planned queries and queue the postings they find")
-    tg_disc.add_argument("--tier", type=int, action="append", metavar="N", help="tiers to send; repeatable (default: 1)")
+    tg_disc.add_argument(
+        "--tier", type=int, action="append", metavar="N", help="tiers to send; repeatable (default: 1). 0 is the job APIs"
+    )
     tg_disc.add_argument("--no-plan", action="store_true", help="don't refresh a stale Strategist plan (no model call)")
     tg_sub.add_parser("queries", help="print the planned queries without sending any")
     tg_sub.add_parser("list", help="print what is queued for the current plan")
+    cvp = sub.add_parser("cv", help="the master CV")
+    cv_sub = cvp.add_subparsers(dest="cv_cmd", required=True)
+    cv_sum = cv_sub.add_parser("summary", help="write the general summary a CV without one gets (TAIL-07)")
+    cv_sum.add_argument("--write", action="store_true", help="put it on the current CV version (default: only show it)")
+    gd = sub.add_parser("providers", help="each provider's breaker, today's use and shared answers in Redis (SRCH-33)")
+    gd_sub = gd.add_subparsers(dest="providers_cmd", required=True)
+    gd_sub.add_parser("status", help="print them")
+    gd_reset = gd_sub.add_parser("reset", help="close a provider's breaker before it closes itself")
+    gd_reset.add_argument("provider")
     ev = sub.add_parser("eval", help="score the golden set and report agreement with the hand scores")
     ev.add_argument("--model", help="model id to score with (default: the configured scoring tier)")
     ev.add_argument("--cv", type=Path, help="CV to score against, as YAML or JSON (default: the seeded demo CV)")
@@ -73,6 +88,14 @@ def main(argv: list[str] | None = None) -> int:
         help="draft real packs instead of scoring: measures the writing tier (cv.tailor, letter.write)",
     )
     ev.add_argument("--ads", type=int, default=5, metavar="N", help="how many ads --packs drafts for (default 5)")
+    ev.add_argument(
+        "--set",
+        action="append",
+        metavar="KEY=VALUE",
+        dest="overrides",
+        help="for this run only, an A/B variant: TASK.reasoning|max_tokens|tier=… (fit.score.reasoning=off) "
+        "or models.TIER=… (models.select=qwen/qwen3.8-27b); repeatable",
+    )
     ev.add_argument(
         "--strict",
         action="store_true",
@@ -161,15 +184,132 @@ def _dispatch(args: argparse.Namespace) -> int:
             tiers=args.tier if args.targets_cmd == "discover" else None,
             plan=not getattr(args, "no_plan", False),
         )
+    if args.cmd == "cv":
+        return _cv_summary(write=args.write)
+    if args.cmd == "providers":
+        return _providers(args.providers_cmd, provider=getattr(args, "provider", None))
     if args.cmd == "jobs":
         if args.jobs_cmd == "clear":
             return _clear_jobs(args.yes)
+        if args.jobs_cmd == "dedupe":
+            return _dedupe(args.apply)
+        if args.jobs_cmd == "tidy":
+            return _tidy(args.apply)
         return _refilter(args.apply) if args.jobs_cmd == "refilter" else _audit_listings(args.apply)
     if args.cmd == "eval":
+        try:
+            _override(args.overrides or [])
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 2
         if args.packs:
             return _eval_packs(args.model, args.cv, args.out, args.ads, args.strict)
         return _eval(args.model, args.cv, args.out, args.only, args.strict)
     return 2
+
+
+def _cv_summary(*, write: bool) -> int:
+    """TAIL-07's general summary for the CV saved now, which came without one.
+
+    `--write` puts it on the **current** version rather than saving a new one: with
+    `reset_on_cv_upload` on, a new version would clear every job and pack, and adding a summary
+    WERA wrote from the same lines is not a new CV. Fit scores stay valid — they judged the same
+    roles and lines.
+    """
+    from .db.models import MasterCvRow
+    from .db.session import transaction
+    from .nodes.tailor import compose_master_summary
+    from .services.store import Store
+
+    with transaction() as session:
+        store = Store(session)
+        cv = store.cv()
+        if cv.summary and cv.summary.text.strip():
+            print(f"CV version {cv.version} already has a summary{' (written by WERA)' if cv.summary.generated else ''}:")
+            print(f"  {cv.summary.text}")
+            return 0
+        summary = compose_master_summary(session, cv)
+        if summary is None:
+            print("Couldn't write a summary the CV's own lines back. Nothing changed.", file=sys.stderr)
+            return 1
+        print(f"Summary for CV version {cv.version}:\n  {summary.text}")
+        if not write:
+            print("Run again with --write to put it on the CV. You can edit or remove it on the CV screen.")
+            return 0
+        row = session.get(MasterCvRow, cv.version)
+        row.data = cv.model_copy(update={"summary": summary}).model_dump(mode="json")
+        print(f"Written to CV version {cv.version}, marked as WERA's.")
+    return 0
+
+
+def _override(items: list[str]) -> None:
+    """`wera eval --set`: one config value changed in this process, for comparing variants on the
+    same golden set. The file on disk is never touched, so the variant the report measured is
+    what a person then chooses to write into config/wera.yaml."""
+    from pydantic import ValidationError
+
+    from .config import wera
+
+    cfg = wera()
+    for item in items:
+        target, _, value = item.partition("=")
+        if not value:
+            raise ValueError(f"--set {item!r}: expected KEY=VALUE")
+        if target.startswith("models."):
+            tier = target.removeprefix("models.")
+            if tier not in type(cfg.models).model_fields:
+                raise ValueError(f"--set {item!r}: no tier {tier!r}")
+            setattr(cfg.models, tier, value)
+            continue
+        task, _, field = target.rpartition(".")
+        if task not in cfg.tasks or field not in ("reasoning", "max_tokens", "tier"):
+            raise ValueError(f"--set {item!r}: expected TASK.reasoning|max_tokens|tier, with TASK one of the configured tasks")
+        current = cfg.tasks[task]
+        try:
+            cfg.tasks[task] = current.model_validate(
+                current.model_dump() | {field: int(value) if field == "max_tokens" else value}
+            )
+        except ValidationError as exc:
+            raise ValueError(f"--set {item!r}: {exc.errors()[0]['msg']}") from None
+    for item in items:
+        print(f"Variant: {item}")
+
+
+def _providers(cmd: str, *, provider: str | None) -> int:
+    from .errors import ApiError
+    from .sources import provider_guard as guard
+    from .sources import targets
+
+    try:
+        client = targets.connect()
+    except ApiError as exc:
+        print(exc.message, file=sys.stderr)
+        return 1
+    if cmd == "reset":
+        if provider not in guard.PROVIDERS:
+            print(f"Unknown provider {provider!r}; one of {', '.join(guard.PROVIDERS)}.", file=sys.stderr)
+            return 1
+        guard.Guard(client, provider).reset()
+        print(f"{provider}'s breaker is closed.")
+        return 0
+    from .sources import feeds
+
+    for row in guard.status(client):
+        breaker = f"open {row['open_for']}s ({row['why']})" if row["open_for"] else "closed"
+        used = f"{row['used_today']}" + (f" of {row['daily']}" if row["daily"] else "")
+        print(f"  {row['provider']:10} breaker {breaker:30} used today {used:12} {row['answers']} shared answer(s)")
+        if row["provider"] in feeds.FEEDS:
+            cfg = feeds.config(row["provider"])
+            gate = (
+                "off"
+                if not cfg.enabled
+                else f"terms reviewed {cfg.terms_reviewed_on}"
+                if cfg.terms_reviewed_on
+                else "terms not reviewed"
+            )
+            keys = feeds.missing_key(row["provider"])
+            print(f"  {'':10} {gate}; {'keys set' if not keys else keys + ' not set'}")
+    return 0
 
 
 def _targets(cmd: str, *, tiers: list[int] | None, plan: bool) -> int:
@@ -182,12 +322,13 @@ def _targets(cmd: str, *, tiers: list[int] | None, plan: bool) -> int:
     from .errors import ApiError
     from .nodes import strategist
     from .services.store import Store
-    from .sources import serper, targets
+    from .sources import provider_guard, serper, targets
 
     try:
         with transaction() as session:
             store = Store(session, now_ms())
-            planned, matrix = store.search_queries(refresh=plan and cmd == "discover")
+            # Robots verdicts are asked for even when listing: free, and what a search would send.
+            planned, matrix = store.search_queries(refresh=plan and cmd == "discover", probe=cmd != "list")
             profile = store.get_profile()
             known = store.known_apply_urls()
             key = store.plan_key()
@@ -217,18 +358,46 @@ def _targets(cmd: str, *, tiers: list[int] | None, plan: bool) -> int:
 
     queue.retire_others()
     try:
-        client = serper.Serper(max_queries=wera().max_serper_queries)
+        client = serper.Serper(max_queries=wera().max_serper_queries, guard=provider_guard.Guard(queue.r, "serper"))
     except ApiError as exc:
         print(exc.message, file=sys.stderr)
         return 1
     chosen = sorted(set(tiers or [1]))
+    if 0 in chosen:
+        resource = serper.Serper(
+            max_queries=strategist.RESOURCE_QUERIES,
+            window=strategist.RESOURCE_WINDOW,
+            guard=provider_guard.Guard(queue.r, "serper"),
+        )
+        asked = strategist.discover_feeds(
+            planned, profile, queue=queue, known_urls=known, sites=sites(), now=now_ms(), redis=queue.r, resource=resource
+        )
+        for feed_id, stats in asked.by_feed.items():
+            if stats.get("skipped"):
+                print(f"  {feed_id:10} skipped: {stats['skipped']}")
+            else:
+                print(
+                    f"  {feed_id:10} {stats['searches']} search(es) {dict(stats['how'])}, {stats['leads']} lead(s), "
+                    f"{stats['queued']} queued"
+                    + (f", {stats['no_original']} without an original found" if stats.get("no_original") else "")
+                )
+        print(
+            f"Job APIs: {asked.queued} queued; {resource.sent} Serper quer(ies) to find originals, {resource.cached} from Redis."
+        )
+        chosen = [t for t in chosen if t != 0]
+        if not chosen:
+            print(f"{queue.size()} waiting for the Harvester.")
+            return 0
     print(
         f"Plan {key}: sending tier(s) {chosen} — {sum(1 for q in planned if q.tier in chosen)} queries, "
         f"at most {client.max_queries}."
     )
     found = strategist.discover(planned, chosen, serper=client, queue=queue, known_urls=known, sites=sites(), profile=profile)
     kinds = ", ".join(f"{n} {k}" for k, n in found.kinds.most_common()) or "nothing"
-    print(f"Serper:   {client.sent} sent, {client.answered} answered, window {client.window}")
+    print(
+        f"Serper:   {client.sent} sent, {client.answered} answered, {client.cached + client.coalesced} from Redis, "
+        f"window {client.window}{f' — stopped: {client.stopped}' if client.stopped else ''}"
+    )
     print(f"Results:  {found.results} ({kinds})")
     refused = f", refused by {', '.join(sorted(found.refused))}" if found.refused else ""
     print(f"Listings: {found.listings_read} read for links, {found.listing_links} posting links found{refused}")
@@ -276,6 +445,37 @@ def _refilter(apply: bool) -> int:
     print(f'\n{len(brought)} hidden job(s) {verb}. They join the backlog that "Find more" scores first.')
     if not apply and brought:
         print("Run again with --apply to bring them back.")
+    return 0
+
+
+def _dedupe(apply: bool) -> int:
+    """NORM-06 across sites over the jobs already saved. Lists by default; `--apply` merges them."""
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        found = Store(session).dedupe_saved(apply=apply)
+    for item in found:
+        print(f"  {item['action']:34} {item['title'][:40]:40} {item['company'][:20]:20}")
+        print(f"      keep  {item['keep_url']}\n      copy  {item['copies']}")
+    print(f"\n{len(found)} saved job(s) seen on more than one site.")
+    if not apply and found:
+        print("Run again with --apply to merge them. The copy is hidden, not deleted; the job kept has every source.")
+    return 0
+
+
+def _tidy(apply: bool) -> int:
+    """Future dates and page-text menus on saved jobs. Lists by default; `--apply` changes them."""
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        found = Store(session).tidy_saved(apply=apply)
+    for item in found:
+        print(f"  {item['title'][:44]:44} {item['company'][:22]:22} {item['change']}")
+    print(f"\n{len(found)} saved job(s) {'tidied' if apply else 'to tidy'}.")
+    if not apply and found:
+        print("Run again with --apply to change them. Statuses and scores are kept.")
     return 0
 
 
@@ -407,6 +607,7 @@ def _eval_packs(model: str | None, cv: Path | None, out: Path | None, ads: int, 
     print(f"Guard pass:      {report.guard_pass_rate:.0f}%")
     print(f"Bullets/pack:    {report.mean_bullets:.1f}   ATS coverage: {report.mean_coverage:.0%}")
     print(f"Backed coverage: {report.mean_backed_coverage:.0%}  (must reach the {wera().ats_threshold:.0%} ATS threshold)")
+    print(f"ATS score:       {report.mean_ats_score:.1f} of 100  (best this CV could reach: {report.mean_best_score:.1f})")
     print(f"Cost:            ${report.cost_usd:.4f} over {report.calls} call(s)")
     print(f"Report:          {path}")
     print(f"                 {data}")

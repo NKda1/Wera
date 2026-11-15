@@ -14,6 +14,7 @@ from .api import (
     JobList,
     JobsCleared,
     NavCounts,
+    PlaceOption,
     ProfileProposalResult,
     RegenerateIn,
     RunIn,
@@ -26,15 +27,19 @@ from .applications import Application, ApplicationListItem, ApplicationWithJob
 from .cv import Contact, CvLine, MasterCV
 from .cv_profile import CvProfile
 from .jobs import FitEvidence, FitReport, FitWeights, Job, ScoredJob
+from .learning import SuggestionList
 from .pack import AnswerItem, AtsReport, CoverLetter, JobAnalysis, Pack, TailoredCV
 from .profile import SearchProfile
 from .runs import ChannelSummary, Estimate, IntakeRun, RunIds
 from .settings import Settings, SettingsPatch, SettingsResponse
 from .strategy import TargetMatrix
+from .upskills import UpskillsReport
 
 # Responses describe what the web app receives; request bodies what it sends.
 RESPONSES = [
     MasterCV,
+    UpskillsReport,
+    SuggestionList,
     Contact,
     CvLine,
     CvVersion,
@@ -64,6 +69,7 @@ RESPONSES = [
     SettingsResponse,
     NavCounts,
     ShortlistMeta,
+    PlaceOption,
     SiteOption,
     JobList,
     ApplicationList,

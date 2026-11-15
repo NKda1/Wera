@@ -14,6 +14,7 @@ from ..clock import now_ms, parse_ms
 from ..schemas.jobs import Job
 from ..schemas.profile import SearchProfile
 from .dedupe import normalise_title
+from .places import COUNTRIES
 
 # Seniority words that put a job above an early-career search, in the order they are reported.
 ABOVE = ("principal", "staff", "head of", "director", "vp ", "lead ", "senior", "sr.", "sr ")
@@ -110,6 +111,27 @@ def matches_a_target(title: str, targets: list[str]) -> bool:
     return any(wanted and wanted <= posting for wanted in (title_tokens(t) for t in targets))
 
 
+# The reason a near miss is hidden with, and what the hidden list sorts on.
+NEAR_MISS = "Close to your titles, but not one of them"
+_EARLY_IN_TITLE = re.compile(
+    r"(^|\W)(intern|internship|graduate|grad|junior|entry|early careers?|apprentice|trainee)(\W|$)", re.I
+)
+
+
+def near_miss(title: str, profile: SearchProfile) -> bool:
+    """A title that isn't a target but is plausibly the same kind of job (14 Nov).
+
+    "Graduate Data Engineer" against "Software Engineer": it shares a word the targets are about
+    and says it is early-career, which an account executive's or a staff engineer's title doesn't.
+    Two shared words do without the level word. Never a reason to *show* a job — only to list it
+    first among the hidden, where the person can bring it back.
+    """
+    posting = title_tokens(title)
+    wanted = set().union(*(title_tokens(t) for t in profile.titles if t.strip())) if profile.titles else set()
+    shared = posting & wanted
+    return len(shared) >= 2 or (len(shared) == 1 and bool(_EARLY_IN_TITLE.search(title)))
+
+
 def title_mismatch(title: str, profile: SearchProfile) -> str | None:
     """MATCH-01: a job that isn't the kind of work this person asked for.
 
@@ -198,13 +220,20 @@ def wrong_location(job: Job, profile: SearchProfile) -> str | None:
     if job.remote == "remote":
         return None  # `remote: any`, and this one is remote — where it nominally sits is moot
     place = " ".join(filter(None, [job.location.city, job.location.country, job.location.raw])).lower()
-    if not place.strip():
+    # "Hybrid", "Flexible", "Multiple locations": a working pattern, not a place, and nothing to
+    # judge where the job is by. 21 jobs were hidden on 14 Nov as "Location isn't in your search:
+    # Hybrid".
+    if not NOT_A_PLACE.sub(" ", place).strip(" ,;/-·|()"):
         return None
     # The city part of each location: "London, UK" is London. Matching the whole string hid every
     # posting that wrote the country another way — "London, England, GBR" doesn't contain
     # "london, uk" — and found live, it had hidden twelve London jobs out of one search's thirty.
     cities = [c for c in (w.split(",")[0].strip().lower() for w in profile.locations) if c]
     if any(c in place for c in cities):
+        return None
+    # A part of a city the posting names instead of the city: Octagon's "West End, England" was
+    # hidden from a London search (14 Nov).
+    if any(re.search(rf"(^|\W){re.escape(area)}(\W|$)", place) for c in cities for area in CITY_AREAS.get(c, ())):
         return None
     # SRCH-11: with no cities named, the countries are what "where" means, so a job is judged on
     # those instead. Without this a country-only profile — now a legitimate thing to have — would
@@ -220,6 +249,44 @@ def wrong_location(job: Job, profile: SearchProfile) -> str | None:
     return job.location.city or job.location.raw
 
 
+NOT_A_PLACE = re.compile(
+    r"\b(hybrid|remote|flexible|flexible working|multiple locations|various locations|"
+    r"location flexible|in office|office based|on-?site|onsite|anywhere|tbc|n/a)\b",
+    re.I,
+)
+
+# Districts a posting gives in place of its city. Only the places a job ad really writes on its
+# own, and only for cities WERA's people search; a missing one costs a hidden job, an over-broad
+# one a wrong-city job, so each is a name nothing else is called.
+CITY_AREAS: dict[str, tuple[str, ...]] = {
+    "london": (
+        "west end",
+        "city of london",
+        "canary wharf",
+        "shoreditch",
+        "king's cross",
+        "kings cross",
+        "soho",
+        "holborn",
+        "farringdon",
+        "southwark",
+        "camden",
+        "islington",
+        "hammersmith",
+        "stratford",
+        "paddington",
+        "white city",
+        "battersea",
+        "aldgate",
+        "liverpool street",
+        "old street",
+        "westminster",
+        "greater london",
+    ),
+    "manchester": ("salford", "media city", "mediacity", "spinningfields", "greater manchester"),
+}
+
+
 def country_aliases(profile: SearchProfile) -> list[str]:
     """Every name a posting might use for one of the profile's target countries."""
     out: list[str] = []
@@ -230,19 +297,8 @@ def country_aliases(profile: SearchProfile) -> list[str]:
 
 
 # A country's names as a posting would write them, so "London, UK" satisfies a GB target. A code
-# with no entry is matched as itself, which is weak but honest.
-COUNTRY_ALIASES = {
-    "GB": ("united kingdom", "uk", "england", "scotland", "wales", "northern ireland", "britain"),
-    "IE": ("ireland", "republic of ireland", "eire"),
-    "NL": ("netherlands", "the netherlands", "holland"),
-    "DE": ("germany", "deutschland"),
-    "FR": ("france",),
-    "BE": ("belgium",),
-    "ES": ("spain", "españa"),
-    "CH": ("switzerland", "schweiz", "suisse"),
-    "CZ": ("czechia", "czech republic"),
-    "US": ("united states", "usa", "us", "united states of america"),
-}
+# with no entry is matched as itself, which is weak but honest — add it to `places.COUNTRIES`.
+COUNTRY_ALIASES = {code: country.aliases for code, country in COUNTRIES.items()}
 
 
 def too_old(job: Job, profile: SearchProfile, now: int) -> str | None:
@@ -295,6 +351,14 @@ def hidden_reason(job: Job, profile: SearchProfile, now: int | None = None) -> s
     # titles" is exactly the point.
     off_target = title_mismatch(job.title, profile)
     if off_target:
+        # A near miss says so, and only one that would otherwise have passed: shown first in the
+        # hidden list, it is where "Find more" points once every search has been sent (SRCH-26).
+        if (
+            near_miss(job.title, profile)
+            and not wrong_location(job, profile)
+            and not too_old(job, profile, now if now is not None else now_ms())
+        ):
+            return f"{NEAR_MISS}: {job.title}"
         return f"{off_target}: {job.title}"
     where = wrong_location(job, profile)
     if where:

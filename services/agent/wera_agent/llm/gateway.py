@@ -16,6 +16,7 @@ Demo mode never reaches the network: it answers from `llm.demo` responders and s
 the result with the same schema, so the demo exercises the real contract.
 """
 
+import re
 import time
 from functools import cache
 from json import JSONDecodeError
@@ -45,6 +46,7 @@ from .prompts import RETRY_NOTE, template
 
 # §9.4: stable codes. The provider's own message never reaches the caller.
 AUTH = "LLM_AUTH_FAILED"
+KEY_LIMIT = "LLM_KEY_LIMIT"
 QUOTA = "LLM_QUOTA"
 RATE = "LLM_RATE_LIMITED"
 TIMEOUT = "LLM_TIMEOUT"
@@ -55,6 +57,11 @@ BUDGET = "BUDGET_REACHED"
 
 MESSAGES = {
     AUTH: "The model provider rejected the API key. Check LLM_API_KEY in .env.local.",
+    KEY_LIMIT: (
+        "The API key has reached the spending limit set on the key itself. Raise or remove it at "
+        "openrouter.ai/settings/keys — topping up the account doesn't lift it. WERA's weekly "
+        "budget is separate."
+    ),
     QUOTA: (
         "The model provider wouldn't accept the request on the credit left — it reserves the "
         "whole token budget up front, so a task can be refused while credit remains. Top up the "
@@ -141,6 +148,8 @@ def _code_for(exc: BaseException) -> str:
     works for the OpenAI SDK, a proxy in between, and anything OpenAI-compatible behind them."""
     name = type(exc).__name__
     status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 403 and _key_limit(exc) is not None:
+        return KEY_LIMIT
     if "Unauthorized" in name or "Authentication" in name or "Forbidden" in name or status in (401, 403):
         return AUTH
     if "PaymentRequired" in name or "Quota" in name or status == 402:
@@ -152,8 +161,23 @@ def _code_for(exc: BaseException) -> str:
     return UPSTREAM
 
 
+_KEY_LIMIT = re.compile(r"key limit exceeded(?: \((total|daily|weekly|monthly) limit\))?", re.IGNORECASE)
+
+
+def _key_limit(exc: BaseException) -> str | None:
+    """Which limit a key-limit refusal names, as one of a fixed set of words, or None.
+
+    OpenRouter answers a key that has spent the limit set on it with a 403 — the same status as a
+    bad key — and only the body says which it is ("Key limit exceeded (total limit)"). Reading it
+    as a bad key sent the person to check a key that worked (15 Nov). Only the match leaves this
+    function, never the body (§9.4).
+    """
+    found = _KEY_LIMIT.search(f"{getattr(exc, 'body', '')} {exc}")
+    return None if found is None else (found.group(1) or "").lower()
+
+
 def _fail(code: str) -> ApiError:
-    status = 429 if code == RATE else 402 if code in (QUOTA, BUDGET) else 502 if code == UPSTREAM else 424
+    status = 429 if code == RATE else 402 if code in (QUOTA, KEY_LIMIT, BUDGET) else 502 if code == UPSTREAM else 424
     return ApiError(status, code, MESSAGES[code])
 
 
@@ -333,6 +357,9 @@ def _record(
     """
     tokens_in = int((usage or {}).get("input_tokens") or 0)
     tokens_out = int((usage or {}).get("output_tokens") or 0)
+    # LangChain's `usage_metadata` carries both kinds when the provider reports them.
+    cached = ((usage or {}).get("input_token_details") or {}).get("cache_read")
+    thinking = ((usage or {}).get("output_token_details") or {}).get("reasoning")
     cost = reported_cost if reported_cost is not None else cost_usd(model, tokens_in, tokens_out)
     row = {
         "task": task,
@@ -347,6 +374,8 @@ def _record(
         # PRIV-03: field paths and rule names, never a value. See `_problem_fields`.
         "detail": detail[:300] if detail else None,
         "attempt": attempt,
+        "cached_tokens": int(cached) if isinstance(cached, int | float) else None,
+        "reasoning_tokens": int(thinking) if isinstance(thinking, int | float) else None,
         "called_at": iso(now_ms()),
         "trace_id": _trace_id(),
     }
@@ -615,7 +644,19 @@ def _structured[Out: BaseModel](
             result, problem = None, exc
         except BaseException as exc:  # noqa: BLE001 — every provider failure becomes a WERA code
             code = _code_for(exc)
-            _record(session, task=task, tier=spec.tier, model=models[0], started=started, attempt=attempt, ok=False, code=code)
+            kind = _key_limit(exc) if code == KEY_LIMIT else None
+            detail = None if kind is None else f"key limit ({kind})" if kind else "key limit"
+            _record(
+                session,
+                task=task,
+                tier=spec.tier,
+                model=models[0],
+                started=started,
+                attempt=attempt,
+                ok=False,
+                code=code,
+                detail=detail,
+            )
             logfire.warn("{task} failed upstream: {code}", task=task, code=code)
             raise _fail(code) from None
 

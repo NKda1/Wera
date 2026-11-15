@@ -1,0 +1,79 @@
+# Redis server metrics into Logfire (OBS-05), through the OpenTelemetry Collector's `redis`
+# receiver. `scripts/otel-collector.sh` runs it beside `postgresql.yaml` in one collector, and
+# loads the variables below from .env.local and the write token from .logfire/; none of them are
+# in this file.
+#
+# What it reads is `INFO` (and `CONFIG GET` for maxmemory), as the ACL user `logfire_monitor`, which
+# may run those two commands and nothing else: it can't read a key.
+#
+#   ACL SETUSER logfire_monitor reset on >'<password>' +info +config|get
+#   CONFIG REWRITE      # saves the user into redis.conf, so it survives a restart
+#
+# **Sized for Logfire's bill**, as postgresql.yaml is: each metric point is a record against the
+# same 10M a month as WERA's spans. Changed from Logfire's template:
+#
+# * `collection_interval: 300s`, not 10s. Every metric in the template stays on, but at 60s they
+#   were 145 points a minute (measured 13 Nov), about 6.3M a month: two-thirds of the allowance.
+#   Most of it is the per-command series — `redis.cmd.latency` is three percentiles for each of
+#   the ~22 commands Redis has seen since it started, `cmd.calls` and `cmd.usec` one each — and
+#   they grow with the commands WERA uses, not with traffic. They're counters and running
+#   percentiles, so five minutes loses little: a slow command still shows, within five minutes.
+#   Moments that last seconds, like a provider's breaker opening, are WERA's own spans' job.
+#
+# Measured after the change: see ARCHITECTURE §5.2.
+
+receivers:
+  redis:
+    endpoint: ${env:REDIS_ENDPOINT}
+    collection_interval: 300s
+    username: ${env:REDIS_MONITOR_USERNAME}
+    password: ${env:REDIS_MONITOR_PASSWORD}
+    metrics:
+      redis.uptime:
+        enabled: true
+      redis.maxmemory:
+        enabled: true
+      redis.cmd.latency:
+        enabled: true
+      redis.cmd.calls:
+        enabled: true
+      redis.cmd.usec:
+        enabled: true
+      redis.memory.used_memory_overhead:
+        enabled: true
+      redis.replication.replica_offset:
+        enabled: true
+      redis.role:
+        enabled: true
+
+processors:
+  # service.instance.id identifies one Redis server; every rate and per-instance number on
+  # Logfire's dashboard groups on it, so it must be stable and unique per server.
+  resource/redis:
+    attributes:
+      - key: service.namespace
+        value: infrastructure
+        action: upsert
+      - key: service.name
+        value: redis
+        action: upsert
+      - key: service.instance.id
+        value: ${env:REDIS_INSTANCE_ID}
+        action: upsert
+      - key: host.name
+        value: localhost
+        action: upsert
+  batch: {}
+
+exporters:
+  otlp_http/logfire:
+    endpoint: ${env:LOGFIRE_INGEST_URL}
+    headers:
+      Authorization: Bearer ${env:LOGFIRE_TOKEN}
+
+service:
+  pipelines:
+    metrics/redis:
+      receivers: [redis]
+      processors: [resource/redis, batch]
+      exporters: [otlp_http/logfire]

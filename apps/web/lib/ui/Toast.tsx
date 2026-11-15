@@ -20,13 +20,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={push}>
       {children}
-      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex flex-col items-center gap-2 p-4" aria-live="polite" role="status">
+      <div
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-50 flex flex-col items-center gap-2 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"
+        aria-live="polite"
+        role="status"
+      >
         {toasts.map((t) => (
           <div
             key={t.id}
             className={cn(
               "pointer-events-auto flex w-full max-w-md animate-slide-up items-start gap-3 rounded-control px-4 py-3 text-[15px] shadow-pop",
-              t.tone === "ok" && "bg-forest-900 text-white",
+              t.tone === "ok" && "bg-accent-strong text-white",
               t.tone === "attention" && "border border-amber-100 bg-amber-50 text-amber-700",
               t.tone === "error" && "border border-red-700/20 bg-red-50 text-red-700",
             )}
@@ -34,11 +38,20 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             {t.tone === "ok" ? <CircleCheck className="mt-0.5 size-4 shrink-0" aria-hidden="true" /> : <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden="true" />}
             <span className="flex-1">{t.message}</span>
             {t.action ? (
-              <button type="button" className="font-semibold underline underline-offset-2" onClick={() => (t.action!.onClick(), dismiss(t.id))}>
+              <button
+                type="button"
+                className="font-semibold underline underline-offset-2 pointer-coarse:-my-2.5 pointer-coarse:min-h-11"
+                onClick={() => (t.action!.onClick(), dismiss(t.id))}
+              >
                 {t.action.label}
               </button>
             ) : null}
-            <button type="button" onClick={() => dismiss(t.id)} aria-label="Dismiss" className="-m-1 p-1 opacity-70 hover:opacity-100">
+            <button
+              type="button"
+              onClick={() => dismiss(t.id)}
+              aria-label="Dismiss"
+              className="-m-1 p-1 opacity-70 hover:opacity-100 pointer-coarse:-m-3 pointer-coarse:p-3"
+            >
               <X className="size-4" />
             </button>
           </div>

@@ -15,11 +15,15 @@ What this module does and doesn't do:
   three tries (SRCH-07), and stops for the run on a refused key rather than paying to be told again.
 * **Never returns a LinkedIn link** (SRCH-03): open queries exclude it, and a result that slips
   through is dropped here.
+* **Asks Redis first** (SRCH-33, `sources.provider_guard`), when the run has one: a query any search
+  answered in the last three hours is served from there free and uncounted, one being asked right
+  now is waited for rather than asked twice, and a Serper that is rate-limiting or failing, or
+  whose day's budget is spent, isn't asked at all.
 """
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import logfire
 
@@ -27,6 +31,7 @@ from ..errors import ApiError
 from ..http import is_denied, request
 from ..logging import redact
 from ..settings import get_settings
+from .provider_guard import Guard, answer_key
 
 ENDPOINT = "https://google.serper.dev/search"
 # Ten results is one credit; more costs more, and a posting past the tenth result is rarely one
@@ -57,11 +62,17 @@ class Serper:
     max_queries: int
     window: str = WINDOW
     sleep: Callable[[float], None] = time.sleep
+    # SRCH-33: shared answers, the lock, the breaker and the day's meter. None asks Serper every time.
+    guard: Guard | None = None
     sent: int = 0
     answered: int = 0
+    # Queries answered from Redis: by an earlier search, or by one asking the same thing at once.
+    cached: int = 0
+    coalesced: int = 0
     errors: list[str] = field(default_factory=list)
-    # Why the client stopped asking: "cap" once `max_queries` is reached, or an error code when
-    # Serper refused the key. A stopped client answers every later query with None.
+    # Why the client stopped asking: "cap" once `max_queries` is reached, "breaker" while Serper
+    # is being left alone, "daily_budget" when today's share is spent, or an error code when Serper
+    # refused the key. A stopped client answers every later query with None.
     stopped: str | None = None
 
     def __post_init__(self) -> None:
@@ -79,13 +90,46 @@ class Serper:
         """One query's results, or None when the cap, the key or the network said no."""
         if self.stopped is not None:
             return None
+        body: dict[str, object] = {"q": q, "gl": gl, "hl": hl, "num": RESULTS_PER_QUERY}
+        if self.window:  # "" asks without a date filter (finding a lead's original, SRCH-32)
+            body["tbs"] = self.window
+        if page > 1:
+            body["page"] = page
+        guard = self.guard
+        key = answer_key("serper", body)
+        if guard is not None and (known := _from_cache(guard.answer(key))) is not None:
+            self.cached += 1
+            return known
         if self.sent >= self.max_queries:
             self.stopped = "cap"
             return None
+        if guard is not None and (why := self._held_back(guard)) is not None:
+            self.stopped = why
+            return None
+        token = guard.lead(key) if guard is not None else None
+        if guard is not None and token is None:
+            if (waited := _from_cache(guard.wait_for(key))) is not None:
+                self.coalesced += 1
+                return waited
+            token = guard.lead(key)  # the caller asking it gave up without an answer: ask ourselves
+        try:
+            return self._send(q, body, key)
+        finally:
+            if guard is not None and token is not None:
+                guard.release(key, token)
+
+    def _held_back(self, guard: Guard) -> str | None:
+        if seconds := guard.open_for():
+            logfire.warn("Serper is being left alone for {seconds}s: {why}", seconds=seconds, why=guard.why_open())
+            return "breaker"
+        if guard.spent():
+            logfire.warn("Today's Serper budget is spent: {used} of {daily}", used=guard.used_today(), daily=guard.daily)
+            return "daily_budget"
+        return None
+
+    def _send(self, q: str, body: dict[str, object], key: str) -> list[Result] | None:
         self.sent += 1
-        body: dict[str, object] = {"q": q, "gl": gl, "hl": hl, "num": RESULTS_PER_QUERY, "tbs": self.window}
-        if page > 1:
-            body["page"] = page
+        guard = self.guard
         for attempt in range(MAX_TRIES):
             try:
                 response = request("POST", ENDPOINT, json=body, headers={"X-API-KEY": self._key})
@@ -93,14 +137,18 @@ class Serper:
                 raise  # demo mode or a refused host: a fact about WERA's gates, not the network
             except Exception as exc:  # noqa: BLE001 — a dropped connection is worth another try
                 if attempt == MAX_TRIES - 1:
-                    return self._failed(q, type(exc).__name__)
+                    return self._failed(q, type(exc).__name__, count=True)
                 self.sleep(BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS) - 1)])
                 continue
             status = response.status_code
             if status == 200:
                 self.answered += 1
-                return _results(response.json())
-            if status == 400 and body["tbs"] != FALLBACK_WINDOW:
+                results = _results(response.json())
+                if guard is not None:
+                    guard.count()
+                    guard.remember(key, [asdict(r) for r in results])
+                return results
+            if status == 400 and body.get("tbs") and body["tbs"] != FALLBACK_WINDOW:
                 # The one 400 worth a second try: a date filter Serper doesn't accept. Asked again
                 # with the month, and the month kept for the rest of the run.
                 logfire.warn("Serper refused the {window} window; using a month instead", window=body["tbs"])
@@ -109,17 +157,44 @@ class Serper:
             if status in (401, 403):
                 self.stopped = "SERPER_AUTH"
                 return self._failed(q, f"Serper refused the key (HTTP {status})")
+            if status == 429 and attempt == MAX_TRIES - 1 and guard is not None:
+                # Still rate-limited after backing off: every caller leaves Serper alone for a while.
+                guard.trip("HTTP 429", _retry_after(response))
+                self.stopped = "breaker"
+                return self._failed(q, "HTTP 429")
             if status == 429 or status >= 500:
                 if attempt == MAX_TRIES - 1:
-                    return self._failed(q, f"HTTP {status}")
+                    return self._failed(q, f"HTTP {status}", count=True)
                 self.sleep(BACKOFF_SECONDS[min(attempt, len(BACKOFF_SECONDS) - 1)])
                 continue
             return self._failed(q, f"HTTP {status}: {redact(response.text[:160])}")
         return self._failed(q, "no answer")
 
-    def _failed(self, q: str, why: str) -> None:
+    def _failed(self, q: str, why: str, *, count: bool = False) -> None:
+        """`count`: a failure of Serper's (not of the query), counted towards the breaker."""
         logfire.warn("Serper query failed: {why}", why=why, query=q)
         self.errors.append(f"search {q!r}: {why}")
+        if count and self.guard is not None and self.guard.failed(why):
+            self.stopped = "breaker"
+        return None
+
+
+def _retry_after(response: object) -> int | None:
+    """Seconds from a Retry-After header, when it gives them; else the breaker's own default."""
+    try:
+        return min(int(response.headers.get("retry-after", "")), 600)  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _from_cache(rows: object) -> list[Result] | None:
+    """A remembered answer, or None when there is none — or one this version can't read, which is
+    asked again rather than trusted."""
+    if not isinstance(rows, list):
+        return None
+    try:
+        return [Result(**row) for row in rows]
+    except TypeError:
         return None
 
 

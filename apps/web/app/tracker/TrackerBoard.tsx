@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { ALLOWED, STATUS_LABEL } from "@/lib/applications";
 import { formatAgo, formatDate, formatLocation } from "@/lib/format";
@@ -11,6 +11,7 @@ import { Button } from "@/lib/ui/Button";
 import { cn } from "@/lib/ui/cn";
 import { Dialog } from "@/lib/ui/Dialog";
 import { Input, Label, Select, Textarea } from "@/lib/ui/Field";
+import { revealInline, useScrollEdges } from "@/lib/ui/scrollEdges";
 import { useToast } from "@/lib/ui/Toast";
 import { DraftProgress } from "../review/_components/DraftProgress";
 
@@ -38,7 +39,7 @@ export function TrackerBoard({ apps }: { apps: ApplicationWithJob[] }) {
 
   useEffect(() => {
     if (!drafting) return;
-    const t = setInterval(() => router.refresh(), 1000);
+    const t = setInterval(() => router.refresh(), 2000);
     return () => clearInterval(t);
   }, [drafting, router]);
 
@@ -58,6 +59,46 @@ export function TrackerBoard({ apps }: { apps: ApplicationWithJob[] }) {
 
   const request = (app: ApplicationWithJob, to: ApplicationStatus) => (CONFIRM[to] ? setConfirm({ app, to }) : move(app, to));
 
+  // Seven 280px columns are wider than any screen, and the board's scrollbar was hidden: nothing
+  // said Interview, Offer or Closed existed past the edge. The strip above names every column with
+  // its count, marks the ones in view, and scrolls the board to the one pressed.
+  const board = useRef<HTMLDivElement>(null);
+  const [inView, setInView] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const el = board.current;
+    if (!el) return;
+    const seen = new IntersectionObserver(
+      (entries) =>
+        setInView((prev) => {
+          const next = new Set(prev);
+          for (const e of entries) {
+            const id = (e.target as HTMLElement).dataset.column!;
+            if (e.isIntersecting) next.add(id);
+            else next.delete(id);
+          }
+          return next;
+        }),
+      { root: el, threshold: 0.6 },
+    );
+    for (const col of el.querySelectorAll<HTMLElement>("[data-column]")) seen.observe(col);
+    return () => seen.disconnect();
+  }, []);
+  // On a phone the strip is one row that scrolls sideways (wrapped, it took three rows of the
+  // screen), and it follows the board: swipe to Offer and Offer's button comes into view.
+  const strip = useRef<HTMLElement>(null);
+  const stripFade = useScrollEdges(strip);
+  useEffect(() => {
+    const first = COLUMNS.find((c) => inView.has(c.id));
+    if (first) revealInline(strip.current, strip.current?.querySelector<HTMLElement>(`[data-jump="${first.id}"]`) ?? null);
+  }, [inView]);
+  const jumpTo = (id: string) => {
+    const el = board.current;
+    const col = el?.querySelector<HTMLElement>(`[data-column="${id}"]`);
+    if (!el || !col) return;
+    const pad = parseFloat(getComputedStyle(el).scrollPaddingLeft) || 0;
+    el.scrollTo({ left: col.getBoundingClientRect().left - el.getBoundingClientRect().left + el.scrollLeft - pad, behavior: "smooth" });
+  };
+
   return (
     <div>
       <div className="mx-auto max-w-[920px] lg:mx-0 lg:max-w-none">
@@ -68,14 +109,51 @@ export function TrackerBoard({ apps }: { apps: ApplicationWithJob[] }) {
         </p>
       </div>
 
-      <div className="scrollbar-none mt-6 -mx-4 flex snap-x scroll-px-4 gap-4 overflow-x-auto px-4 pb-4 sm:-mx-8 sm:scroll-px-8 sm:px-8 lg:-mx-12 lg:scroll-px-12 lg:px-12">
+      <nav
+        ref={strip}
+        style={stripFade}
+        aria-label="Jump to a column"
+        className="scrollbar-none mt-6 -mx-4 flex gap-1.5 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0"
+      >
+        {COLUMNS.map((col) => {
+          const n = apps.filter((a) => col.statuses.includes(a.status)).length;
+          return (
+            <button
+              key={col.id}
+              type="button"
+              data-jump={col.id}
+              onClick={() => jumpTo(col.id)}
+              className={cn(
+                "inline-flex min-h-9 shrink-0 items-center gap-1.5 border px-3 text-[13px] font-semibold transition-colors duration-150 pointer-coarse:min-h-11",
+                inView.has(col.id) ? "border-forest-700 bg-mint-100 text-forest-900" : "border-line bg-surface text-ink-2 hover:border-forest-700 hover:text-forest-700",
+              )}
+            >
+              {col.title}
+              <span className="font-normal tabular-nums opacity-70">{n}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* Bleeds to the screen edge by exactly main's padding (`px-4 sm:px-10 lg:px-16`); it used to
+          stop 8px short from 640px and 16px short from 1024px. The scrollbar shows where a mouse
+          is the way to scroll it, and stays hidden on touch, where swiping is. */}
+      <div
+        ref={board}
+        className="mt-4 -mx-4 flex snap-x scroll-px-4 gap-4 overflow-x-auto px-4 pb-4 [scrollbar-width:thin] pointer-coarse:scrollbar-none sm:-mx-10 sm:scroll-px-10 sm:px-10 lg:-mx-16 lg:scroll-px-16 lg:px-16"
+      >
         {COLUMNS.map((col) => {
           const items = apps.filter((a) => col.statuses.includes(a.status));
           return (
-            <section key={col.id} aria-labelledby={`col-${col.id}`} className="flex w-[280px] shrink-0 snap-start flex-col rounded-card bg-mint-100/60 p-3">
+            <section
+              key={col.id}
+              data-column={col.id}
+              aria-labelledby={`col-${col.id}`}
+              className="flex w-[280px] shrink-0 snap-start flex-col rounded-card bg-mint-100/60 p-3"
+            >
               <h2 id={`col-${col.id}`} className="mb-3 flex items-center justify-between px-1 text-[14px] font-bold">
                 {col.title}
-                <span className="rounded-full bg-white px-2 py-0.5 text-[12px] tabular-nums text-ink-2">{items.length}</span>
+                <span className="rounded-none bg-surface px-2 py-0.5 text-[12px] tabular-nums text-ink-2">{items.length}</span>
               </h2>
               <ul className="flex flex-col gap-2.5">
                 {items.map((a) => (
@@ -142,7 +220,7 @@ function TrackerCard({ app, onMove }: { app: ApplicationWithJob; onMove: (to: Ap
   };
 
   return (
-    <li className="rounded-control border border-line bg-white p-3.5 shadow-card">
+    <li className="rounded-control border border-line bg-surface p-3.5 shadow-card [overflow-wrap:anywhere]">
       <h3 className="text-[15px] leading-snug font-bold">
         {hasPack ? (
           <Link href={`/review/${app.id}`} className="hover:text-forest-700">
@@ -171,7 +249,7 @@ function TrackerCard({ app, onMove }: { app: ApplicationWithJob; onMove: (to: Ap
             {formatDate(app.followUpAt, { weekday: "short", day: "numeric", month: "short" })}
           </p>
         ) : null}
-        {app.notes && !open ? <p className="mt-1.5 line-clamp-3 rounded-md bg-mint-50 px-2 py-1.5 text-ink">{app.notes}</p> : null}
+        {app.notes && !open ? <p className="mt-1.5 line-clamp-3 rounded-none bg-mint-50 px-2 py-1.5 text-ink">{app.notes}</p> : null}
       </div>
 
       {open ? (

@@ -3,13 +3,14 @@ proves itself with a shared bearer token (AGENT_TOKEN)."""
 
 import asyncio
 import secrets
+import sys
 from contextlib import asynccontextmanager
 
 import logfire
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import errors, tasks
+from . import errors, tasks, watchdog
 from .api import scheduler
 from .api.routes import router
 from .clock import now_ms
@@ -43,8 +44,11 @@ def _sweep_if_due() -> None:
     awaited: it is minutes of HTTP against other people's boards and the app must come up now.
     It spends no credits and no model calls, so there is no budget question to put to anyone.
     """
+    from .api.scheduler import stored_intake_enabled
     from .graphs import recheck
 
+    if not stored_intake_enabled():
+        return  # SCH-05: off unless the person turned the daily jobs on; "Recheck" still works
     with transaction() as session:
         from .services.store import Store
 
@@ -54,8 +58,16 @@ def _sweep_if_due() -> None:
     tasks.spawn(recheck.run_async(), name="recheck:startup")
 
 
+SWITCH_INTERVAL_S = 0.0005
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # 0.5 ms, not CPython's 5: the request loop gives up the GIL on every socket call and then
+    # waits up to the interval to get it back from whichever worker thread is busy (scoring,
+    # filtering a feed, encoding spans). Hundreds of hand-backs a pass made a 4–7 s freeze (14
+    # Nov). Here rather than in `wera serve`, which with `--reload` isn't the serving process.
+    sys.setswitchinterval(SWITCH_INTERVAL_S)
     ensure_database()
     tasks.bind(asyncio.get_running_loop())
     # REL-03: a thread that stopped mid-draft because the process went away is picked up here.
@@ -68,7 +80,11 @@ async def lifespan(_app: FastAPI):
     # SCH-01: boards in the morning, the inbox through the day. Off in demo mode.
     scheduler.start()
     _sweep_if_due()
+    # A.9: evidence for the next stall, if there is one. Live only — demo mode makes no slow calls.
+    stop_watchdog = None if get_settings().wera_demo_mode else watchdog.start(asyncio.get_running_loop())
     yield
+    if stop_watchdog is not None:
+        stop_watchdog.set()
     scheduler.stop()
     # The default, which is sized to a pack's measured drafting time. See `tasks.adrain`.
     await tasks.adrain()

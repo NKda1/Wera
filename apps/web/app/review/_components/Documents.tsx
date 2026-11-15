@@ -61,7 +61,7 @@ export function CvPaper({
                     <ul className="mt-1.5 space-y-2">
                       {item.bullets.map((b, bi) => (
                         <li key={b.sourceIds.join() + bi} className="grid grid-cols-[12px_1fr] gap-x-1 sm:grid-cols-[12px_1fr_auto] sm:gap-x-3">
-                          <span className="mt-[11px] size-1.5 rounded-full bg-leaf-500" aria-hidden="true" />
+                          <span className="mt-[11px] size-1.5 rounded-dot bg-leaf-500" aria-hidden="true" />
                           <EditableText
                             value={b.text}
                             editable={editable}
@@ -156,7 +156,7 @@ export function LetterPaper({
     return (
       <>
         {before}
-        <mark className="rounded-sm bg-mint-100 px-0.5 text-ink" title="Quoted word for word from the job post">
+        <mark className="rounded-none bg-mint-100 px-0.5 text-ink" title="Quoted word for word from the job post">
           {quote}
         </mark>
         {rest.join(quote)}
@@ -167,10 +167,10 @@ export function LetterPaper({
   return (
     <Card className="px-5 py-7 sm:px-10 sm:py-10">
       <div className="mb-6 flex flex-wrap gap-2 text-small">
-        <span className={cn("rounded-full px-2.5 py-1 font-semibold", inRange ? "bg-mint-100 text-forest-900" : "bg-amber-50 text-amber-700")}>
+        <span className={cn("rounded-none px-2.5 py-1 font-semibold", inRange ? "bg-mint-100 text-forest-900" : "bg-amber-50 text-amber-700")}>
           {letter.wordCount} words · target 250–350
         </span>
-        {quote ? <span className="rounded-full bg-mint-100 px-2.5 py-1 font-semibold text-forest-900">1 company fact quoted from the post</span> : null}
+        {quote ? <span className="rounded-none bg-mint-100 px-2.5 py-1 font-semibold text-forest-900">1 company fact quoted from the post</span> : null}
       </div>
       <article aria-label="Cover letter" className="space-y-4 text-[15px] leading-relaxed">
         <p>{letter.greeting}</p>

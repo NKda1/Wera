@@ -118,8 +118,10 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
     URL.revokeObjectURL(a.href);
   };
 
+  // `@container`: the form's rows lay out by the width they have — several were fixed
+  // multi-column grids that left a phone a ~100px URL field and ~120px language inputs.
   return (
-    <div className="mx-auto max-w-[860px]">
+    <div className="@container mx-auto max-w-[860px]">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <Pill tone="green" dot={false}>
@@ -197,9 +199,16 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
             <legend className="mb-1.5 text-[14px] font-semibold">Links</legend>
             <ul className="space-y-2">
               {cv.person.links.map((l, i) => (
-                <li key={i} className="grid grid-cols-[minmax(0,140px)_1fr_auto] gap-2">
+                // Label and remove on one line, the URL under them at full width on a phone.
+                <li key={i} className="grid grid-cols-[1fr_auto] gap-2 @xl:grid-cols-[minmax(0,140px)_1fr_auto]">
                   <Input aria-label={`Link ${i + 1} label`} value={l.label} onChange={(e) => edit((d) => void (d.person.links[i].label = e.target.value))} placeholder="Portfolio" />
-                  <Input aria-label={`Link ${i + 1} URL`} value={l.url} onChange={(e) => edit((d) => void (d.person.links[i].url = e.target.value))} placeholder="https://" className="font-mono text-[13px]" />
+                  <Input
+                    aria-label={`Link ${i + 1} URL`}
+                    value={l.url}
+                    onChange={(e) => edit((d) => void (d.person.links[i].url = e.target.value))}
+                    placeholder="https://"
+                    className="col-span-2 row-start-2 font-mono text-[13px] @xl:col-span-1 @xl:row-start-auto"
+                  />
                   <IconButton label={`Remove link ${l.label || i + 1}`} onClick={() => edit((d) => void d.person.links.splice(i, 1))} />
                 </li>
               ))}
@@ -215,7 +224,7 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
             description="Stored separately and never sent to a model. They're added to your CV and letter on your machine when you export."
             action={<Lock className="size-5 text-forest-700" aria-hidden="true" />}
           />
-          <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          <div className="mt-4 grid gap-4 @lg:grid-cols-2 @3xl:grid-cols-3">
             <div>
               <Label htmlFor="c-email">Email</Label>
               <Input id="c-email" type="email" autoComplete="email" value={contact.email} onChange={(e) => setContact({ ...contact, email: e.target.value })} />
@@ -224,7 +233,7 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
               <Label htmlFor="c-phone">Phone</Label>
               <Input id="c-phone" type="tel" autoComplete="tel" value={contact.phone ?? ""} onChange={(e) => setContact({ ...contact, phone: e.target.value })} />
             </div>
-            <div>
+            <div className="@lg:col-span-2 @3xl:col-span-1">
               <Label htmlFor="c-address">Address</Label>
               <Input id="c-address" autoComplete="street-address" value={contact.address ?? ""} onChange={(e) => setContact({ ...contact, address: e.target.value })} />
             </div>
@@ -233,6 +242,12 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
 
         <Card className="p-5 sm:p-6" aria-labelledby="summary-title">
           <CardHeader id="summary-title" title="Summary" action={cv.summary ? <Chip variant="source">{cv.summary.id}</Chip> : null} />
+          {/* TAIL-07: a CV that came without a summary gets one WERA wrote from its own lines.
+              Said so plainly, because it is the one paragraph here the person didn't write. Any
+              edit makes it theirs: `edit` below replaces the summary without the flag. */}
+          {cv.summary?.generated ? (
+            <p className="mt-2 text-small text-ink-2">Written by WERA from your CV — edit it to make it yours, or clear it to go without one.</p>
+          ) : null}
           <Textarea
             aria-labelledby="summary-title"
             className="mt-4"
@@ -249,7 +264,9 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
           <CardHeader id="edu-title" title="Education" />
           <ul className="mt-4 space-y-4">
             {cv.education.map((ed, i) => (
-              <li key={ed.id} className="grid gap-3 sm:grid-cols-[1fr_1fr_110px_110px_auto] sm:items-end">
+              // Five columns only where the month fields get room (110px clipped "November 2026");
+              // degree and institution, then the dates, as two columns in between.
+              <li key={ed.id} className="grid gap-3 @lg:grid-cols-2 @3xl:grid-cols-[1fr_1fr_150px_150px_auto] @3xl:items-end">
                 <div>
                   <Label htmlFor={`ed-${i}-degree`}>Degree</Label>
                   <Input id={`ed-${i}-degree`} value={ed.degree} onChange={(e) => edit((d) => void (d.education[i].degree = e.target.value))} invalid={!!err(`education.${i}.degree`)} />
@@ -260,7 +277,9 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
                 </div>
                 <MonthField id={`ed-${i}-start`} label="Start" value={ed.start ?? ""} onChange={(v) => edit((d) => void (d.education[i].start = (v || undefined) as MasterCV["education"][number]["start"]))} />
                 <MonthField id={`ed-${i}-end`} label="End" value={ed.end ?? ""} onChange={(v) => edit((d) => void (d.education[i].end = (v || undefined) as MasterCV["education"][number]["end"]))} />
-                <IconButton label={`Remove ${ed.degree || "education"}`} onClick={() => edit((d) => void d.education.splice(i, 1))} />
+                <span className="justify-self-end @lg:col-span-2 @3xl:col-span-1">
+                  <IconButton label={`Remove ${ed.degree || "education"}`} onClick={() => edit((d) => void d.education.splice(i, 1))} />
+                </span>
               </li>
             ))}
           </ul>
@@ -271,11 +290,13 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
           <CardHeader id="skills-title" title="Skills" description="Tailored CVs can only list skills from here. Aliases help matching (Postgres = PostgreSQL)." />
           <ul className="mt-4 space-y-2">
             {cv.skills.map((s, i) => (
-              <li key={i} className="grid grid-cols-[1fr_auto] gap-2 sm:grid-cols-[1fr_1fr_150px_auto]">
+              // On a phone: name and remove, then aliases, then level — remove sits beside the
+              // name rather than leaving an empty cell there and a lone button at the bottom.
+              <li key={i} className="grid grid-cols-[1fr_auto] gap-2 @xl:grid-cols-[1fr_1fr_150px_auto]">
                 <Input aria-label={`Skill ${i + 1}`} value={s.name} onChange={(e) => edit((d) => void (d.skills[i].name = e.target.value))} />
                 <Input
                   aria-label={`${s.name || "Skill"} aliases`}
-                  className="col-span-2 sm:col-span-1"
+                  className="col-span-2 @xl:col-span-1"
                   placeholder="Aliases, comma separated"
                   value={(s.aliases ?? []).join(", ")}
                   onChange={(e) => edit((d) => void (d.skills[i].aliases = e.target.value.split(",").map((x) => x.trim()).filter(Boolean)))}
@@ -286,7 +307,9 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
                   <option value="proficient">Proficient</option>
                   <option value="expert">Expert</option>
                 </Select>
-                <IconButton label={`Remove ${s.name || "skill"}`} onClick={() => edit((d) => void d.skills.splice(i, 1))} />
+                <span className="col-start-2 row-start-1 @xl:col-start-auto @xl:row-start-auto">
+                  <IconButton label={`Remove ${s.name || "skill"}`} onClick={() => edit((d) => void d.skills.splice(i, 1))} />
+                </span>
               </li>
             ))}
           </ul>
@@ -297,9 +320,15 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
           <CardHeader id="lang-title" title="Languages" />
           <ul className="mt-4 space-y-2">
             {cv.languages.map((l, i) => (
-              <li key={i} className="grid grid-cols-[1fr_1fr_auto] gap-2">
+              <li key={i} className="grid grid-cols-[1fr_auto] gap-2 @lg:grid-cols-[1fr_1fr_auto]">
                 <Input aria-label={`Language ${i + 1}`} value={l.name} onChange={(e) => edit((d) => void (d.languages[i].name = e.target.value))} />
-                <Input aria-label={`${l.name || "Language"} level`} value={l.level} onChange={(e) => edit((d) => void (d.languages[i].level = e.target.value))} placeholder="Native, fluent…" />
+                <Input
+                  aria-label={`${l.name || "Language"} level`}
+                  value={l.level}
+                  onChange={(e) => edit((d) => void (d.languages[i].level = e.target.value))}
+                  placeholder="Native, fluent…"
+                  className="col-span-2 row-start-2 @lg:col-span-1 @lg:row-start-auto"
+                />
                 <IconButton label={`Remove ${l.name || "language"}`} onClick={() => edit((d) => void d.languages.splice(i, 1))} />
               </li>
             ))}
@@ -308,7 +337,7 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
         </Card>
       </div>
 
-      <div className="sticky bottom-0 z-10 -mx-4 mt-6 flex items-center justify-end gap-3 border-t border-line bg-mint-50/95 px-4 py-3 backdrop-blur sm:mx-0 sm:rounded-card sm:border sm:bg-white/95 sm:px-4">
+      <div className="sticky bottom-0 z-10 -mx-4 mt-6 flex items-center justify-end gap-3 border-t border-line bg-mint-50/95 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur sm:mx-0 sm:rounded-card sm:border sm:bg-surface/95 sm:px-4">
         <span className="mr-auto text-small text-ink-2">{dirty ? (cvDirty ? `Unsaved changes · saves as version ${saved.version + 1}` : "Unsaved contact details") : "All changes saved"}</span>
         {dirty ? (
           <Button
@@ -353,12 +382,12 @@ function RolesCard({ kind, cv, edit, err }: { kind: Kind; cv: MasterCV; edit: (f
           const path = `${kind}.${ri}`;
           const present = role.end === "present";
           return (
-            <li key={role.id} className="rounded-[12px] border border-line p-4">
+            <li key={role.id} className="rounded-none border border-line p-4">
               <div className="mb-3 flex items-center justify-between gap-2">
                 <Chip variant="source">{role.id}</Chip>
                 <IconButton label={`Remove ${role.title || "role"}`} onClick={() => edit((d) => void d[kind].splice(ri, 1))} />
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 @xl:grid-cols-2">
                 <div>
                   <Label htmlFor={`${path}-title`}>{kind === "experience" ? "Title" : "Your role"}</Label>
                   <Input id={`${path}-title`} value={role.title} onChange={(e) => edit((d) => void (d[kind][ri].title = e.target.value))} invalid={!!err(`${path}.title`)} />
@@ -373,16 +402,20 @@ function RolesCard({ kind, cv, edit, err }: { kind: Kind; cv: MasterCV; edit: (f
                   <Label htmlFor={`${path}-loc`}>Location</Label>
                   <Input id={`${path}-loc`} value={role.location ?? ""} onChange={(e) => edit((d) => void (d[kind][ri].location = e.target.value || undefined))} />
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <MonthField id={`${path}-start`} label="Start" value={role.start} invalid={!!err(`${path}.start`)} onChange={(v) => edit((d) => void (d[kind][ri].start = v as Role["start"]))} />
-                  <div>
-                    <MonthField id={`${path}-end`} label="End" value={present ? "" : role.end} disabled={present} invalid={!!err(`${path}.end`)} onChange={(v) => edit((d) => void (d[kind][ri].end = v as Role["end"]))} />
-                    <Checkbox
-                      className="mt-1"
-                      label={<span className="text-small font-normal">Present</span>}
-                      checked={present}
-                      onChange={(e) => edit((d) => void (d[kind][ri].end = (e.target.checked ? "present" : "") as Role["end"]))}
-                    />
+                {/* Its own container: the dates share a cell half the form wide, so they pair up by
+                    the cell's width — two month fields need ~320px between them. */}
+                <div className="@container">
+                  <div className="grid gap-3 @xs:grid-cols-2">
+                    <MonthField id={`${path}-start`} label="Start" value={role.start} invalid={!!err(`${path}.start`)} onChange={(v) => edit((d) => void (d[kind][ri].start = v as Role["start"]))} />
+                    <div>
+                      <MonthField id={`${path}-end`} label="End" value={present ? "" : role.end} disabled={present} invalid={!!err(`${path}.end`)} onChange={(v) => edit((d) => void (d[kind][ri].end = v as Role["end"]))} />
+                      <Checkbox
+                        className="mt-1"
+                        label={<span className="text-small font-normal">Present</span>}
+                        checked={present}
+                        onChange={(e) => edit((d) => void (d[kind][ri].end = (e.target.checked ? "present" : "") as Role["end"]))}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -525,7 +558,7 @@ function ImportCvDialog({ onClose, onImported }: { onClose: () => void; onImport
           Choose a file
         </Button>
         {chosen ? (
-          <span className="text-[14px] text-ink-2">
+          <span className="text-[14px] text-ink-2 [overflow-wrap:anywhere]">
             {chosen.name}{" "}
             <button type="button" className="font-semibold text-forest-700 underline underline-offset-2" onClick={() => setChosen(undefined)}>
               remove

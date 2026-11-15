@@ -2,7 +2,7 @@
 
 import { ChevronDown, ExternalLink } from "lucide-react";
 import { useId, useState } from "react";
-import { formatAge, formatLiveness, formatLocation, formatOrigin, formatPostedAge, formatSalary, sourceLine, sourceName } from "@/lib/format";
+import { formatAge, formatClosing, formatEvergreen, formatLiveness, formatLocation, formatOrigin, formatPostedAge, formatSalary, sourceLine, sourceName } from "@/lib/format";
 import type { ScoredJob } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -55,13 +55,18 @@ export function JobCard({
   // MATCH-10: appended rather than replacing anything, and empty for a confirmed job — if every
   // live card carried a liveness note, the one job WERA couldn't confirm would be invisible.
   const liveness = formatLiveness(job);
-  const meta = [job.company, formatLocation(job), formatSalary(job.salary), formatPostedAge(job), liveness]
+  const meta = [job.company, formatLocation(job), formatSalary(job.salary), formatPostedAge(job), formatClosing(job), liveness, formatEvergreen(job)]
     .filter(Boolean)
     .join(" · ");
 
   return (
-    <Card className={cn("animate-fade-in p-5 sm:p-6", isNew && "ring-2 ring-forest-700/40")} aria-labelledby={`${detailsId}-title`}>
-      <div className="grid grid-cols-[64px_1fr] gap-x-4 gap-y-4 sm:gap-x-5 md:grid-cols-[64px_1fr_112px]">
+    <Card
+      className={cn("animate-fade-in p-5 transition-colors duration-150 hover:border-forest-700/50 @2xl:p-7", isNew && "border-l-2 border-l-forest-700")}
+      aria-labelledby={`${detailsId}-title`}
+    >
+      {/* Laid out by the jobs screen's width (`@container` in JobsScreen), not the window's: the
+          sidebar takes 368px at 1024, and keyed to `md:` the description got ~230px there. */}
+      <div className="grid grid-cols-[64px_1fr] gap-x-4 gap-y-4 @xl:gap-x-5 @2xl:grid-cols-[64px_1fr_112px]">
         <div className="flex flex-col items-center gap-1.5">
           <ScoreRing score={fit.total} roughOnly={fit.roughOnly} />
           <span className="text-small text-ink-2">fit · #{rank}</span>
@@ -75,9 +80,21 @@ export function JobCard({
           {isNew || origin ? (
             <p className="mb-1.5 flex flex-wrap items-center gap-2">
               {isNew ? (
-                <span className="rounded-full bg-forest-700 px-2.5 py-0.5 text-[11px] font-bold tracking-wide text-white uppercase">New</span>
+                <span className="rounded-none bg-accent px-2.5 py-0.5 text-[11px] font-bold tracking-wide text-white uppercase">New</span>
               ) : null}
               {origin ? <span className="text-small text-ink-2">{origin}</span> : null}
+              {/* SRCH-32: Adzuna's terms ask for its name, linked, on every job it found, at
+                  least 116×23 px. WERA never follows Adzuna's tracked link to the job itself. */}
+              {job.via === "adzuna" ? (
+                <a
+                  href="https://www.adzuna.co.uk"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex h-[23px] min-w-[116px] items-center justify-center rounded-none border border-ink-2/30 px-2.5 text-[12px] font-semibold text-ink hover:text-forest-700"
+                >
+                  Jobs by Adzuna
+                </a>
+              ) : null}
             </p>
           ) : null}
           <h3 id={`${detailsId}-title`} className="text-h2">
@@ -89,7 +106,7 @@ export function JobCard({
               }}
               aria-expanded={open}
               aria-controls={detailsId}
-              className="group -mx-1 inline-flex items-start gap-1.5 rounded-md px-1 text-left hover:text-forest-700"
+              className="group -mx-1 inline-flex items-start gap-1.5 rounded-none px-1 text-left hover:text-forest-700 pointer-coarse:-my-2 pointer-coarse:py-2"
             >
               {job.title}
               <ChevronDown className={cn("mt-1.5 size-4 shrink-0 text-ink-2 transition-transform group-hover:text-forest-700", open && "rotate-180")} aria-hidden="true" />
@@ -106,23 +123,24 @@ export function JobCard({
           </h3>
           <p className="mt-0.5 text-small text-ink-2">{meta}</p>
           <p className="mt-1.5">
-            <span className="inline-flex rounded-[8px] bg-mint-100 px-2.5 py-0.5 text-[12px] font-semibold text-forest-900 sm:rounded-full">{sourceLine(job)}</span>
+            <span className="inline-flex rounded-none bg-mint-100 px-2.5 py-0.5 text-[12px] font-semibold text-forest-900 sm:rounded-none">{sourceLine(job)}</span>
           </p>
         </div>
 
-        <div className="col-span-2 grid gap-x-8 gap-y-1.5 sm:grid-cols-2 md:col-span-1 md:col-start-2">
+        <div className="col-span-2 grid gap-x-8 gap-y-1.5 @xl:grid-cols-2 @2xl:col-span-1 @2xl:col-start-2">
           {SUBSCORES.map(([key, label]) => (
             <SubScoreBar key={key} label={label} score={fit[key].score} />
           ))}
         </div>
 
-        <div className="col-span-2 rounded-control bg-mint-50 px-3.5 py-2.5 text-[14px] leading-relaxed md:col-span-1 md:col-start-2">
+        <div className="col-span-2 rounded-control bg-mint-50 px-3.5 py-2.5 text-[14px] leading-relaxed @2xl:col-span-1 @2xl:col-start-2">
           {fit.roughOnly ? (
             <p>Only the title, company and location are known. Open it on LinkedIn to read the description; the score is a rough title match.</p>
           ) : (
             <p>
               <span>“{fit.jobQuote}”</span> — {fit.reason}
-              {fit.cvBulletIds.length ? (
+              {/* The CV lines behind the verdict are traceability, not reading: shown with the details. */}
+              {open && fit.cvBulletIds.length ? (
                 <span className="ml-1.5 inline-flex flex-wrap gap-1 align-middle">
                   {fit.cvBulletIds.map((id) => (
                     <Chip key={id} variant="source">
@@ -133,14 +151,20 @@ export function JobCard({
               ) : null}
             </p>
           )}
+          {/* MATCH-12: why it sits where it does when the person's decisions moved it. The score
+              ring is the fit and stays it; this explains only the order. */}
+          {job.learned ? <p className="mt-1.5 text-small text-ink-2">{job.learned.reason}.</p> : null}
         </div>
 
-        <div className="col-span-2 flex gap-2 md:col-span-1 md:col-start-3 md:row-span-3 md:row-start-1 md:flex-col">
-          <Button onClick={onApprove} disabled={busy} className="flex-1 md:flex-none">
+        {/* One row on a phone, with tighter padding there: at the buttons' usual padding the three
+            needed ~291px, and a 360px phone gives the card 288. Kept as a row rather than stacked
+            so Snooze's menu, which opens leftwards from its right edge, stays on screen. */}
+        <div className="col-span-2 flex gap-2 @2xl:col-span-1 @2xl:col-start-3 @2xl:row-span-3 @2xl:row-start-1 @2xl:flex-col">
+          <Button onClick={onApprove} disabled={busy} className="flex-1 @max-xl:px-3 @2xl:flex-none">
             Approve
           </Button>
           <Menu
-            className="flex-1 md:flex-none"
+            className="flex-1 @2xl:flex-none"
             label={`Snooze ${job.title}`}
             items={[
               { label: "1 day", onSelect: () => onSnooze(1) },
@@ -148,19 +172,19 @@ export function JobCard({
               { label: "7 days", onSelect: () => onSnooze(7) },
             ]}
             trigger={({ open: menuOpen, toggle, id }) => (
-              <Button variant="secondary" onClick={toggle} disabled={busy} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={menuOpen ? id : undefined} className="w-full">
+              <Button variant="secondary" onClick={toggle} disabled={busy} aria-haspopup="menu" aria-expanded={menuOpen} aria-controls={menuOpen ? id : undefined} className="w-full @max-xl:px-3">
                 Snooze
               </Button>
             )}
           />
-          <Button variant="ghost" onClick={onReject} disabled={busy} className="flex-1 md:flex-none">
+          <Button variant="ghost" onClick={onReject} disabled={busy} className="flex-1 @max-xl:px-3 @2xl:flex-none">
             Reject
           </Button>
         </div>
       </div>
 
       {open ? (
-        <div id={detailsId} className="mt-5 grid gap-6 border-t border-line pt-5 md:grid-cols-[1fr_260px] md:pl-[84px]">
+        <div id={detailsId} className="mt-5 grid gap-6 border-t border-line pt-5 @4xl:grid-cols-[1fr_260px] @4xl:pl-[84px]">
           <div className="min-w-0">
             {job.descriptionMd ? (
               <Markdown source={job.descriptionMd} />
@@ -223,7 +247,12 @@ export function JobCard({
 
 function ExternalA({ href, children }: { href: string; children: React.ReactNode }) {
   return (
-    <a href={href} target="_blank" rel="noreferrer noopener" className="inline-flex min-h-8 items-center gap-1 font-semibold text-forest-700 underline underline-offset-2 hover:text-forest-900">
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="inline-flex min-h-8 items-center gap-1 font-semibold text-forest-700 underline underline-offset-2 hover:text-forest-900 pointer-coarse:min-h-11"
+    >
       {children}
       <ExternalLink className="size-3.5" aria-hidden="true" />
       <span className="sr-only">(opens in a new tab)</span>

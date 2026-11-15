@@ -32,6 +32,7 @@ installed the verdict is the `unknown` it always was.
 import re
 from typing import TYPE_CHECKING, Literal
 
+import httpx
 import logfire
 
 from ..http import is_denied, request
@@ -111,7 +112,7 @@ def _path_of(url: str) -> str | None:
 MIN_READABLE_CHARS = 400
 
 
-def check(url: str | None, *, fetch_html: "Fetcher | None" = None) -> Verdict:
+def check(url: str | None, *, fetch_html: "Fetcher | None" = None, timeout: float | None = None) -> Verdict:
     """Ask one URL whether it is still a job. Never raises, never spends a credit.
 
     `follow_redirects` stays off (the `http.request` default) — that is what makes the redirect
@@ -126,7 +127,7 @@ def check(url: str | None, *, fetch_html: "Fetcher | None" = None) -> Verdict:
     if not url or is_denied(url):
         return "unknown"  # SRCH-03: LinkedIn is never fetched, so it is never confirmed either
     try:
-        response = request("GET", url)
+        response = request("GET", url, **({"timeout": httpx.Timeout(timeout, connect=min(timeout, 3.0))} if timeout else {}))
     except Exception:  # noqa: BLE001 — a transport failure is a fact about the network
         return "unknown"
     try:

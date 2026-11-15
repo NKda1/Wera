@@ -40,6 +40,39 @@ def profile(store: Store, **over):
     return store.get_profile().model_copy(update=base | over)
 
 
+class TestWhatRobotsTxtLeavesOut:
+    """SRCH-30. Bright Network answers its robots.txt with a 403, so every posting its `site:`
+    queries found was one the Harvester refused; Indeed disallows `/viewjob`."""
+
+    def test_a_refusing_boards_site_queries_go_and_open_ones_name_it(self, store):
+        planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
+        kept = strategist.leave_out(planned, {"gradcracker.com", "www.indeed.com"})
+        assert not any(q.domain == "gradcracker.com" for q in kept)
+        assert any(q.domain == "builtinlondon.uk" for q in kept)
+        assert all(q.q.endswith("-site:linkedin.com -site:gradcracker.com -site:indeed.com") for q in kept if q.source == "open")
+        assert strategist.leave_out(kept, {"gradcracker.com", "indeed.com"}) == kept  # twice changes nothing
+
+    def test_nothing_refusing_is_the_plan_unchanged(self, store):
+        planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
+        assert strategist.leave_out(planned, set()) == planned
+
+    def test_no_more_than_eight_hosts_are_named(self, store):
+        planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
+        kept = strategist.leave_out(planned, {f"refuses{i}.example" for i in range(12)})
+        assert max(q.q.count("-site:refuses") for q in kept) == strategist.MAX_LEFT_OUT
+
+    def test_the_boards_are_asked_at_their_posting_path_and_the_hints_after(self, store):
+        boards = [*BOARDS, Site(domain="brightnetwork.co.uk", name="Bright Network", terms_reviewed_on="2026-01-01",
+                                countries=["GB"], posting_pattern=r"^/graduate-jobs/(?!in-)[^/]+/[^/?#]+/?$")]  # fmt: skip
+        probes = strategist.robots_probes(
+            profile(store, sites=[b.domain for b in boards]), boards, {"indeed.com": "/viewjob?jk=1", "gradcracker.com": "/x"}
+        )
+        assert probes["brightnetwork.co.uk"] == "https://brightnetwork.co.uk/graduate-jobs/wera-check"
+        assert probes["indeed.com"] == "https://indeed.com/viewjob?jk=1"
+        assert probes["gradcracker.com"] == "https://gradcracker.com/"  # a board's own entry wins over a hint
+        assert "unreviewed.example" not in probes and "declined.example" not in probes
+
+
 class TestTheQueries:
     def test_tier_one_is_the_top_titles_open_and_on_every_reviewed_board(self, store):
         planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
@@ -165,6 +198,7 @@ class FakeSerper:
 
     def __init__(self, answers: dict[str, list[Result]]):
         self.answers, self.sent, self.answered, self.errors, self.stopped = answers, 0, 0, [], None
+        self.cached = self.coalesced = 0
         self.asked: list[str] = []
 
     @property
@@ -362,3 +396,27 @@ class TestStageOneIsPaidForOnce:
         monkeypatch.setattr(Store, "refresh_strategy", spent)
         planned, matrix = store.search_queries()
         assert matrix is None and planned
+
+
+class TestPageTwoOnlyWherePageOneWasRich:
+    """SRCH-26 tier 4 (14 Nov): page 2 of a query is sent only when its page 1 held at least
+    `PAGE_TWO_MIN_POSTINGS` postings. On 13 Nov, 12 page-2 queries surfaced one job."""
+
+    def test_the_count_is_kept_per_query_and_decides_page_two(self, store):
+        planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
+        firsts = [q for q in planned if q.tier == 1 and q.page == 1]
+        rich, thin = firsts[0], firsts[1]
+        queue = TargetQueue(fakeredis.FakeRedis(decode_responses=True), "plan-x")
+        serper = FakeSerper({rich.q: [result(f"https://builtinlondon.uk/job/graduate-engineer-{i}/{12138050 + i}", n=i) for i in range(6)],
+                             thin.q: [result("https://builtinlondon.uk/job/graduate-tester/12139999")]})  # fmt: skip
+        strategist.discover([rich, thin], [1], serper=serper, queue=queue, known_urls=set(), sites=BOARDS, profile=profile(store), robots=AllowAll())  # fmt: skip
+        assert queue.postings_by_query() == {rich.q: 6, thin.q: 1}
+
+        kept = strategist.page_two_worth_asking(planned, queue.postings_by_query())
+        page_two = {q.q for q in kept if q.page == 2}
+        assert rich.q in page_two and thin.q not in page_two
+        assert all(q in kept for q in planned if q.page == 1)  # page 1s are never touched
+
+    def test_with_no_page_one_remembered_no_page_two_is_sent(self, store):
+        planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
+        assert not [q for q in strategist.page_two_worth_asking(planned, {}) if q.page == 2]

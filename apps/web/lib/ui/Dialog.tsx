@@ -45,13 +45,13 @@ export function Dialog({
         if (e.target === ref.current) onClose();
       }}
       className={cn(
-        "m-auto max-h-[calc(100dvh-32px)] w-[calc(100vw-32px)] overflow-hidden rounded-card border border-line bg-white p-0 shadow-pop",
+        "m-auto max-h-[calc(100dvh-32px)] w-[calc(100vw-32px)] overflow-hidden rounded-card border border-line bg-surface p-0 shadow-pop",
         size === "sm" ? "max-w-md" : size === "md" ? "max-w-xl" : "max-w-3xl",
       )}
     >
       {open ? (
         <div className="flex max-h-[calc(100dvh-34px)] flex-col">
-          <div className="flex items-start justify-between gap-4 border-b border-line px-6 pt-5 pb-4">
+          <div className="flex items-start justify-between gap-4 border-b border-line px-4 pt-5 pb-4 sm:px-6">
             <div>
               <h2 id={titleId} className="text-h2">
                 {title}
@@ -67,8 +67,15 @@ export function Dialog({
               <X className="size-5" />
             </button>
           </div>
-          <div className="overflow-y-auto px-6 py-5">{children}</div>
-          {footer ? <div className="flex flex-wrap justify-end gap-2 border-t border-line bg-mint-50 px-6 py-4">{footer}</div> : null}
+          <div className="overflow-y-auto px-4 py-5 sm:px-6">{children}</div>
+          {/* On a phone the footer is a column: its note on top, then each button full width, the
+              primary (written last) first — side by side they wrapped into a ragged right-aligned
+              pile, and a long label was cut off by the dialog's edge. */}
+          {footer ? (
+            <div className="flex flex-col-reverse gap-2 border-t border-line bg-mint-50 px-4 py-4 *:max-sm:w-full sm:flex-row sm:flex-wrap sm:justify-end sm:px-6 [&>span]:max-sm:order-last">
+              {footer}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </dialog>

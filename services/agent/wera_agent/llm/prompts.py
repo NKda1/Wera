@@ -110,9 +110,11 @@ PROFILE_GENERATE = ChatPromptTemplate.from_messages(
         (
             "system",
             "You set up a job search for one applicant. From their CV, propose what to search for: "
-            "job titles they are qualified for today, skills to match on, locations, how recent a "
-            "post must be, and title words to exclude.\n\n"
+            "job titles they are qualified for today, skills to match on, the seniority levels, and "
+            "title words to exclude. Also give the city the CV says they are based in, as "
+            "`locations`; leave it empty if the CV doesn't say.\n\n"
             f"{_HONESTY}\n\n"
+            "Propose at most 8 titles and at most 15 skills, the most relevant first. "
             "Every skill you propose must appear in the CV's skills list, spelled the same way. "
             "Propose the seniority levels the CV actually supports — someone graduating this year "
             "is a graduate, not mid-level. Keep titles to ones a recruiter would really post.",
@@ -352,7 +354,8 @@ JOB_NORMALISE = ChatPromptTemplate.from_messages(
             "system",
             "Read one job post and return its facts: title, company, location, whether it is remote, "
             "hybrid or onsite, salary if stated, the language it is written in, seniority if clear, "
-            "and the date posted if stated. Report only what the post says — leave a field out "
+            "the date posted if stated, and the closing date or application deadline if stated "
+            "(as YYYY-MM-DD; never the posting date there). Report only what the post says — leave a field out "
             "rather than guessing it.\n\n"
             "If the page is not a single job posting — a list of jobs, an advert slot, a careers or "
             "company homepage, a closed or error page — set `isJobPosting` to false and `title` and "
@@ -431,7 +434,12 @@ SUMMARY_WRITE = ChatPromptTemplate.from_messages(
             "- Name the specific thing, not the category: 'Rust and distributed systems' beats "
             "'a range of modern technologies'.\n"
             "- Don't name the company or repeat the job title back. This is a CV, and the same "
-            "profile should be defensible if the recruiter forwards it internally.\n\n"
+            "profile should be defensible if the recruiter forwards it internally.\n"
+            # ATSC-07 (14 Nov): "aimed at this role" was the weakest part of the ATS score — the
+            # headline and summary rarely used the role's words. The kind of role is not the title.
+            "- Do say the kind of role they are looking for in the post's words when the CV backs "
+            "it — 'backend engineering roles', 'machine learning engineering' — never the exact "
+            "title.\n\n"
             f"{_HONESTY}\n\n" + _DATA_RULE,
         ),
         ("human", "CV:\n{cv}\n\n{job}\n\nKeywords worth covering: {keywords}"),
@@ -460,8 +468,24 @@ LETTER_WRITE = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "Write a short cover letter: 3 or 4 paragraphs, 180–260 words. Cite the CV line ids behind "
+            # Four, not "3 or 4". Given the choice, the model wrote three and stopped near 150 words
+            # however full each paragraph was (`wera eval --packs`, 2026-11-12). Three is still a
+            # valid letter — it is what the guard leaves when it cuts one — but not one to aim for.
+            "Write a short cover letter: 4 paragraphs, 150–230 words. Cite the CV line ids behind "
             "each paragraph.\n\n"
+            # A total alone came back short. Writing without thinking, the model undershot it: three
+            # of five letters in `wera eval --packs` (2026-11-12) were 139–176 words, nearly all of
+            # them three-paragraph letters whose close was the "one or two sentences" asked for
+            # below. A budget per paragraph is something a model can hit while it writes; a total
+            # is something it can only check afterwards, which without thinking it doesn't.
+            # Not set higher to make up for the paragraphs landing ~20% under: tried, and the model
+            # filled the extra room with claims its lines don't carry, so the guard cut whole
+            # paragraphs (one letter fell to 131 words). What a letter can say honestly is the limit.
+            # They add up to more than the total on purpose: written to these, letters land at
+            # 155–202 words, inside it.
+            "Length, paragraph by paragraph: the opening 50–65 words, the proof 70–90, the company "
+            "paragraph 50–65, the close 25–40. Fill a short paragraph by citing another line that "
+            "answers the post, never by padding or by adding what the lines don't say.\n\n"
             # The structure below is an industry-standard cover letter schema, and it is here
             # because the letters were structurally fine and read like nothing. "Why this role,
             # what fits it, why this company, a close" told the model what each paragraph was
@@ -472,18 +496,31 @@ LETTER_WRITE = ChatPromptTemplate.from_messages(
             # drawing on a particular part of the post. The keywords and the post's context arrive
             # already decided (`nodes.letter_plan`) — only ones the CV can back, each with the line
             # to cite — so the template's injection slots can't become a route to an unbacked claim.
-            "Set each paragraph's `section`: `opening_hook`, `core_value_proposition` (one or two), "
-            "`strategic_alignment_and_culture`, `call_to_action_and_close` — a three-paragraph "
-            "letter folds the alignment into the close.\n\n"
+            "Set each paragraph's `section`, one paragraph each, in this order: `opening_hook`, "
+            "`core_value_proposition`, `strategic_alignment_and_culture`, `call_to_action_and_close`.\n\n"
             "You are given keywords for each paragraph. Use them in the post's spelling where they "
             "read naturally, citing what it says to cite; skipping one is fine, forcing one in is "
             "not. Never use one listed under 'Never claim'. You are also given quotes from the "
             "post about why the role exists; use one where the paragraph below asks for it, and "
             "where none is given, leave that thought out.\n\n"
-            "**Paragraph 1 — the opening (`opening_hook`).** Three or four sentences, its "
-            "keywords early. Pick one hook and set `hookType` to it:\n"
-            "- `Core-Metric` — lead on the single most relevant result in the CV, with its number. "
-            "The default, and the strongest when the CV has a number worth leading on.\n"
+            # An introduction first, since 14 Nov. The opening led on a technical result or a
+            # stack (`Core-Metric`, the old default, with two technical keywords placed in it), so
+            # the reader met the applicant's tooling before the applicant. A recruiter's first
+            # question is who this is and why here; the technical case is paragraph 2's job.
+            "**Paragraph 1 — the opening (`opening_hook`).** Three or four sentences that introduce "
+            "the applicant before any technical detail. First, who they are: their stage and field "
+            "and what they focus on, as their headline, education or summary puts it (cite that "
+            "line). Then why they suit *this* company: tie them to what the post says the company "
+            "is doing or the problem the role exists to solve — `company_initiative_or_market` or "
+            "`company_problem_to_solve` when given — quote the post's words exactly, in "
+            "quotation marks, rather than describing the company yourself. Claim nothing about "
+            "the applicant beyond what the line you cite says — 'which is the work I've been doing' "
+            "needs a line that shows that work, and never say the company 'aligns with' their goals, "
+            "values or focus: no CV line carries that. **No tools, languages or stack here** — they "
+            "belong to paragraph 2. Pick one hook and set `hookType` to it:\n"
+            "- `Introduction` — who the applicant is, then why this company. The default.\n"
+            "- `Core-Metric` — lead on the single most relevant result in the CV, with its number, "
+            "then who the applicant is. Only when that result is the most striking thing about them.\n"
             "- `Industry-Problem` — lead on the problem this role exists to solve, then the "
             "applicant's claim on it. Built on `company_problem_to_solve` when it is given.\n"
             "- `Company-Mission` — lead on what the post says the company is doing. Built on "
@@ -495,19 +532,25 @@ LETTER_WRITE = ChatPromptTemplate.from_messages(
             # A pattern, not a prohibition: told only "don't announce that you're applying", every
             # model without thinking still wrote "I am applying for the … role", tripped the
             # banned-phrase check, and spent a second call repeating it.
-            "Then name the role inside a sentence about what the applicant brings to it — for "
-            "example 'That is the work the Junior AI Engineer role is built around, and it is what "
-            "I have been doing in production.' Never 'I am applying', 'I am writing' or 'my "
-            "thesis'; never a label like a thesis, a summary or a pitch.\n\n"
+            # The example carries no claim of its own. It used to end "…and it is what I have been
+            # doing in production", every letter copied it word for word, and on a CV without
+            # production work the guard cut the whole opening for it (`wera eval --packs`, real
+            # CV, 2026-11-12). An example in a prompt is read as text to reuse.
+            # Three shapes, not one: given a single example, all five letters on 14 Nov ended
+            # their opening with it word for word ("That is the work the … role is built around").
+            "Then name the role in a sentence of your own that ties it to what you opened with — "
+            "it might say what the role would let them do, what they want to learn there, or which "
+            "part of the post they'd start on. Never 'I am applying', 'I am writing' or 'my thesis'; "
+            "never a label like a thesis, a summary or a pitch.\n\n"
             # Matching, not storytelling. This asked for "accomplished X, as measured by Y" and,
             # where a line had no number, for "what existed afterwards, who used it" — and every
             # model, writing without thinking, filled Y in: "the team adopted it for all traffic",
             # "ensuring outputs are reliable". The claim check then cut the paragraph. A letter
             # that says what the CV says, pointed at what the post asks for, is the letter wanted.
-            "**Paragraphs 2 (and optionally 3) — the proof (`core_value_proposition`).** Match "
+            "**Paragraph 2 — the proof (`core_value_proposition`).** Match "
             "the post to the CV: name what the post needs (`primary_job_requirement`, if given), "
             "then say what the applicant did that answers it, in the substance of the lines you "
-            "cite. One competency per paragraph; put it in `theme` ('Scale and infrastructure', "
+            "cite. One competency, the one the post most needs; put it in `theme` ('Scale and infrastructure', "
             "'Shipping under constraint'). Lead with a result when a cited line states one. **Add "
             "nothing the cited lines don't say** — no outcome, scale, users, adoption, purpose or "
             "'which shows that…' of your own. WERA checks every claim against the lines you cite "
@@ -536,11 +579,17 @@ LETTER_WRITE = ChatPromptTemplate.from_messages(
             "hybrid working, learning, sponsorship, open source, the problem it has chosen — and "
             "why that suits this applicant. Ground it in `companyQuote` and, where the post gives "
             "you a second such fact, in `policyQuote`. This is the paragraph most letters skip, "
-            "and the one that shows the applicant read the post rather than the job title. It may "
-            "be its own paragraph or the first half of the close, but the point itself is not "
-            "optional.\n\n"
+            "and the one that shows the applicant read the post rather than the job title, so it is "
+            "always its own paragraph.\n\n"
+            # Since 14 Nov the opening says why this company too, and the first letters written
+            # that way left this paragraph about the company alone — no CV line cited — so the
+            # guard cut it (2 of 5 in `wera eval --packs`). The split and the citation are stated.
+            "Keep it apart from the opening: the opening ties the applicant to what the company is "
+            "doing or the problem it is solving; this paragraph is about *how it works*. And say "
+            "why that suits the applicant with a line from their CV that shows it — cite that line. "
+            "A paragraph that cites nothing is cut.\n\n"
             "**The close (`call_to_action_and_close`).** Say the CV is attached, ask for a "
-            "conversation about the role by its title, and stop. One or two sentences. No summary "
+            "conversation about the role by its title, and stop. Two sentences. No summary "
             "of the letter, no restating the thesis, no gratitude for being considered.\n\n"
             f"{_LETTER_VOICE}\n\n"
             "`greeting` addresses a named person if the post names one — 'Dear Priya Raman,' — and "

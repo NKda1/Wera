@@ -33,6 +33,9 @@ def _service_version() -> str | None:
         return None
 
 
+POLLED_URLS = r"/healthz$,/intake/runs/[^/?]+$"
+
+
 def _route_only(_request: Request, attributes: dict[str, Any]) -> dict[str, Any]:
     """Keep the shape of the request, not its contents: a count replaces the failed fields."""
     kept = {k: v for k, v in attributes.items() if k not in ("values", "errors")}
@@ -74,4 +77,7 @@ def configure(app: FastAPI | None = None) -> None:
             handler.addFilter(RedactingFilter())
             logging.getLogger().addHandler(handler)
     if s.logfire_enabled and app is not None:
-        logfire.instrument_fastapi(app, request_attributes_mapper=_route_only)
+        # The health check and a run's progress poll answer every second or two while a search
+        # runs; a span tree for each was most of what the exporter thread was encoding when the
+        # request loop froze (14 Nov). A run's own spans say everything a poll would.
+        logfire.instrument_fastapi(app, request_attributes_mapper=_route_only, excluded_urls=POLLED_URLS)

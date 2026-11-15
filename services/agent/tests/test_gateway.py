@@ -10,7 +10,6 @@ import json
 import httpx
 import pytest
 import respx
-from pydantic import ValidationError
 from sqlalchemy import select
 
 from wera_agent.clock import iso
@@ -334,6 +333,24 @@ class TestWhatACallCost:
         (row,) = calls(store)
         assert row.cost_usd > 0  # from config/wera.yaml's prices
 
+    @respx.mock
+    def test_cached_and_thinking_tokens_are_recorded_when_the_provider_says(self, store, live):
+        """13 Nov plan, A.5: what kind of tokens a call spent, not only how many."""
+        response = reply(GOOD, tokens=(1000, 500))
+        body = response.json()
+        body["usage"] |= {"prompt_tokens_details": {"cached_tokens": 800}, "completion_tokens_details": {"reasoning_tokens": 300}}
+        respx.post(COMPLETIONS).mock(return_value=httpx.Response(200, json=body))
+        generate(store)
+        (row,) = calls(store)
+        assert (row.cached_tokens, row.reasoning_tokens) == (800, 300)
+
+    @respx.mock
+    def test_a_provider_that_doesnt_say_leaves_them_unmeasured(self, store, live):
+        respx.post(COMPLETIONS).mock(return_value=reply(GOOD, tokens=(1000, 500)))
+        generate(store)
+        (row,) = calls(store)
+        assert row.reasoning_tokens in (None, 0)
+
 
 class TestFallbacks:
     @respx.mock
@@ -362,6 +379,31 @@ class TestProviderErrors:
         # §9.4: nothing from the upstream body reaches the caller.
         assert "sk-or-v1-leak" not in caught.value.message
         assert calls(store)[-1].code == code
+
+    @pytest.mark.parametrize(
+        ("said", "detail"), [("Key limit exceeded (total limit)", "key limit (total)"), ("Key limit exceeded", "key limit")]
+    )
+    @respx.mock
+    def test_a_key_past_its_own_limit_is_not_called_a_bad_key(self, store, live, said, detail):
+        """15 Nov: OpenRouter refused a spent key with the same 403 as a bad one, and WERA told the
+        person to check a key that had worked a minute earlier. Only the body tells them apart."""
+        body = {"error": {"message": f"{said}. Manage it using https://openrouter.ai/settings/keys sk-or-v1-leak", "code": 403}}
+        route = respx.post(COMPLETIONS).mock(return_value=httpx.Response(403, json=body))
+        with pytest.raises(ApiError) as caught:
+            generate(store)
+        assert (caught.value.code, caught.value.status) == ("LLM_KEY_LIMIT", 402)
+        assert "sk-or-v1-leak" not in caught.value.message
+        assert route.call_count == 1  # the next model would be refused the same way
+        row = calls(store)[-1]
+        assert (row.code, row.detail) == ("LLM_KEY_LIMIT", detail)  # which limit, never the body
+
+    @respx.mock
+    def test_any_other_403_is_still_a_rejected_key(self, store, live):
+        respx.post(COMPLETIONS).mock(return_value=httpx.Response(403, json={"error": {"message": "Forbidden", "code": 403}}))
+        with pytest.raises(ApiError) as caught:
+            generate(store)
+        assert caught.value.code == "LLM_AUTH_FAILED"
+        assert calls(store)[-1].detail is None
 
 
 class TestBudget:
@@ -485,7 +527,8 @@ class TestProfileDiff:
         proposed = current.model_copy(update={"titles": [*current.titles, "Data Engineer"], "recency": "24h"})
         diff = profile_diff(current, proposed)
         assert diff["titles"]["added"] == ["Data Engineer"]
-        assert diff["recency"] == {"from": current.recency, "to": "24h"}
+        # `recency` is the person's, carried rather than proposed, so it never reads as a change.
+        assert "recency" not in diff
         assert "skills" not in diff
 
     def test_generate_proposes_without_saving(self, store):
@@ -519,6 +562,42 @@ class TestProfileDiff:
         assert "countries" in carried, "guard the guard: countries must be a carried field"
         for field in carried:
             assert getattr(proposed, field) == getattr(before, field), f"{field} was not carried through"
+
+    def test_regenerating_keeps_where_and_when_the_person_chose(self, store):
+        """15 Nov: every regenerate defaulted to "Use new" on a location guessed from the CV, so
+        the place someone had picked was replaced by the city on their CV's address line."""
+        before = store.get_profile().model_copy(
+            update={"locations": ["Toronto"], "countries": ["CA"], "remote": "remote_only", "recency": "24h"}
+        )
+        store.put_profile(before)
+
+        result = store.generate_profile()
+        assert result.proposed.locations == ["Toronto"]
+        assert result.proposed.countries == ["CA"]
+        assert (result.proposed.remote, result.proposed.recency) == ("remote_only", "24h")
+        assert not {"locations", "countries", "remote", "recency"} & set(result.diff)
+
+    def test_a_profile_naming_nowhere_is_offered_the_cvs_city(self, store):
+        store.put_profile(store.get_profile().model_copy(update={"locations": [], "countries": []}))
+        result = store.generate_profile()
+        city = store.cv().person.location
+        assert result.proposed.locations == [city]
+        assert result.diff["locations"].added == [city]
+
+
+class TestPlaces:
+    def test_countries_are_offered_where_no_board_is(self, store):
+        """SRCH-11: the picker used to offer only the countries a reviewed board covered."""
+        places = {p.code: p for p in store.places()}
+        assert places["CA"].name == "Canada" and places["CA"].region == "north_america"
+        assert places["GB"].boards, "the UK's reviewed boards are listed against it"
+        assert not places["CA"].boards
+
+    def test_every_offered_country_can_be_matched_in_a_posting(self, store):
+        from wera_agent.domain import filters
+
+        for place in store.places():
+            assert filters.COUNTRY_ALIASES.get(place.code), f"{place.code} has no names a posting would use"
 
 
 class TestOutputContracts:
@@ -579,8 +658,8 @@ class TestOutputContracts:
             "skills": ["Python"],
             "omittedBulletIds": [],
         }
-        with pytest.raises(ValidationError, match=f"Not lines of {role.id}"):
-            TailorSelection.model_validate(payload, context={"cv": cv})
+        out = TailorSelection.model_validate(payload, context={"cv": cv})
+        assert out.experience[0].bullet_ids == []  # left out, and `nodes.tailor._item` drops the role
 
     def test_a_line_cannot_be_filed_under_another_role(self, store):
         """The failure mode an ids-only contract introduces, and the one it has to refuse: both
@@ -597,5 +676,52 @@ class TestOutputContracts:
             "skills": [],
             "omittedBulletIds": [],
         }
-        with pytest.raises(ValidationError, match=f"Not lines of {mine.id}"):
-            TailorSelection.model_validate(payload, context={"cv": cv})
+        out = TailorSelection.model_validate(payload, context={"cv": cv})
+        assert theirs.bullets[0].id not in out.experience[0].bullet_ids  # never shown under the wrong employer
+
+
+class TestAnOverlongProfileCostsTheExtrasNotTheReply:
+    """14 Nov: a 25-skill CV drew 16 proposed skills, then one the CV lacks, and the profile
+    couldn't be regenerated at all."""
+
+    def test_unknown_skills_go_and_the_list_is_cut_to_fifteen(self, store):
+        cv = store.cv()
+        names = [s.name for s in cv.skills]
+        proposal = {**GOOD, "skills": ["Quantum Basket Weaving", *(names * 4)][:20]}
+        out = ProfileProposal.model_validate(proposal, context={"cv": cv})
+        assert "Quantum Basket Weaving" not in out.skills
+        assert len(out.skills) == min(15, 19) and set(out.skills) <= set(names)
+
+    def test_a_reply_with_no_skill_from_the_cv_is_still_refused(self, store):
+        with pytest.raises(Exception, match="None of the proposed skills"):
+            ProfileProposal.model_validate(INVENTED, context={"cv": store.cv()})
+
+
+class TestAWrongIdCostsTheIdNotTheReply:
+    """14 Nov: one invalid id no longer rejects a whole `cv.tailor` or `answers.draft` reply (6 of
+    14 such calls on 13 Nov were paid for twice). What's invalid is left out; nothing invalid is used."""
+
+    def test_a_respelled_skill_and_an_unknown_omitted_line_are_left_out(self, store):
+        from wera_agent.schemas.llm_outputs import TailorSelection
+
+        cv = store.cv()
+        role = cv.experience[0]
+        out = TailorSelection.model_validate(
+            {
+                "summaryId": "not-the-summary",
+                "experience": [{"roleId": role.id, "bulletIds": [role.bullets[0].id]}],
+                "projects": [],
+                "skills": [cv.skills[0].name, "Quantum Basket Weaving"],
+                "omittedBulletIds": ["nope-1", role.bullets[-1].id],
+            },
+            context={"cv": cv},
+        )
+        assert out.skills == [cv.skills[0].name]
+        assert out.omitted_bullet_ids == [role.bullets[-1].id]
+        assert out.summary_id is None and out.experience[0].bullet_ids == [role.bullets[0].id]
+
+    def test_an_uncited_answer_is_left_for_the_person(self):
+        from wera_agent.schemas.llm_outputs import AnswersOutput
+
+        out = AnswersOutput.model_validate({"answers": [{"id": "q1", "answer": "Yes, three years.", "sourceIds": []}, {"id": "q2", "answer": None, "sourceIds": []}]})  # fmt: skip
+        assert [a.answer for a in out.answers] == [None, None]

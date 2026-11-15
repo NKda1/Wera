@@ -13,6 +13,10 @@ page's job markup over plain HTTP, the same after a browser render for boards th
 JavaScript, then the fast model on the page text — all free — and a paid Firecrawl scrape only
 when none of them could. What is stored as the description is always the posting's own text.
 
+**A posting from a full-text job API** (SRCH-31, `Target(source="feed")`) is read from the API
+instead — Reed's details call, USAJOBS' own payload — and never fetched as a page, so robots.txt
+and the posting classifier, which are about pages, don't apply to it. Everything below does.
+
 **Checking** (SRCH-23) refuses, before anything is saved:
 
 * a URL that isn't a posting — the drift guard, whatever put it in the queue;
@@ -26,6 +30,7 @@ the same posting again tomorrow. A posting left unread because a cap stopped pay
 the front of the queue rather than being lost.
 """
 
+import contextlib
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -37,7 +42,7 @@ from ..clock import parse_ms
 from ..config import Site
 from ..domain.filters import DAY_MS, RECENCY_MS
 from ..http import host_of, is_denied
-from ..schemas.jobs import Job
+from ..schemas.jobs import Job, Salary
 from . import normalise
 from .firecrawl_search import CARD_SCHEMA, SearchCaps, SearchOutcome, scrape_card
 from .postings import classify, is_closed_page
@@ -87,6 +92,7 @@ def harvest(
     cache: "CrawlCache | None" = None,
     fetch_html: "Fetcher | None" = None,
     parse: Callable[[str], dict[str, Any] | None] | None = None,
+    redis: Any | None = None,
 ) -> HarvestOutcome:
     """Read and check each target. `spend` carries the run's Firecrawl accounting across rounds."""
     rules = robots or Robots()
@@ -97,8 +103,11 @@ def harvest(
     for target in targets:
         reason = _gate(target, rules, declined, sites)
         if reason is None:
-            card = scrape_card(target.url, CARD_SCHEMA, spend, caps, cache=cache, fetch_html=fetch_html, parse=parse)
-            how = spend.last_how
+            if target.source == "feed":
+                card, how = _from_feed(target, redis)
+            else:
+                card = scrape_card(target.url, CARD_SCHEMA, spend, caps, cache=cache, fetch_html=fetch_html, parse=parse)
+                how = spend.last_how
             if card is None:
                 reason = how or "unreadable"
                 if how == "capped":
@@ -107,6 +116,7 @@ def harvest(
             else:
                 job, reason = _checked(card, target, now)
                 if job is not None:
+                    _from_api(job, card, target)
                     out.jobs.append(job)
                     out.by_path[how] += 1
                     continue
@@ -126,10 +136,35 @@ def harvest(
     return out
 
 
+def _from_feed(target: Target, redis: Any | None) -> tuple[dict[str, Any] | None, str]:
+    """A full-text API's posting, as a card. Reed's is one details call (shared through the guard,
+    so a posting two people's searches queued is read once); USAJOBS' came with the search."""
+    from .feeds import reed
+    from .provider_guard import Guard
+
+    payload = target.payload or {}
+    if target.via == "reed" and "jobId" in payload:
+        return reed.read(payload, Guard(redis, "reed")), "reed"
+    if isinstance(payload.get("card"), dict):
+        return payload["card"], target.via or "feed"
+    return None, "unreadable"
+
+
+def _from_api(job: Job, card: dict[str, Any], target: Target) -> None:
+    """What a job API knows that a page doesn't say plainly: who found it, and the salary as fields."""
+    if target.via:
+        job.via = target.via
+    if job.salary is None and isinstance(card.get("salary"), dict):
+        with contextlib.suppress(ValueError):
+            job.salary = Salary(**card["salary"])
+
+
 def _gate(target: Target, rules: Robots, declined: set[str], sites: list[Site]) -> str | None:
     """Why this target may not be read at all, or None. Checked before a single byte is fetched."""
     if is_denied(target.url):
         return "LinkedIn"
+    if target.source == "feed":
+        return None  # read from the API, not fetched as a page (SRCH-31)
     if classify(target.url, title=target.title, sites=sites) != "posting":
         return NOT_A_POSTING
     host = host_of(target.url).removeprefix("www.")

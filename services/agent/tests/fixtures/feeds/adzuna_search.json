@@ -1,0 +1,101 @@
+{
+ "count": 3,
+ "__CLASS__": "Adzuna::API::Response::JobSearchResults",
+ "results": [
+  {
+   "adref": "test-adref",
+   "salary_is_predicted": "1",
+   "title": "Technology & Change Graduate Programme 2027",
+   "contract_time": "full_time",
+   "__CLASS__": "Adzuna::API::Response::Job",
+   "latitude": 51.503378,
+   "redirect_url": "https://www.adzuna.co.uk/jobs/land/ad/5954024791?se=test&utm_medium=api&utm_source=test-app&v=test",
+   "created": "2026-11-05T08:31:53Z",
+   "id": "5954024791",
+   "salary_min": 37031.83,
+   "location": {
+    "__CLASS__": "Adzuna::API::Response::Location",
+    "area": [
+     "UK",
+     "London"
+    ],
+    "display_name": "London, UK"
+   },
+   "category": {
+    "tag": "graduate-jobs",
+    "label": "Graduate Jobs",
+    "__CLASS__": "Adzuna::API::Response::Category"
+   },
+   "salary_max": 37031.83,
+   "contract_type": "permanent",
+   "description": "With a company culture rooted in collaboration, expertise and innovation, we aim to promote progress and inspire our clients, employees, investors and communities to achieve their greatest potential. Our work is the catalyst that helps others achieve their goals. In short, We Enable Possibility\u2120. 2027 Technology & Change Graduate Programme Role 2 Year Graduate Programme Location London Department Rotational - Transformation & Change OR IT pathways Duration 2 Years - opportunity to apply for a p\u2026",
+   "longitude": -0.139134,
+   "company": {
+    "display_name": "Arch Capital Group",
+    "__CLASS__": "Adzuna::API::Response::Company"
+   }
+  },
+  {
+   "company": {
+    "display_name": "TD Bank",
+    "__CLASS__": "Adzuna::API::Response::Company"
+   },
+   "created": "2026-10-23T10:00:06Z",
+   "redirect_url": "https://www.adzuna.co.uk/jobs/details/5939044145?utm_medium=api&utm_source=test-app",
+   "description": "Work Location : London, United Kingdom Hours: 35 Line of Business: Technology Solutions Pay Details: We\u2019re committed to providing fair and equitable compensation to all our colleagues. As a candidate, we encourage you to have an open dialogue with a member of our HR Team and ask compensation related questions, including pay details for this role. Job Description: 2027 Technology Graduate Programme - London TD Securities is offering an opportunity to join our 12-month Technology Graduate Program\u2026",
+   "__CLASS__": "Adzuna::API::Response::Job",
+   "salary_max": 26964.44,
+   "contract_time": "full_time",
+   "category": {
+    "tag": "graduate-jobs",
+    "label": "Graduate Jobs",
+    "__CLASS__": "Adzuna::API::Response::Category"
+   },
+   "title": "2027 Technology Graduate Programme",
+   "location": {
+    "display_name": "London, UK",
+    "area": [
+     "UK",
+     "London"
+    ],
+    "__CLASS__": "Adzuna::API::Response::Location"
+   },
+   "salary_is_predicted": "1",
+   "salary_min": 26964.44,
+   "id": "5939044145",
+   "adref": "test-adref"
+  },
+  {
+   "created": "2026-10-23T02:35:59Z",
+   "contract_time": "full_time",
+   "__CLASS__": "Adzuna::API::Response::Job",
+   "redirect_url": "https://www.adzuna.co.uk/jobs/details/5938546917?utm_medium=api&utm_source=test-app",
+   "latitude": 51.503378,
+   "title": "2027 Technology Graduate Programme",
+   "adref": "test-adref",
+   "salary_is_predicted": "1",
+   "company": {
+    "__CLASS__": "Adzuna::API::Response::Company",
+    "display_name": "TD Bank"
+   },
+   "longitude": -0.139134,
+   "salary_max": 36560.98,
+   "category": {
+    "__CLASS__": "Adzuna::API::Response::Category",
+    "label": "Graduate Jobs",
+    "tag": "graduate-jobs"
+   },
+   "description": "Office Focused London, United Kingdom Full time R_1518238 Work Location : London, United Kingdom Hours: 35 Line of Business: Technology Solutions Pay Details: We're committed to providing fair and equitable compensation to all our colleagues. As a candidate, we encourage you to have an open dialogue with a member of our HR Team and ask compensation related questions, including pay details for this role. Job Description: 2027 Technology Graduate Programme - London TD Securities is offering an op\u2026",
+   "location": {
+    "display_name": "London, UK",
+    "area": [
+     "UK",
+     "London"
+    ],
+    "__CLASS__": "Adzuna::API::Response::Location"
+   },
+   "id": "5938546917",
+   "salary_min": 36560.98
+  }
+ ]
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "@/lib/ui/cn";
 
 export type CvLines = Record<string, { text: string; where: string }>;
@@ -11,6 +11,19 @@ export function SourceTag({ id, lines, edited }: { id: string; lines: CvLines; e
   const wrap = useRef<HTMLSpanElement>(null);
   const popId = useId();
   const line = lines[id];
+  // Where the popover's left edge goes, relative to the tag. Right-aligned to the tag as before,
+  // then kept 8px inside the screen: anchored `right-0` alone, a tag near the left edge — every
+  // CV bullet's on a phone, every letter paragraph's — opened it ~190px off-screen to the left,
+  // where it couldn't be scrolled to.
+  const [left, setLeft] = useState<number>();
+
+  useLayoutEffect(() => {
+    if (!open || !wrap.current) return;
+    const tag = wrap.current.getBoundingClientRect();
+    const width = Math.min(340, window.innerWidth * 0.8);
+    const at = Math.min(Math.max(8, tag.right - width), window.innerWidth - width - 8);
+    setLeft(at - tag.left);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -33,7 +46,7 @@ export function SourceTag({ id, lines, edited }: { id: string; lines: CvLines; e
         aria-controls={open ? popId : undefined}
         aria-label={`Source ${id}: show the original line`}
         className={cn(
-          "inline-flex min-h-6 items-center rounded-md px-1.5 font-mono text-tag font-semibold transition-colors",
+          "inline-flex min-h-6 items-center rounded-none px-1.5 font-mono text-tag font-semibold transition-colors pointer-coarse:min-h-8 pointer-coarse:px-2",
           line ? "bg-mint-100 text-forest-900 hover:bg-mint-200" : "bg-red-50 text-red-700",
           open && "bg-mint-200",
         )}
@@ -45,7 +58,8 @@ export function SourceTag({ id, lines, edited }: { id: string; lines: CvLines; e
           id={popId}
           role="dialog"
           aria-label={`Original line ${id}`}
-          className="absolute top-full right-0 z-30 mt-1.5 block w-[min(340px,80vw)] animate-fade-in rounded-control border border-line bg-white p-3.5 text-left text-small leading-relaxed shadow-pop"
+          style={{ left }}
+          className="absolute top-full z-30 mt-1.5 block w-[min(340px,80vw)] animate-fade-in rounded-control border border-line bg-surface p-3.5 text-left text-small leading-relaxed shadow-pop"
         >
           {line ? (
             <>

@@ -12,6 +12,7 @@ import { Card, CardHeader } from "@/lib/ui/Card";
 import { cn } from "@/lib/ui/cn";
 import { Dialog } from "@/lib/ui/Dialog";
 import { Checkbox, FieldError, Help, Input, Label, Select } from "@/lib/ui/Field";
+import { ThemeToggle } from "@/lib/ui/ThemeToggle";
 import { useToast } from "@/lib/ui/Toast";
 
 // Only models `config/wera.yaml` has a price for. An unlisted model is charged at `prices.default`,
@@ -34,7 +35,7 @@ const WEIGHT_LABELS: { key: keyof FitWeights; label: string; hint: string }[] = 
 
 type Schedule = { enabled: boolean; cron: string };
 
-type Draft = Pick<SettingsResponse, "redactContact" | "weeklyBudgetUsd" | "cvPages" | "baseUrl" | "models" | "weights"> & {
+type Draft = Pick<SettingsResponse, "redactContact" | "weeklyBudgetUsd" | "cvPages" | "baseUrl" | "models" | "weights" | "scheduledIntake" | "learnedRanking"> & {
   senders: string[];
   searchSchedule: Schedule;
 };
@@ -49,6 +50,8 @@ const toDraft = (s: SettingsResponse): Draft => ({
   senders: [...s.inbox.senders],
   // Only what the person sets: the next-run time and the credit figures are the server's to say.
   searchSchedule: { enabled: s.searchSchedule.enabled, cron: s.searchSchedule.cron },
+  scheduledIntake: s.scheduledIntake,
+  learnedRanking: s.learnedRanking,
 });
 
 // Schedules a person can pick without knowing cron. Each is at least six hours apart, which the
@@ -95,14 +98,21 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
   };
 
   return (
-    <div className="mx-auto max-w-[760px]">
+    <div className="@container mx-auto max-w-[760px]">
       <h1 className="text-[34px] leading-[1.05] font-bold tracking-[-0.025em] sm:text-display">Settings</h1>
       <p className="mt-2 text-small text-ink-2">Provider, models and keys for this instance.</p>
 
       <div className="mt-6 flex flex-col gap-4">
+        {/* Below 1024 px only: the sidebar carries the theme switch on desktop, and the phone top
+            bar gave it up to fit on one row. */}
+        <Card className="p-5 sm:p-6 lg:hidden" aria-labelledby="appearance-title">
+          <CardHeader id="appearance-title" title="Appearance" description="Light, dark, or follow this device." action={<ThemeToggle />} />
+        </Card>
         <KeysCard settings={settings} />
         <InboxCard settings={settings} senders={draft.senders} onSenders={(s) => set("senders", s)} onChecked={(at) => setSettings((s) => ({ ...s, inbox: { ...s.inbox, lastCheckedAt: at } }))} />
         <ScheduleCard settings={settings} value={draft.searchSchedule} onChange={(v) => set("searchSchedule", v)} error={errors["searchSchedule.cron"]} />
+        <DailyIntakeCard settings={settings} value={draft.scheduledIntake} onChange={(v) => set("scheduledIntake", v)} />
+        <LearnedRankingCard value={draft.learnedRanking} onChange={(v) => set("learnedRanking", v)} />
 
         <Card className="p-5 sm:p-6" aria-labelledby="models-title">
           <CardHeader id="models-title" title="Models" description="Any OpenAI-compatible endpoint. Pin dated model ids so results stay stable." />
@@ -111,7 +121,9 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
             <Input id="base-url" className="font-mono text-mono" value={draft.baseUrl} onChange={(e) => set("baseUrl", e.target.value)} invalid={!!errors.baseUrl} spellCheck={false} />
             <FieldError>{errors.baseUrl}</FieldError>
           </div>
-          <div className="mt-4 grid gap-4 sm:grid-cols-3">
+          {/* Two by two: four tiers in three columns left the fourth alone on a row, and long model
+              ids clipped in ~200px. */}
+          <div className="mt-4 grid gap-4 @xl:grid-cols-2">
             <ModelSelect id="fast" label="Fast tier" help="Importing, keywords, drafts" value={draft.models.fast} options={MODEL_OPTIONS.fast} onChange={(v) => set("models", { ...draft.models, fast: v })} />
             <ModelSelect id="select" label="Select tier" help="Picks which CV lines to show · ids only" value={draft.models.select} options={MODEL_OPTIONS.select} onChange={(v) => set("models", { ...draft.models, select: v })} />
             <ModelSelect id="scoring" label="Scoring tier" help="Fit scores · reasoning low" value={draft.models.scoring} options={MODEL_OPTIONS.scoring} onChange={(v) => set("models", { ...draft.models, scoring: v })} />
@@ -154,7 +166,7 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
                   role="radio"
                   aria-checked={draft.cvPages === n}
                   onClick={() => set("cvPages", n)}
-                  className={cn("min-h-10 rounded-[7px] px-4 text-[14px] font-semibold", draft.cvPages === n ? "bg-white text-forest-900 shadow-card" : "text-ink-2 hover:text-ink")}
+                  className={cn("min-h-10 rounded-none px-4 text-[14px] font-semibold", draft.cvPages === n ? "bg-surface text-forest-900 shadow-card" : "text-ink-2 hover:text-ink")}
                 >
                   {n} page{n > 1 ? "s" : ""}
                 </button>
@@ -187,7 +199,7 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
         {settings.allowClearJobs ? <ClearJobsCard /> : null}
       </div>
 
-      <div className="sticky bottom-0 z-10 -mx-4 mt-6 flex items-center justify-end gap-3 border-t border-line bg-mint-50/95 px-4 py-3 backdrop-blur sm:mx-0 sm:rounded-card sm:border sm:bg-white/95 sm:px-4">
+      <div className="sticky bottom-0 z-10 -mx-4 mt-6 flex items-center justify-end gap-3 border-t border-line bg-mint-50/95 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] backdrop-blur sm:mx-0 sm:rounded-card sm:border sm:bg-surface/95 sm:px-4">
         {dirty ? <span className="text-small text-ink-2">Unsaved changes</span> : null}
         {dirty ? (
           <Button
@@ -397,13 +409,16 @@ function KeysCard({ settings }: { settings: SettingsResponse }) {
 function KeyRow({ name, status, detail, action }: { name: string; status: SecretStatus; detail: string; action?: React.ReactNode }) {
   const ok = status === "set";
   return (
-    <li className={cn("flex flex-wrap items-center gap-3 rounded-[12px] border px-4 py-3", ok ? "border-line bg-white" : "border-amber-100 bg-amber-50/60")}>
-      <span className={cn("size-2 shrink-0 rounded-full", ok ? "bg-forest-700" : "bg-amber-500")} aria-hidden="true" />
-      <div className="min-w-0 flex-1">
-        <p className="font-mono text-mono font-semibold">{name}</p>
+    <li className={cn("flex flex-wrap items-center gap-3 rounded-none border px-4 py-3", ok ? "border-line bg-surface" : "border-amber-100 bg-amber-50/60")}>
+      <span className={cn("size-2 shrink-0 rounded-dot", ok ? "bg-accent" : "bg-amber-500")} aria-hidden="true" />
+      {/* The text fills the first line on a phone and the badge and button wrap under it. As a
+          plain `flex-1` (zero basis) the row never wrapped, and beside them the text got ~22px:
+          one word per line, the key name running over the badge. */}
+      <div className="min-w-0 flex-1 basis-[calc(100%-1.25rem)] @lg:basis-0">
+        <p className="font-mono text-mono font-semibold break-all">{name}</p>
         <p className="text-small text-ink-2">{detail}</p>
       </div>
-      <span className={cn("rounded-full px-2.5 py-1 text-[12px] font-semibold", ok ? "bg-mint-100 text-forest-900" : "bg-amber-50 text-amber-700")}>
+      <span className={cn("ml-5 rounded-none px-2.5 py-1 text-[12px] font-semibold @lg:ml-0", ok ? "bg-mint-100 text-forest-900" : "bg-amber-50 text-amber-700")}>
         {ok ? "Set" : status === "invalid" ? "Invalid" : "Needs key"}
       </span>
       {action}
@@ -469,9 +484,10 @@ function InboxCard({
         title="Job-alert inbox"
         description="Point your LinkedIn, Indeed and job-board alerts at a separate mailbox. WERA reads one folder of it, read-only, and turns each alert into job cards."
       />
-      <div className="mt-4 flex flex-wrap items-center gap-3 rounded-[12px] border border-line px-4 py-3">
-        <span className="size-2 shrink-0 rounded-full bg-forest-700" aria-hidden="true" />
-        <div className="min-w-0 flex-1">
+      <div className="mt-4 flex flex-wrap items-center gap-3 rounded-none border border-line px-4 py-3">
+        <span className="size-2 shrink-0 rounded-dot bg-accent" aria-hidden="true" />
+        {/* As in `KeyRow`: the text takes the first line on a phone, the badge and button the next. */}
+        <div className="min-w-0 flex-1 basis-[calc(100%-1.25rem)] @lg:basis-0">
           <p className="font-mono text-mono font-semibold break-all">
             {settings.inbox.label} · folder {settings.inbox.folder}
           </p>
@@ -479,7 +495,7 @@ function InboxCard({
             IMAP · checked {formatAgo(settings.inbox.lastCheckedAt)} · {settings.inbox.emailsThisWeek} alert emails this week
           </p>
         </div>
-        <span className="rounded-full bg-mint-100 px-2.5 py-1 text-[12px] font-semibold text-forest-900">Read-only</span>
+        <span className="ml-5 rounded-none bg-mint-100 px-2.5 py-1 text-[12px] font-semibold text-forest-900 @lg:ml-0">Read-only</span>
         <Button variant="secondary" onClick={checkNow} busy={checking}>
           Check now
         </Button>
@@ -488,9 +504,9 @@ function InboxCard({
       <p className="mt-5 mb-2 text-[14px] font-semibold">Allowed senders</p>
       <div className="flex flex-wrap items-center gap-2">
         {senders.map((s) => (
-          <span key={s} className="inline-flex items-center gap-0.5 rounded-full bg-mint-100 py-0.5 pr-1 pl-3 text-small">
+          <span key={s} className="inline-flex items-center gap-0.5 rounded-none bg-mint-100 py-0.5 pr-1 pl-3 text-small">
             {s}
-            <button type="button" onClick={() => onSenders(senders.filter((x) => x !== s))} className="inline-flex size-7 items-center justify-center rounded-full hover:bg-mint-200" aria-label={`Remove ${s}`}>
+            <button type="button" onClick={() => onSenders(senders.filter((x) => x !== s))} className="inline-flex size-7 items-center justify-center rounded-none hover:bg-mint-200 pointer-coarse:size-9" aria-label={`Remove ${s}`}>
               <X className="size-3.5" />
             </button>
           </span>
@@ -507,10 +523,14 @@ function InboxCard({
             onBlur={commit}
             placeholder="Sender name or domain"
             aria-label="New sender"
-            className="min-h-9 rounded-full border border-forest-700 px-3 text-small focus-visible:outline-none"
+            className="min-h-9 rounded-none border border-forest-700 px-3 text-[16px] focus-visible:outline-none pointer-coarse:min-h-11 sm:text-small"
           />
         ) : (
-          <button type="button" onClick={() => setAdding(true)} className="inline-flex min-h-9 items-center gap-1 rounded-full border border-dashed border-line px-3 text-small font-semibold text-forest-900 hover:bg-mint-50">
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            className="inline-flex min-h-9 items-center gap-1 rounded-none border border-dashed border-line px-3 text-small font-semibold text-forest-900 hover:bg-mint-50 pointer-coarse:min-h-11"
+          >
             <Plus className="size-3.5" aria-hidden="true" />
             Add sender
           </button>
@@ -521,6 +541,45 @@ function InboxCard({
       <p className="mt-4 rounded-control bg-mint-50 px-4 py-3 text-small leading-relaxed text-ink">
         Email text is treated as data. WERA only extracts job cards: it never follows instructions or opens attachments in an email, never opens LinkedIn links, and discards the message once the jobs are saved.
       </p>
+    </Card>
+  );
+}
+
+/** SCH-05: the daily jobs that go out to the internet on their own — off unless turned on here. */
+function DailyIntakeCard({ settings, value, onChange }: { settings: SettingsResponse; value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <Card className="p-5 sm:p-6" aria-labelledby="intake-title">
+      <CardHeader
+        id="intake-title"
+        title="Daily checks"
+        description="Pull your watched employers' job feeds at 06:30, check your job-alert inbox every three hours, and re-check at 07:00 which saved jobs are still open."
+      />
+      <div className="mt-4 space-y-2">
+        <Checkbox
+          label="Run the daily checks on their own"
+          checked={value}
+          onChange={(e) => onChange(e.target.checked)}
+          description="New jobs they find are scored, which uses your daily scoring allowance and model budget. Off by default — Search, Find more and Recheck always work by hand."
+        />
+        <p className="text-small text-ink-2">{settings.demoMode ? "Demo mode schedules nothing." : settings.scheduledIntake ? "On." : "Off: nothing runs unless you start it."}</p>
+      </div>
+    </Card>
+  );
+}
+
+/** MATCH-12: the shortlist's order learns from the person's decisions. On by default, and every
+ *  job it moves says why — so turning it off is a choice about the order, not a mystery fix. */
+function LearnedRankingCard({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <Card className="p-5 sm:p-6" aria-labelledby="learned-title">
+      <CardHeader
+        id="learned-title"
+        title="Learn from your decisions"
+        description="Jobs like ones you rejected move down your shortlist, and jobs like ones you approved move up, by at most a point. Each one it moves says why. Your fit scores never change."
+      />
+      <div className="mt-4">
+        <Checkbox label="Order my shortlist with what I've approved and rejected" checked={value} onChange={(e) => onChange(e.target.checked)} />
+      </div>
     </Card>
   );
 }

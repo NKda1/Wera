@@ -11,10 +11,10 @@ export function ProgressSteps({ steps, className }: { steps: { label: string; st
         <li key={s.label} className="flex items-center gap-2 text-small">
           <span
             className={cn(
-              "inline-flex size-5 items-center justify-center rounded-full",
-              s.state === "done" && "bg-forest-700 text-white",
+              "inline-flex size-5 items-center justify-center rounded-none",
+              s.state === "done" && "bg-accent text-white",
               s.state === "active" && "bg-mint-100 text-forest-700",
-              s.state === "todo" && "border border-line bg-white",
+              s.state === "todo" && "border border-line bg-surface",
             )}
             aria-hidden="true"
           >
@@ -33,8 +33,8 @@ export function ProgressSteps({ steps, className }: { steps: { label: string; st
 
 export function ProgressBar({ value, label }: { value: number; label: string }) {
   return (
-    <div className="h-1.5 overflow-hidden rounded-full bg-mint-100" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(value * 100)}>
-      <div className="h-full rounded-full bg-forest-700 transition-[width] duration-500" style={{ width: `${Math.round(value * 100)}%` }} />
+    <div className="h-1.5 overflow-hidden rounded-none bg-mint-100" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(value * 100)}>
+      <div className="h-full rounded-none bg-accent transition-[width] duration-500" style={{ width: `${Math.round(value * 100)}%` }} />
     </div>
   );
 }

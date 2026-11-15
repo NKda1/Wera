@@ -102,6 +102,33 @@ def liveness(job: Job, now_ms: int) -> str:
     return "unreachable" if job.last_checked_at else "unverified"
 
 
+# LIFE-03 (14 Nov): how long a job stays on the main list without anything showing it open. A
+# week: twice the median life of a closed job is 24 days (12 days, measured on 1,252 closures),
+# and a job nobody could confirm for a week is more likely gone than not.
+PROOF_OF_LIFE_DAYS = 7.0
+# LIFE-04: open this long, and the advert is often standing rather than a vacancy.
+EVERGREEN_DAYS = 60.0
+
+
+def possibly_closed(job: Job, now_ms: int) -> bool:
+    """Nothing has shown this job open for a week (LIFE-03). Its last proof of life is the later of
+    a confirmation (`last_confirmed_at`) and being found — a source listing it the day it was
+    first seen is evidence it was there. `last_seen` is not proof (LIFE-01): a cached card can
+    mention a job that closed yesterday."""
+    if job.status not in ("new", "shortlisted", "snoozed"):
+        return False
+    proofs = [d for d in (days_since(job.last_confirmed_at, now_ms), days_since(job.first_seen, now_ms)) if d is not None]
+    return bool(proofs) and min(proofs) > PROOF_OF_LIFE_DAYS
+
+
+def evergreen(job: Job, now_ms: int) -> bool:
+    """Open two months or more (LIFE-04): posted that long ago, or first seen that long ago."""
+    if job.status == "closed":
+        return False
+    age = days_since(job.posted_at, now_ms) if job.posted_at else days_since(job.first_seen, now_ms)
+    return age is not None and age >= EVERGREEN_DAYS
+
+
 def normalise_weights(w: FitWeights) -> FitWeights:
     total = w.core + w.adjacent + w.experience + w.eligibility + w.freshness
     if total <= 0:

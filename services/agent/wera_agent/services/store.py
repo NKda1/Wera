@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 import logfire
 import yaml
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, select
 from sqlalchemy.orm import Session
 
 from ..clock import iso, now_ms, parse_ms
@@ -41,8 +41,9 @@ from ..db.models import (
 from ..domain import cv_build, cv_extract, dedupe, filters
 from ..domain.applications import ALLOWED
 from ..domain.cv_profile import build_profile
+from ..domain.places import COUNTRIES
 from ..domain.profile_diff import profile_diff
-from ..domain.scoring import build_fit_report, js_round, liveness, urgency
+from ..domain.scoring import build_fit_report, evergreen, js_round, liveness, possibly_closed, urgency
 from ..domain.text import is_linkedin_url, title_case
 from ..domain.vocab import cv_line_index, master_cv_text, text_has_term
 from ..errors import ApiError, validation_error
@@ -59,6 +60,7 @@ from ..schemas.api import (
     FoundCounts,
     JobsCleared,
     NavCounts,
+    PlaceOption,
     ProfileProposalResult,
     ShortlistMeta,
     SiteOption,
@@ -68,6 +70,7 @@ from ..schemas.applications import Application, ApplicationJob, ApplicationListI
 from ..schemas.cv import Contact, CvLine, MasterCV
 from ..schemas.cv_profile import CvProfile
 from ..schemas.jobs import Ats, FitEvidence, FitWeights, FoundBy, Job, ScoredJob, SubScore
+from ..schemas.learning import Suggestion, SuggestionList
 from ..schemas.llm_outputs import CvProfileOutput, ParsedCv, ProfileProposal
 from ..schemas.pack import AnswerItem, AtsReport, Cited, CoverLetter, CvItem, CvSection, JobAnalysis, Pack, TailoredCV
 from ..schemas.profile import SearchProfile
@@ -76,7 +79,7 @@ from ..schemas.settings import DEFAULT_SEARCH_CRON, SecretsStatus, SettingsPatch
 from ..schemas.strategy import PlannedQuery, TargetMatrix
 from ..settings import get_settings, llm_provider_name
 from ..sources.harvest import BATCH
-from . import providers
+from . import learning, providers
 from .demo_data import DAY, MIN, first_run_seeds, seed_to_job
 
 # The order the graph drafts a pack in, which the review screen shows as progress (PERF-03).
@@ -356,6 +359,7 @@ class Store:
         # Intake runs are only simulated in demo mode. A real run is finished by the intake
         # graph when its channels have actually answered, so advancing it on a timer here would
         # overwrite real results with demo seeds.
+        self._close_past_deadline()
         if not get_settings().wera_demo_mode:
             self.s.flush()
             return
@@ -366,6 +370,27 @@ class Store:
             if elapsed >= run.duration_ms:
                 self._finish_run(run)
         self.s.flush()
+
+    def _close_past_deadline(self) -> int:
+        """LIFE-02: a job whose closing date has passed is closed, with no check needed — the
+        employer said when, in advance. A day of slack for time zones and "closes today"."""
+        closed = 0
+        for row in self.s.scalars(select(JobRow).where(JobRow.status.in_(("new", "shortlisted", "snoozed")))).all():
+            closes = row.data.get("closesAt")
+            if not closes:
+                continue
+            try:
+                past = parse_ms(closes) + DAY < self.now
+            except (ValueError, TypeError):
+                continue
+            if past:
+                job = self._job(row)
+                job.status, job.closed_at = "closed", iso(self.now)
+                save_job(self.s, job)
+                closed += 1
+        if closed:
+            logfire.info("Closed {count} job(s) past their closing date", count=closed)
+        return closed
 
     # Where fetching ends and scoring begins on the demo's bar, mirroring `intake.SEARCH_SHARE`.
     # Duplicated rather than imported: `graphs.intake` imports this module, and the demo's
@@ -502,6 +527,43 @@ class Store:
         """
         return self.scored(job, weights) if self._evidence_or_none(job.id) else None
 
+    def learned_ranking(self) -> bool:
+        """MATCH-12's switch: on unless the person turned it off in Settings."""
+        return self._settings().get("learnedRanking") is not False
+
+    # ---- MATCH-13: what the decisions suggest changing ----
+
+    def learning_suggestions(self) -> SuggestionList:
+        profile = self._profile()
+        learned = learning.learn(self.s, self.cv().version, profile)
+        dismissed = set(get_kv(self.s, learning.DISMISSED_KEY) or [])
+        return SuggestionList(items=learning.suggestions(learned, profile, dismissed), decisions=learned.decisions)
+
+    def _suggestion(self, suggestion_id: str) -> Suggestion:
+        found = next((s for s in self.learning_suggestions().items if s.id == suggestion_id), None)
+        if found is None:
+            raise ApiError(404, "NOT_FOUND", "That suggestion no longer applies.")
+        return found
+
+    def accept_suggestion(self, suggestion_id: str) -> SearchProfile:
+        """The person said yes (PRF-04): the change goes into their profile, through the same save
+        an edit does. An accepted exclusion also narrows the searches (PRF-06)."""
+        suggestion = self._suggestion(suggestion_id)
+        profile = self.put_profile(learning.apply_suggestion(self._profile(), suggestion))
+        if suggestion.kind == "exclude_term":
+            terms = [t for t in get_kv(self.s, learning.LEARNED_EXCLUDES_KEY) or [] if t.lower() != suggestion.value.lower()]
+            set_kv(self.s, learning.LEARNED_EXCLUDES_KEY, [*terms, suggestion.value])
+        logfire.info("Accepted a learned suggestion: {kind}", kind=suggestion.kind, value=suggestion.value)
+        return profile
+
+    def dismiss_suggestion(self, suggestion_id: str) -> SuggestionList:
+        """Not offered again, whatever later decisions say."""
+        dismissed = list(get_kv(self.s, learning.DISMISSED_KEY) or [])
+        if suggestion_id not in dismissed:
+            set_kv(self.s, learning.DISMISSED_KEY, [*dismissed, suggestion_id])
+        self.s.flush()
+        return self.learning_suggestions()
+
     def count_jobs(self, status: str) -> int:
         """How many jobs hold a status, counted in the database rather than by building them."""
         return self.s.scalar(select(func.count()).select_from(JobRow).where(JobRow.status == status)) or 0
@@ -585,6 +647,30 @@ class Store:
         rows = self.s.scalars(select(JobRow).where(JobRow.status == status).limit(limit)).all()
         return [self._job(r) for r in rows]
 
+    def _near_miss_clause(self):  # noqa: ANN202 — a SQLAlchemy expression
+        """Hidden as a near miss (`filters.NEAR_MISS`). The reason lives in the job's JSON, so this
+        matches its text — the same on SQLite's JSON and Postgres's JSONB cast to text."""
+        return cast(JobRow.data, Text).like(f"%{filters.NEAR_MISS}%")
+
+    def hidden_sample(self, *, limit: int) -> list[Job]:
+        """The hidden jobs the screen lists: near misses first, then the rest, newest first.
+
+        An arbitrary 50 of 2,363 told the person nothing (14 Nov). The near misses are the ones
+        worth a look, and where "Find more" points once every search has been sent.
+        """
+        base = select(JobRow).where(JobRow.status == "hidden")
+        near = self.s.scalars(base.where(self._near_miss_clause()).order_by(JobRow.first_seen.desc()).limit(limit)).all()
+        rest = self.s.scalars(
+            base.where(~self._near_miss_clause()).order_by(JobRow.first_seen.desc()).limit(limit - len(near))
+        ).all()
+        return [self._job(r) for r in [*near, *rest]]
+
+    def count_near_misses(self) -> int:
+        return int(
+            self.s.scalar(select(func.count()).select_from(JobRow).where(JobRow.status == "hidden", self._near_miss_clause()))
+            or 0
+        )
+
     def scored(self, job: Job, weights: FitWeights | None = None) -> ScoredJob:
         report = build_fit_report(
             job.id,
@@ -601,6 +687,8 @@ class Store:
                 "fit": report.model_dump(),
                 "urgency": urgency(job.posted_at, self.now),
                 "liveness": liveness(job, self.now),
+                "possiblyClosed": possibly_closed(job, self.now),
+                "evergreen": evergreen(job, self.now),
             }
         )
 
@@ -622,7 +710,10 @@ class Store:
         channel: str | None = None,
         location: str | None = None,
         remote: str | None = None,
+        possibly_closed: bool | None = False,
     ) -> list[ScoredJob]:
+        """`possibly_closed`: False (the main list) leaves out jobs nothing has shown open for a
+        week (LIFE-03), True lists only those, None lists both."""
         self.settle()
         weights = self._weights()
         rows = self.s.scalars(select(JobRow).where(JobRow.status == status)).all()
@@ -631,8 +722,16 @@ class Store:
         # dropped silently, because a job that vanishes with no explanation is its own bug.
         items = [scored for r in rows if (scored := self.scored_or_none(self._job(r), weights))]
         items.sort(key=lambda j: j.posted_at or "", reverse=True)
+        # MATCH-12: what the person's decisions have taught moves a job in the order — never its
+        # total, which stays the explained fit (MATCH-04) — and the job says why it moved.
+        if self.learned_ranking():
+            learned = learning.learn(self.s, self.cv().version, self._profile())
+            if learned.words or learned.pay_floor:
+                for j in items:
+                    j.learned = learning.adjust(j, learned)
         if sort != "date":
-            items.sort(key=lambda j: j.fit.total, reverse=True)  # stable: ties stay newest-first
+            # Stable: ties stay newest-first.
+            items.sort(key=lambda j: j.fit.total + (j.learned.adjustment if j.learned else 0), reverse=True)
         loc = location.lower() if location else None
         return [
             j
@@ -641,6 +740,7 @@ class Store:
             and (not channel or any(s.channel == channel for s in j.sources))
             and (not loc or loc in j.location.raw.lower())
             and (not remote or j.remote == remote)
+            and (possibly_closed is None or j.possibly_closed == possibly_closed)
         ]
 
     def get_job(self, job_id: str) -> ScoredJob:
@@ -688,6 +788,34 @@ class Store:
             for s in sites()
         ]
 
+    def places(self) -> list[PlaceOption]:
+        """SRCH-11: every country a search can target, with the boards and APIs that cover it.
+
+        Read from the same gates a search uses (`Site.reviewed`, `feeds.skipped`), so a country
+        never promises an API whose key is missing. Asked as an interactive search, which is
+        the one that has a person for Careerjet; a scheduled run may skip it.
+        """
+        from ..sources import feeds
+
+        person = feeds.Person(ip="", user_agent="")
+        boards = [s for s in sites() if s.reviewed]
+        out: list[PlaceOption] = []
+        for code, country in COUNTRIES.items():
+            out.append(
+                PlaceOption(
+                    code=code,
+                    name=country.name,
+                    region=country.region,
+                    boards=[b.name for b in boards if code in {c.upper() for c in b.countries}],
+                    feeds=[
+                        f.name
+                        for fid, f in feeds.FEEDS.items()
+                        if feeds.skipped(fid, countries={code.lower()}, person=person) is None
+                    ],
+                )
+            )
+        return out
+
     # How many hidden jobs the Jobs screen is sent. A real profile filters thousands — one run
     # against 15 boards left 3,223 — and the screen shows a count and a sample, not all of them.
     HIDDEN_SHOWN = 50
@@ -731,8 +859,9 @@ class Store:
                 watchlist=watch["newSinceYesterday"],
             ),
             channels=channels,
-            hidden=self.list_unscored("hidden", limit=self.HIDDEN_SHOWN),
+            hidden=self.hidden_sample(limit=self.HIDDEN_SHOWN),
             hidden_total=self.count_jobs("hidden"),
+            near_misses=self.count_near_misses(),
             awaiting_score=self.awaiting_score(),
             awaiting=self.list_awaiting_score(limit=self.HIDDEN_SHOWN),
             find_more_size=wera().surface.max,
@@ -756,6 +885,10 @@ class Store:
         row = self._job_row(job_id)
         job = self._job(row)
         now = self.now
+        # MATCH-11: what the job was when it was decided on, before the decision changes it — an
+        # unhide clears the reason it was hidden for, which is the thing worth learning.
+        before = self.scored_or_none(job)
+        features = learning.features_of(job, before)
         # Deciding on a job is the surest sign it was looked at (SRCH-25).
         job.seen_at = job.seen_at or iso(now)
 
@@ -764,6 +897,9 @@ class Store:
                 raise ApiError(409, "INVALID_STATE", "Only hidden jobs can be unhidden.")
             job.status, job.hidden_reason = "new", None
         else:
+            if job.status == "closed":
+                # LIFE-02/03: closed by its date or a check — not something to spend a pack on.
+                raise ApiError(409, "JOB_CLOSED", f"{job.title} at {job.company} has closed, so WERA won't draft for it.")
             if job.status != "new":
                 raise ApiError(409, "INVALID_STATE", "This job has already been decided.")
             if d.action == "approve":
@@ -787,8 +923,23 @@ class Store:
             else:
                 job.status = "rejected"
         save_job(self.s, job)
-        note = d.reason or (f"{d.days}d" if d.days else None)
-        self.s.add(DecisionRow(job_id=job_id, gate=1, decision=d.action, note=note, decided_at=iso(now)))
+        code = learning.reason_code(d.reason_code, d.reason) if d.action == "reject" else None
+        # The note is what the person wrote; a preset's own text is the code, not a note.
+        written = d.reason if d.reason and d.reason.strip() not in learning.REASON_FROM_NOTE else None
+        note = written or (f"{d.days}d" if d.days else None)
+        self.s.add(
+            DecisionRow(
+                job_id=job_id,
+                gate=1,
+                decision=d.action,
+                note=note,
+                decided_at=iso(now),
+                reason_code=code,
+                cv_version=self.cv().version,
+                fit_total=before.fit.total if before else None,
+                features=features,
+            )
+        )
         self.s.flush()
         logfire.info("Gate 1 {action} on {job_id}", action=d.action, job_id=job_id, job_status=job.status)
         GATE1_DECISIONS.add(1, {"action": d.action})
@@ -1217,23 +1368,76 @@ class Store:
         """
         new_ids: set[str] = set()
         stored: list[Job] = []
-        by_key = {row.dedupe_key: row for row in self.s.scalars(select(JobRow)).all() if row.dedupe_key}
+        runs = run_ids or {}
+        # "Find more" searches the boards under its own run, keyed `score_more`, while what it
+        # finds is a `board_search` sighting — so the lookup by channel missed and its jobs were
+        # saved with no run (14 Nov): no "New" tag, no origin label. One run in play is the run.
+        only_run = next(iter(runs.values())) if len(set(runs.values())) == 1 else None
+        # An index of what is saved, not the rows: decoding every job's JSON on each upsert (2,384
+        # of them after one watchlist run) held the GIL for seconds and froze the request loop
+        # (14 Nov). Rows are loaded only when one is a candidate.
+        index = self.s.execute(select(JobRow.id, JobRow.dedupe_key, JobRow.company, JobRow.title)).all()
+        by_key: dict[str, str] = {key: job_id for job_id, key, _, _ in index if key}
+        # NORM-06 against what is saved, not only within the batch: the same job found on another
+        # site (bebee's copy, then the employer's own posting via Adzuna) is one job, not two.
+        by_company: dict[str, list[tuple[str, str]]] = {}
+        for job_id, _, company, title in index:
+            by_company.setdefault(dedupe.normalise_company(company), []).append((job_id, title))
         for job in jobs:
-            existing = self.s.get(JobRow, job.id) or by_key.get(job.dedupe_key)
+            existing = (
+                self.s.get(JobRow, job.id)
+                or (self.s.get(JobRow, by_key[job.dedupe_key]) if job.dedupe_key in by_key else None)
+                or self._copy_of(job, by_company)
+            )
             if existing is None:
                 if job.found_by is None and job.sources:
                     channel = job.sources[0].channel
-                    job.found_by = FoundBy(run_id=(run_ids or {}).get(channel), channel=channel, at=iso(self.now))
+                    job.found_by = FoundBy(run_id=runs.get(channel) or only_run, channel=channel, at=iso(self.now))
                 save_job(self.s, job, questions=[])
                 new_ids.add(job.id)
                 stored.append(job)
+                by_key[job.dedupe_key] = job.id
+                by_company.setdefault(dedupe.normalise_company(job.company), []).append((job.id, job.title))
                 continue
             merged = dedupe.merge_sources(self._job(existing), job)
             merged.last_seen = iso(self.now)
+            # LIFE-03: an employer's own feed listing the job today is a live answer that it is
+            # open. A board card is not — it may be the crawl cache's copy from two days ago.
+            if job.sources and job.sources[0].channel == "watchlist":
+                merged.last_confirmed_at = iso(self.now)
+            # The link may have moved to the employer's own; the key follows it, so the next
+            # sighting of that link finds this job by key. Unless another row already holds it.
+            key = dedupe.key_for(merged)
+            if key != merged.dedupe_key and key not in by_key:
+                by_key.pop(merged.dedupe_key, None)
+                merged.dedupe_key = key
+                by_key[key] = existing.id
             save_job(self.s, merged)
             stored.append(merged)
         self.s.flush()
         return stored, new_ids
+
+    def _copy_of(self, job: Job, by_company: dict[str, list[tuple[str, str]]]) -> JobRow | None:
+        """A saved job this one is a copy of, from another site (NORM-06).
+
+        The title test runs first, on the index alone: an employer board's 571 jobs are checked
+        against every new job from that employer, and building each as a `Job` to find the titles
+        differ was the slow part.
+        """
+        for job_id, title in by_company.get(dedupe.normalise_company(job.company), []):
+            if dedupe.title_similarity_sorted(title, job.title) < dedupe.COPY_TITLE:
+                continue
+            row = self.s.get(JobRow, job_id)
+            if row is not None and dedupe.is_copy_elsewhere(self._job(row), job):
+                logfire.info(
+                    "{title} at {company} is a copy of a saved job, from another site; merged",
+                    title=job.title,
+                    company=job.company,
+                    saved=row.id,
+                    link=job.apply_url,
+                )
+                return row
+        return None
 
     def inbox_last_uid(self) -> int | None:
         """MAIL-09: the highest UID already processed."""
@@ -1732,7 +1936,45 @@ class Store:
                 "in config/wera.yaml to change it.",
             )
         self._assert_budget()  # COST-01
+        if self._searches_used_up():
+            near = self.count_near_misses()
+            hint = (
+                f" {near} near miss{'' if near == 1 else 'es'} — close to your titles but not one of them — "
+                "are listed first under the hidden jobs; bring back any you want scored."
+                if near
+                else ""
+            )
+            raise ApiError(
+                409,
+                "SEARCH_USED_UP",
+                "Every search for this profile has been sent today and nothing is waiting to be scored."
+                f"{hint} To search further, add titles to your profile or regenerate it.",
+            )
         return RunIds(run_ids=[self._start_scoring_run("score_more")])
+
+    def _searches_used_up(self) -> bool:
+        """SRCH-26: nothing for "Find more" to do — no backlog, an empty queue, every tier sent.
+
+        Runs 73–75 on 14 Nov each started, sent nothing and failed with "found 0 of the 8": a
+        button that spends a run to say what was knowable before it. Fails open: with Redis
+        down, or the job APIs never asked, the run goes ahead and reports for itself.
+        """
+        from ..sources import targets
+
+        if get_settings().wera_demo_mode:
+            return False
+        if self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model()):
+            return False
+        try:
+            queue = targets.TargetQueue(targets.connect(), self.plan_key())
+            if queue.size():
+                return False
+            planned, _ = self.search_queries(refresh=False, probe=False)
+            sent = queue.tiers_sent()
+        except Exception:  # noqa: BLE001 — not knowing is not "used up"
+            return False
+        tiers = {q.tier for q in planned}
+        return bool(tiers) and {0, *tiers} <= sent
 
     def _start_scoring_run(self, channel: str) -> str:
         """One `intake_runs` row for a pass that only scores — no channel, no credits, no fetching."""
@@ -1819,7 +2061,10 @@ class Store:
     # * `intake_runs` — the other ledger. Firecrawl credits are counted from the runs that spent
     #   them (`credits_this_week`), so deleting the runs handed the week's credits back, and a
     #   cleared list could spend the weekly cap again. Running ones are cancelled instead.
-    RESET_TABLES = (DocumentRow, ApplicationRow, FitReportRow, DecisionRow, JobRow, CrawlCacheRow)
+    # `decisions` stays (MATCH-11, 15 Nov): what someone has turned down and taken is what WERA
+    # learns from, and a new CV changes what fits, not what they want. Each row carries the CV
+    # version it was made against and a snapshot of its job, so it needs no job row to be read.
+    RESET_TABLES = (DocumentRow, ApplicationRow, FitReportRow, JobRow, CrawlCacheRow)
 
     def clear_preview(self) -> JobsCleared:
         """What "Clear jobs" would remove, so the confirm can name it before anything goes."""
@@ -1860,6 +2105,12 @@ class Store:
     # The statuses an audit may change. A job someone rejected, or one already closed, archived or
     # hidden, has nothing to gain from a new reason; one with an application is flagged instead.
     AUDITABLE = ("new", "shortlisted", "snoozed")
+    NOT_A_POSTING = {
+        "listing": "Not a job posting: a page of results",
+        "closed": "Not a job posting: the page is gone",
+        "other": "Not a job posting",
+    }
+    TOO_THIN = "Not a job posting: too little description to judge"
 
     def audit_listings(self, *, apply: bool = False) -> list[dict[str, str]]:
         """SRCH-21 applied to what is already saved: the jobs that are really a results page, a
@@ -1871,11 +2122,7 @@ class Store:
         """
         from ..sources.postings import classify, is_closed_page
 
-        reasons = {
-            "listing": "Not a job posting: a page of results",
-            "closed": "Not a job posting: the page is gone",
-            "other": "Not a job posting",
-        }
+        reasons = self.NOT_A_POSTING
         applied = set(self.s.scalars(select(ApplicationRow.job_id).where(ApplicationRow.status != "discarded")))
         found: list[dict[str, str]] = []
         for row in self.s.scalars(select(JobRow).order_by(JobRow.first_seen)).all():
@@ -1909,6 +2156,128 @@ class Store:
             logfire.info("Audited saved jobs: {count} aren't postings", count=len(found))
         return found
 
+    def dedupe_saved(self, *, apply: bool = False) -> list[dict[str, str]]:
+        """NORM-06 across sites, applied to what was saved before `upsert_jobs` checked for it.
+
+        Copies are grouped (bebee's copy of a Built In posting of an Ashby job is one group of
+        three). The one kept is the one with an application, then a visible one, then the one with
+        the employer's own link (`dedupe.link_rank`), then the first seen; it takes every other's
+        sources and the best link. The others are hidden as duplicates of it — never deleted.
+
+        Left out: what isn't a posting (a results page hidden by `audit_listings`) and earlier
+        duplicates. Only flagged: a group in which two copies have an application, or two copies
+        are on the same site — two links on one site are two jobs, so the group joined two.
+        """
+        from ..domain.dedupe import _host
+
+        applied = set(self.s.scalars(select(ApplicationRow.job_id).where(ApplicationRow.status != "discarded")))
+        by_company: dict[str, list[Job]] = {}
+        for row in self.s.scalars(select(JobRow).order_by(JobRow.first_seen)).all():
+            job = self._job(row)
+            if (job.hidden_reason or "").startswith(("Not a job posting", "Duplicate")):
+                continue
+            by_company.setdefault(dedupe.normalise_company(row.company), []).append(job)
+
+        def busy(job: Job) -> bool:
+            return job.id in applied or job.status == "in_application"
+
+        def rank(job: Job) -> tuple[int, int, int, str]:
+            return (-int(busy(job)), int(job.status == "hidden"), -dedupe.link_rank(job), job.first_seen)
+
+        found: list[dict[str, str]] = []
+        for group in by_company.values():
+            parent = {job.id: job.id for job in group}
+
+            def root(job_id: str, parent: dict[str, str] = parent) -> str:
+                while parent[job_id] != job_id:
+                    job_id = parent[job_id]
+                return job_id
+
+            for i, left in enumerate(group):
+                for right in group[i + 1 :]:
+                    if dedupe.is_copy_elsewhere(left, right):
+                        parent[root(right.id)] = root(left.id)
+            clusters: dict[str, list[Job]] = {}
+            for job in group:
+                clusters.setdefault(root(job.id), []).append(job)
+            for members in clusters.values():
+                if len(members) < 2:
+                    continue
+                keep, *copies = sorted(members, key=rank)
+                hosts = [_host(m.apply_url) for m in members]
+                if len(set(hosts)) < len(hosts):
+                    action = "flagged: two postings on one site"
+                elif sum(busy(m) for m in members) > 1:
+                    action = "flagged: two have an application"
+                else:
+                    action = "merged" if apply else "would merge"
+                    if apply:
+                        for copy in copies:
+                            dedupe.merge_sources(keep, copy)
+                            copy.status = "hidden" if copy.status in self.AUDITABLE else copy.status
+                            copy.hidden_reason = f"Duplicate: the same job as {keep.id}, seen on another site"
+                            save_job(self.s, copy)
+                        save_job(self.s, keep)
+                found.append(
+                    {
+                        "action": action,
+                        "title": keep.title,
+                        "company": keep.company,
+                        "keep": keep.id,
+                        "keep_url": keep.apply_url or "",
+                        "copies": " | ".join(c.apply_url or c.id for c in copies),
+                    }
+                )
+        self.s.flush()
+        if apply:
+            logfire.info("Merged {count} group(s) of one job seen on several sites", count=len(found))
+        return found
+
+    # A description read as page text before 13 Nov kept the page's layout as lines of one space;
+    # Firecrawl's Markdown and the feeds never have them. This many is that read, not a stray one.
+    LAYOUT_LINES = 10
+
+    def tidy_saved(self, *, apply: bool = False) -> list[dict[str, str]]:
+        """Today's reading rules applied to what was saved before them (12 Nov review).
+
+        * A posting date more than a day ahead is dropped (`normalise.dated`): three Gradcracker
+          reads had stored the application deadline.
+        * A description read as page text loses its layout lines and the site's menus above the
+          job (`ats_feeds.without_leading_chrome`). Needed here because a re-read can't do it: a
+          merge keeps the longer description, and the trimmed one is shorter.
+
+        Nothing is deleted, and the job keeps its status and score. Returns one row per change.
+        """
+        from ..sources.ats_feeds import without_layout_lines, without_leading_chrome
+        from ..sources.normalise import dated
+
+        found: list[dict[str, str]] = []
+        for row in self.s.scalars(select(JobRow).order_by(JobRow.first_seen)).all():
+            job = self._job(row)
+            changes: list[str] = []
+            if job.posted_at and dated(job.posted_at, self.now)[0] is None:
+                changes.append(f"posting date {job.posted_at[:10]} is in the future")
+                job.posted_at, job.posted_precision = None, "unknown"
+            text = job.description_md or ""
+            if sum(1 for line in text.split("\n") if line.strip() in ("", "-") and line) >= self.LAYOUT_LINES:
+                tidied = without_layout_lines(text)
+                # The menus only on a page WERA read as text. An employer's feed is its own words
+                # from the first line, and may well open on a run of short facts.
+                if job.ats is None:
+                    tidied = without_leading_chrome(tidied)
+                kind = "menus and layout" if len(tidied) < len(without_layout_lines(text)) else "layout lines"
+                changes.append(f"{kind}: description {len(text):,} → {len(tidied):,} characters")
+                job.description_md = tidied
+            if not changes:
+                continue
+            if apply:
+                save_job(self.s, job)
+            found.append({"id": row.id, "title": job.title, "company": job.company, "change": "; ".join(changes)})
+        self.s.flush()
+        if apply and found:
+            logfire.info("Tidied {count} saved job(s)", count=len(found))
+        return found
+
     def refilter_hidden(self, *, apply: bool = False) -> list[Job]:
         """MATCH-01 again, over the jobs it hid: the ones today's filters and profile would keep.
 
@@ -1916,14 +2285,33 @@ class Store:
         London jobs whose posting said "London, England" (fixed 11 Nov). A job brought back is
         unscored, so it joins the backlog "Find more" scores first; nothing is deleted either way.
         Only jobs hidden by the filters are considered: a decision a person made stays made.
+
+        A job comes back only if it would get in today (SRCH-21, SRCH-23), not just past the
+        filters: the first refilter (12 Nov) brought back a Gradcracker results page and seven
+        summaries too thin to judge, saved before those checks existed. One that fails is left
+        hidden with the reason that now applies, so it isn't offered again.
         """
+        from ..sources.harvest import MIN_DESCRIPTION
+        from ..sources.postings import classify
+
         brought: list[Job] = []
         profile = self._profile()
         for row in self.s.scalars(select(JobRow).where(JobRow.status == "hidden")).all():
             job = self._job(row)
             if not job.hidden_reason or job.hidden_reason.startswith("Not a job posting"):
                 continue
-            if filters.hidden_reason(job, profile, self.now) is not None:
+            reason = filters.hidden_reason(job, profile, self.now)
+            if reason is not None:
+                # Still hidden, but perhaps for a better-worded reason — a near miss, since 14 Nov.
+                if apply and reason != job.hidden_reason:
+                    job.hidden_reason = reason
+                    save_job(self.s, job)
+                continue
+            kind = classify(job.apply_url or "", title=job.title)
+            if kind != "posting" or len(job.description_md or "") < MIN_DESCRIPTION:
+                if apply:
+                    job.hidden_reason = self.NOT_A_POSTING.get(kind, self.TOO_THIN)
+                    save_job(self.s, job)
                 continue
             brought.append(job)
             if apply:
@@ -1977,6 +2365,37 @@ class Store:
         logfire.info("Cleared the job backlog for {reason}: {counts}", reason=reason, counts=counts)
         return counts
 
+    def _settle_summary(self, cv: MasterCV) -> None:
+        """TAIL-07 (14 Nov): every CV has a professional profile unless its owner removed WERA's.
+
+        * WERA's summary, edited: the person's now (`generated` cleared). The editor already drops
+          the flag on any edit; this catches a client that sends it back with new text.
+        * WERA's summary, removed: remembered, and not written again for this person.
+        * No summary at all: one is composed from the CV's own lines and guarded
+          (`tailor.compose_master_summary`), in the same version — so saving doesn't make two.
+        """
+        from ..nodes.tailor import compose_master_summary
+
+        # From the saved row, not `self.cv()`: that is a cached object a caller may have edited in
+        # place, and comparing an edit with itself would keep WERA's flag on the person's words.
+        row = self.s.scalars(select(MasterCvRow).order_by(MasterCvRow.version.desc()).limit(1)).first()
+        previous = MasterCV.model_validate(row.data).summary if row is not None else None
+        # Edited only when it is the same summary — WERA's, same id — with different words. A CV
+        # replacing another (an import, the eval pinning its own) is not an edit of the old one.
+        edited = previous is not None and previous.generated and previous.id == (cv.summary.id if cv.summary else None)
+        if cv.summary and cv.summary.generated and edited and cv.summary.text.strip() != previous.text.strip():
+            cv.summary.generated = None
+        if cv.summary and cv.summary.text.strip():
+            return
+        if previous and previous.generated and previous.text.strip():
+            set_kv(self.s, "summaryDeclined", True)
+            return
+        if get_kv(self.s, "summaryDeclined"):
+            return
+        composed = compose_master_summary(self.s, cv)
+        if composed is not None:
+            cv.summary = composed
+
     def put_cv(self, cv: MasterCV, *, rescore: bool = True) -> int:
         """Save a new version of the master CV, and re-judge the shortlist against it.
 
@@ -2004,6 +2423,7 @@ class Store:
         }
         if blank:
             raise validation_error([{"loc": tuple(path.split(".")), "msg": msg} for path, msg in blank.items()])
+        self._settle_summary(cv)
         cv.version = self.cv().version + 1
         self.s.add(MasterCvRow(version=cv.version, data=cv.model_dump(mode="json"), saved_at=iso(self.now)))
         self.s.flush()
@@ -2118,7 +2538,7 @@ class Store:
         self._profile_row().data = profile.model_dump(mode="json")
         return profile
 
-    def strategy(self) -> TargetMatrix | None:
+    def strategy(self, *, refusing: set[str] | None = None) -> TargetMatrix | None:
         """The Strategist's matrix, while it still answers the current question.
 
         Read-only and free: a stale matrix (new CV, new profile, new scoring model) is reported as
@@ -2138,28 +2558,79 @@ class Store:
         # approved, or how queries are written (measured: a level word added, and a current plan
         # went on sending the old searches).
         fresh = strategist.queries(self._profile(), self.cv_profile_cached(), sites(), matrix)
+        fresh = strategist.leave_out(fresh, self.refusing_hosts(probe=False) if refusing is None else refusing)
         if fresh != matrix.queries:
             matrix.queries = fresh
             set_kv(self.s, "target_matrix", matrix.model_dump(mode="json"))
         return matrix
 
-    def search_queries(self, *, refresh: bool = True) -> tuple[list[PlannedQuery], TargetMatrix | None]:
+    def refusing_hosts(self, *, probe: bool) -> set[str]:
+        """SRCH-30: the hosts this search would query or meet whose robots.txt refuses WERA.
+
+        `probe=False` answers from the week's cached verdicts and never touches the network, for
+        reads; `probe=True` asks any host not checked this week, before a search. Demo mode asks
+        nothing (DEMO-02). Nor does a stopped Redis: there is nowhere to keep the answers, and the
+        search stops on `REDIS_DOWN` straight after, so asking would fetch seven files for nothing.
+        """
+        if get_settings().wera_demo_mode:
+            return set()
+        from ..sources import robots, targets
+
+        try:
+            client = targets.connect()
+        except ApiError:
+            return set()
+        probes = strategist.robots_probes(self._profile(), sites(), wera().unreadable_hint)
+        return robots.refusing_hosts(probes, redis=client, probe=probe)
+
+    def search_queries(
+        self, *, refresh: bool = True, probe: bool | None = None
+    ) -> tuple[list[PlannedQuery], TargetMatrix | None]:
         """SRCH-20, stage 1: the queries for the current CV and profile, and the plan they came from.
 
         A stale plan is replaced first when `refresh` allows (one `strategist.plan` call). If that
         can't be had — budget, provider, no countries — the queries are still built from the CV
         and the profile, just without the Strategist's localised terms: a search that can't plan
         should search in the person's own words rather than not at all.
+
+        Hosts whose robots.txt refuses WERA are left out (SRCH-30), asked afresh when `probe` —
+        by default, when `refresh` is, which is to say before a search rather than for a read.
         """
-        matrix = self.strategy()
+        refusing = self.refusing_hosts(probe=refresh if probe is None else probe)
+        matrix = self.strategy(refusing=refusing)
         if matrix is None and refresh:
             try:
                 matrix = self.refresh_strategy()
             except ApiError as exc:
                 logfire.warn("Searching without a fresh Strategist plan: {code}", code=exc.code)
-        if matrix is not None:
-            return matrix.queries, matrix
-        return strategist.queries(self._profile(), self.cv_profile_cached(), sites(), None), None
+        planned = (
+            matrix.queries if matrix is not None else strategist.queries(self._profile(), self.cv_profile_cached(), sites(), None)
+        )
+        kept = self._without_learned_excludes(strategist.leave_out(planned, refusing))
+        if refusing:
+            dropped = sorted(
+                {q.domain or "" for q in planned if q.source == "board"} - {q.domain or "" for q in kept if q.source == "board"}
+            )
+            logfire.info(
+                "Leaving out {count} host(s) whose robots.txt refuses WERA: {hosts}",
+                count=len(refusing),
+                hosts=sorted(refusing),
+                boards_dropped=dropped,
+                queries_dropped=len(planned) - len(kept),
+            )
+        return kept, matrix
+
+    def _without_learned_excludes(self, planned: list[PlannedQuery]) -> list[PlannedQuery]:
+        """PRF-06: an exclusion the person accepted from learning also narrows the searches, so
+        Serper isn't paid for postings the profile would hide. `-intitle:`, not a bare `-word`:
+        a post that mentions security in its body is not a security job. Only learned terms — the
+        profile's seniority exclusions ("Senior", "Lead") stay the filter's job, since a junior
+        post routinely says who it reports to."""
+        terms = [t for t in get_kv(self.s, learning.LEARNED_EXCLUDES_KEY) or [] if t in self._profile().exclude]
+        if not terms:
+            return planned
+        minus = " ".join(f'-intitle:"{t}"' for t in terms)
+        return [q.model_copy(update={"q": f"{q.q} {minus}"}) for q in planned]
 
     def plan_key(self) -> str:
         """Which plan a discovery queue belongs to: the CV version and the profile's fingerprint."""
@@ -2248,11 +2719,17 @@ class Store:
         # order and casing the CV uses, so a proposal never renames a skill.
         by_name = {s.name.casefold(): s.name for s in cv.skills}
         skills = [by_name.get(s.casefold(), s) for s in proposal.skills]
+        # Where, how remote and how recent are the person's, like the boards: a CV says what
+        # someone can do, not where they want to do it. Proposing them meant every regenerate
+        # defaulted to "Use new" on a location the model guessed from the CV's address line (14
+        # Nov), so the place someone had picked was replaced by the one they lived in. The CV's
+        # place is offered only to a profile that names nowhere at all.
+        anywhere = not current.locations and not current.countries
         proposed = SearchProfile(
             titles=proposal.titles,
             skills=skills,
-            locations=proposal.locations,
-            remote=proposal.remote,
+            locations=proposal.locations[:8] if anywhere else current.locations,
+            remote=current.remote,
             seniority=proposal.seniority,
             exclude=proposal.exclude,
             # The person's own choices, not the model's: which boards, which countries, which
@@ -2263,7 +2740,7 @@ class Store:
             # exactly the wrong thing to arrive at by accident.
             sites=current.sites,
             countries=current.countries,
-            recency=proposal.recency,
+            recency=current.recency,
             channels=current.channels,
             generated_from_cv_version=cv.version,
             updated_at=iso(self.now),
@@ -2294,6 +2771,8 @@ class Store:
                 "secrets": SecretsStatus.model_validate(env.secret_status()).model_dump(),
                 "llmProvider": llm_provider_name(data["baseUrl"]),
                 "allowClearJobs": wera().allow_clear_jobs,
+                "scheduledIntake": bool(data.get("scheduledIntake", False)),
+                "learnedRanking": data.get("learnedRanking") is not False,
             }
         )
 
@@ -2313,6 +2792,15 @@ class Store:
             data["inbox"] = {**data["inbox"], "senders": patch.inbox.senders}
         self._save_settings(data)
         self.s.flush()
+        if patch.scheduled_intake is not None:
+            enabled = patch.scheduled_intake
+
+            async def apply_intake() -> None:
+                from ..api import scheduler
+
+                scheduler.apply_intake_schedule(enabled)
+
+            self.defer(apply_intake, name="scheduled-intake:apply")
         if patch.search_schedule is not None:
             # Applied once the save has committed, so the running schedule never gets ahead of
             # the stored one — a save that failed would otherwise leave a search scheduled that
