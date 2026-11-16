@@ -13,6 +13,7 @@ import re
 from ..clock import now_ms, parse_ms
 from ..schemas.jobs import Job
 from ..schemas.profile import SearchProfile
+from . import places
 from .dedupe import normalise_title
 from .places import COUNTRIES
 
@@ -110,6 +111,10 @@ def matches_a_target(title: str, targets: list[str]) -> bool:
         return True  # nothing to judge; let the scorer decide
     return any(wanted and wanted <= posting for wanted in (title_tokens(t) for t in targets))
 
+
+# The reasons a job is hidden for where it is. `store.refilter_where` reads them back.
+ELSEWHERE = "Location isn't in your search"
+UNPLACED = "Couldn't tell where this is"
 
 # The reason a near miss is hidden with, and what the hidden list sorts on.
 NEAR_MISS = "Close to your titles, but not one of them"
@@ -213,40 +218,61 @@ def wrong_location(job: Job, profile: SearchProfile) -> str | None:
     branches to the location check, and a posting whose location reads "Remote (London)"
     contains "London", so it was *kept* for someone who had said they don't want remote work.
     """
+    where, _ = location_verdict(job, profile)
+    return where
+
+
+def location_verdict(job: Job, profile: SearchProfile) -> tuple[str | None, bool]:
+    """`(where, unplaced)`: the place that hides this job, or None to keep it, and whether WERA
+    couldn't tell which country that place is in.
+
+    SRCH-11, **per country** (16 Nov). A posting is kept when any place it names is
+    * one of the profile's cities, or a part of one (`CITY_AREAS`); or
+    * in a target country, and the profile either names no city there or keeps its cities
+      `first` rather than `only`.
+
+    The country comes from `places.country_of`, which knows cities. Before it, a posting that
+    named only its city matched no country: "Zürich" was hidden from a search of Switzerland,
+    and Belfast and Bedford from one of the UK. And the cities were never scoped to their
+    country — "London" in the profile still let "Birmingham, UK" through on the "uk" in it,
+    while hiding "Bedford", which says no country at all.
+    """
     if profile.remote == "remote_only":
-        return None if job.remote == "remote" else "not remote"
+        return (None if job.remote == "remote" else "not remote"), False
     if profile.remote == "no_remote" and job.remote == "remote":
-        return "remote"
+        return "remote", False
     if job.remote == "remote":
-        return None  # `remote: any`, and this one is remote — where it nominally sits is moot
+        return None, False  # `remote: any`, and this one is remote — where it nominally sits is moot
     place = " ".join(filter(None, [job.location.city, job.location.country, job.location.raw])).lower()
     # "Hybrid", "Flexible", "Multiple locations": a working pattern, not a place, and nothing to
     # judge where the job is by. 21 jobs were hidden on 14 Nov as "Location isn't in your search:
     # Hybrid".
     if not NOT_A_PLACE.sub(" ", place).strip(" ,;/-·|()"):
-        return None
+        return None, False
+    wanted = places.where(profile.countries, profile.locations)
+    if not wanted.countries and not wanted.loose:
+        return None, False  # nowhere named: nothing to hide on
     # The city part of each location: "London, UK" is London. Matching the whole string hid every
     # posting that wrote the country another way — "London, England, GBR" doesn't contain
     # "london, uk" — and found live, it had hidden twelve London jobs out of one search's thirty.
-    cities = [c for c in (w.split(",")[0].strip().lower() for w in profile.locations) if c]
+    cities = [c.lower() for c in [*wanted.loose, *(c for named in wanted.cities.values() for c in named)]]
     if any(c in place for c in cities):
-        return None
+        return None, False
     # A part of a city the posting names instead of the city: Octagon's "West End, England" was
     # hidden from a London search (14 Nov).
     if any(re.search(rf"(^|\W){re.escape(area)}(\W|$)", place) for c in cities for area in CITY_AREAS.get(c, ())):
-        return None
-    # SRCH-11: with no cities named, the countries are what "where" means, so a job is judged on
-    # those instead. Without this a country-only profile — now a legitimate thing to have — would
-    # have nothing to match against and would keep everything.
-    #
-    # Whole-word, unlike the cities above: a country's short names are two letters, and
-    # substring-matching those puts "Austin" in the United States by way of the "us" in its
-    # name, and Kyiv in the UK by way of "Ukraine".
-    if any(re.search(rf"(^|\W){re.escape(alias)}(\W|$)", place) for alias in country_aliases(profile)):
-        return None
-    if not cities and not profile.countries:
-        return None
-    return job.location.city or job.location.raw
+        return None, False
+    placed = False
+    for one in places.split_places(job.location.raw or job.location.city or ""):
+        found = places.country_of(one)
+        code = (job.location.country or "").strip().upper()
+        if not found and code in places.COUNTRIES:
+            found = {code}
+        placed = placed or bool(found)
+        for country in found & set(wanted.countries):
+            if profile.city_scope == "first" or not wanted.cities.get(country):
+                return None, False
+    return job.location.city or job.location.raw, not placed
 
 
 NOT_A_PLACE = re.compile(
@@ -285,15 +311,6 @@ CITY_AREAS: dict[str, tuple[str, ...]] = {
     ),
     "manchester": ("salford", "media city", "mediacity", "spinningfields", "greater manchester"),
 }
-
-
-def country_aliases(profile: SearchProfile) -> list[str]:
-    """Every name a posting might use for one of the profile's target countries."""
-    out: list[str] = []
-    for code in profile.countries:
-        key = code.strip().upper()
-        out += list(COUNTRY_ALIASES.get(key, (key.lower(),)))
-    return out
 
 
 # A country's names as a posting would write them, so "London, UK" satisfies a GB target. A code
@@ -360,9 +377,11 @@ def hidden_reason(job: Job, profile: SearchProfile, now: int | None = None) -> s
         ):
             return f"{NEAR_MISS}: {job.title}"
         return f"{off_target}: {job.title}"
-    where = wrong_location(job, profile)
+    where, unplaced = location_verdict(job, profile)
     if where:
-        return f"Location isn't in your search: {where}"
+        # A place no country could be read off is said so, apart from a place that is simply
+        # elsewhere: the first is WERA not knowing, and worth a look in the hidden list.
+        return f"{UNPLACED}: {where}" if unplaced else f"{ELSEWHERE}: {where}"
     # Last, because it's the only reason that stops being true on its own — a job hidden for its
     # age was once a job this person wanted, and that reads better after the reasons about fit.
     stale = too_old(job, profile, now if now is not None else now_ms())

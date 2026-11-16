@@ -60,16 +60,21 @@ def untrusted(label: str, text: str) -> str:
     return f"{OPEN} ({label})\n{cleaned}\n{CLOSE}"
 
 
-def cv_text(cv: Any) -> str:
+def cv_text(cv: Any, *, home: bool = True) -> str:
     """The master CV as readable text, with bullet ids so a reply can cite them.
 
     `MasterCV` holds no contact details (CV-06) and no work-authorisation or other sensitive
     field (PRIV-02), so there is nothing here to strip — this renders what is safe to send.
+
+    `home=False` leaves out where the applicant lives, for fit scoring: given "Based in:
+    Birmingham", the scorer marked London jobs down for it (16 Nov), although the search profile
+    — which the scorer never sees — had asked for London.
     """
     lines = [f"Name: {cv.person.name}"]
     if cv.person.headline:
         lines.append(f"Headline: {cv.person.headline}")
-    lines.append(f"Based in: {cv.person.location}")
+    if home:
+        lines.append(f"Based in: {cv.person.location}")
     if cv.summary:
         lines += ["", f"Summary [{cv.summary.id}]: {cv.summary.text}"]
     for label, roles in (("Experience", cv.experience), ("Projects", cv.projects)):
@@ -318,7 +323,15 @@ FIT_SCORE = ChatPromptTemplate.from_messages(
             "- `core`: the skills the post treats as essential\n"
             "- `adjacent`: nearby skills that transfer\n"
             "- `experience`: how well what they have done matches what *this post* asks for\n"
-            "- `eligibility`: location, work pattern and seniority fit\n\n"
+            "- `eligibility`: work pattern and seniority fit, and any requirement the post states "
+            "that the applicant plainly can't meet (a security clearance, a nationality)\n\n"
+            # 16 Nov: given the CV's home city, the scorer marked jobs down for being elsewhere —
+            # "location mismatch (Birmingham vs London)" — for a person searching London. Where a
+            # job is is MATCH-01's rule, decided in code against the search profile before any
+            # model is asked; the CV's own location is no longer sent here at all.
+            "Where the job is has already been checked against where the applicant is looking for "
+            "work. Never mark a job down for its location, or for how far it is from any place "
+            "the CV mentions.\n\n"
             # The rubric below exists because of a measured failure, not a hunch. On the golden
             # set, every posting titled "Graduate" agreed with the hand scores and every posting
             # titled "Junior" came back 2.2 to 5.7 points low — the model was reading

@@ -144,7 +144,13 @@ def world(client, outbound, monkeypatch):
         store = Store(session)
         store.put_profile(
             store.get_profile().model_copy(
-                update={"locations": ["London"], "countries": ["GB"], "sites": ["builtinlondon.uk", "gradcracker.com"]}
+                # `only`: London and nowhere else in the UK, so the tiers stay the size counted here.
+                update={
+                    "locations": ["London"],
+                    "countries": ["GB"],
+                    "city_scope": "only",
+                    "sites": ["builtinlondon.uk", "gradcracker.com"],
+                }  # fmt: skip
             )
         )
     return World()

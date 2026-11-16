@@ -14,7 +14,7 @@ import { Dialog } from "@/lib/ui/Dialog";
 import { Checkbox, FieldError, Label, Select } from "@/lib/ui/Field";
 import { useToast } from "@/lib/ui/Toast";
 import dynamic from "next/dynamic";
-import { WhereFields, whereSummary } from "./WhereFields";
+import { savedMessage, WhereFields, whereSummary } from "./WhereFields";
 
 const RegenerateDialog = dynamic(() => import("./RegenerateDialog").then((m) => m.RegenerateDialog));
 
@@ -219,8 +219,8 @@ function useSaveProfile(onClose: () => void) {
     setSaving(true);
     setErrors({});
     try {
-      await api.putProfile(profile);
-      toast({ tone: "ok", message: "Search profile saved. The next search uses it." });
+      const saved = await api.putProfile(profile);
+      toast({ tone: "ok", message: savedMessage(saved) });
       router.refresh();
       onClose();
     } catch (err) {
@@ -244,7 +244,7 @@ function WhereDialog({ profile, sites, places, onClose }: { profile: SearchProfi
       open
       onClose={onClose}
       title="Where to search"
-      description="Every search after this one looks here. Jobs already on your shortlist stay."
+      description="Every search after this one looks here, and the jobs already found follow it: ones elsewhere are hidden, hidden ones here come back."
       footer={
         <>
           <span className="mr-auto self-center text-small text-ink-2">

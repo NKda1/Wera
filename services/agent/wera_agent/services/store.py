@@ -73,7 +73,7 @@ from ..schemas.jobs import Ats, FitEvidence, FitWeights, FoundBy, Job, ScoredJob
 from ..schemas.learning import Suggestion, SuggestionList
 from ..schemas.llm_outputs import CvProfileOutput, ParsedCv, ProfileProposal
 from ..schemas.pack import AnswerItem, AtsReport, Cited, CoverLetter, CvItem, CvSection, JobAnalysis, Pack, TailoredCV
-from ..schemas.profile import SearchProfile
+from ..schemas.profile import SearchProfile, WhereChange
 from ..schemas.runs import ChannelSummary, Estimate, IntakeRun, RunError, RunIds
 from ..schemas.settings import DEFAULT_SEARCH_CRON, SecretsStatus, SettingsPatch, SettingsResponse
 from ..schemas.strategy import PlannedQuery, TargetMatrix
@@ -160,7 +160,7 @@ def save_job(
     if questions is not None:
         row.questions = questions
     if evidence is not None:
-        from ..nodes.fit import job_hash
+        from ..nodes.fit import RUBRIC, job_hash
 
         # COST-04: the cache key is the CV version, the model and the job's content — all three,
         # or the row can never be recognised as still valid. This wrote only the model, so every
@@ -169,6 +169,8 @@ def save_job(
         # check, which compares the same three things.
         fit = session.get(FitReportRow, job.id)
         data = evidence.model_dump(mode="json")
+        # A seeded or imported score is taken as today's rubric, like the CV version it is given.
+        data["rubric"] = data.get("rubric") or RUBRIC
         if fit is None:
             session.add(
                 FitReportRow(
@@ -232,6 +234,8 @@ class Store:
         # How many jobs `reset_job_world` removed, so `PUT /cv` can say so. Clearing someone's
         # list is not something to do silently, even when they asked for it.
         self.cleared_jobs = 0
+        # What the last `put_profile` did to the list when "where" changed, for `PUT /profile`.
+        self.where_change: WhereChange | None = None
         # Work to start once this unit of work is committed; see wera_agent/tasks.py.
         self.deferred: list[tuple[Callable[[], Any], str]] = []
 
@@ -328,7 +332,7 @@ class Store:
         is out of date". The same restraint `liveness` shows in only reporting `gone` on positive
         evidence: a badge nobody can act on teaches people to ignore badges.
         """
-        from ..nodes.fit import job_hash
+        from ..nodes.fit import current_rubric, job_hash
 
         row = self.s.get(FitReportRow, job.id)
         if row is None:
@@ -336,6 +340,10 @@ class Store:
         if row.cv_version is not None and row.cv_version != self.cv().version:
             return True
         if row.model and row.model != self.scoring_model():
+            return True
+        # A score from an older rubric is out of date in the same way (MATCH-04): the 16 Nov
+        # rubric stopped charging a job for being somewhere other than the CV's home city.
+        if not current_rubric(row.evidence):
             return True
         return bool(row.job_hash) and row.job_hash != job_hash(job)
 
@@ -2533,10 +2541,51 @@ class Store:
     def get_profile(self) -> SearchProfile:
         return self._profile()
 
+    # The profile fields that say where a job may be (SRCH-11). Changing any of them re-applies
+    # MATCH-01's location rule to the jobs already found (`refilter_where`).
+    WHERE_FIELDS = ("countries", "locations", "city_scope", "international", "remote")
+
     def put_profile(self, profile: SearchProfile) -> SearchProfile:
+        """Save the profile. When "where" changed, the jobs already found follow it at once
+        (`refilter_where`), and `where_change` says how many moved."""
+        before = self._profile()
         profile.updated_at = iso(self.now)
         self._profile_row().data = profile.model_dump(mode="json")
+        moved = any(getattr(before, f) != getattr(profile, f) for f in self.WHERE_FIELDS)
+        self.where_change = self.refilter_where() if moved else None
         return profile
+
+    def refilter_where(self) -> WhereChange:
+        """MATCH-01's location rule again, over the jobs already found, after "where" changed.
+
+        Before this, a job was judged on where it is once, when it arrived: change the profile
+        from London to Switzerland and the London jobs stayed on the list while every Swiss job
+        already found stayed hidden. Now both directions, at once and for free:
+
+        * a hidden job the filters would keep today comes back unscored (`refilter_hidden`, with
+          the same checks), joining the backlog "Find more" scores first;
+        * a job on the list that is now somewhere the person isn't looking is hidden, with the
+          reason. Only for where it is: a where change is not a reason to re-judge a title. And
+          never a job the person brought back from hiding themselves, which stays where they put it.
+
+        Only `new` jobs are touched in either direction — a decision a person made stays made.
+        """
+        shown = len(self.refilter_hidden(apply=True))
+        profile = self._profile()
+        unhidden = set(self.s.scalars(select(DecisionRow.job_id).where(DecisionRow.decision == "unhide")).all())
+        hidden = 0
+        for row in self.s.scalars(select(JobRow).where(JobRow.status == "new")).all():
+            if row.id in unhidden:
+                continue
+            job = self._job(row)
+            reason = filters.hidden_reason(job, profile, self.now)
+            if reason and reason.startswith((filters.ELSEWHERE, filters.UNPLACED)):
+                job.status, job.hidden_reason = "hidden", reason
+                save_job(self.s, job)
+                hidden += 1
+        self.s.flush()
+        logfire.info("Where changed: {shown} job(s) back, {hidden} hidden", shown=shown, hidden=hidden)
+        return WhereChange(shown=shown, hidden=hidden)
 
     def strategy(self, *, refusing: set[str] | None = None) -> TargetMatrix | None:
         """The Strategist's matrix, while it still answers the current question.

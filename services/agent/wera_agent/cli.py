@@ -59,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     dd.add_argument("--apply", action="store_true", help="merge them (default: only list them)")
     refilter = jobs_sub.add_parser("refilter", help="re-apply your filters to hidden jobs and bring back what they now keep")
     refilter.add_argument("--apply", action="store_true", help="bring them back (default: only list them)")
+    jobs_sub.add_parser("rescore", help="re-score the shortlist's stale scores (a new CV, model or rubric)")
     tg = sub.add_parser("targets", help="the Strategist's job discovery: Serper searches into the Redis queue (SRCH-20)")
     tg_sub = tg.add_subparsers(dest="targets_cmd", required=True)
     tg_disc = tg_sub.add_parser("discover", help="send the planned queries and queue the postings they find")
@@ -200,6 +201,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _dedupe(args.apply)
         if args.jobs_cmd == "tidy":
             return _tidy(args.apply)
+        if args.jobs_cmd == "rescore":
+            return _rescore()
         return _refilter(args.apply) if args.jobs_cmd == "refilter" else _audit_listings(args.apply)
     if args.cmd == "eval":
         try:
@@ -434,6 +437,27 @@ def _clear_jobs(yes: bool) -> int:
     with transaction() as session:
         cleared = Store(session).clear_jobs()
     print(f"Cleared {cleared.jobs} job(s), {cleared.applications} application(s) and {cleared.documents} document(s).")
+    return 0
+
+
+def _rescore() -> int:
+    """Re-score what is stale (MATCH-04, COST-04): the same run a CV upload starts, run here and
+    waited for. Within the day's scoring cap and the week's budget, like any other run."""
+    from .db.session import transaction
+    from .graphs.intake import rescore
+    from .services.store import Store
+
+    with transaction() as session:
+        store = Store(session)
+        waiting = len(store.jobs_needing_score(cv_version=store.cv().version, model=store.scoring_model()))
+        run_id = store.start_rescore_if_idle()
+    if run_id is None:
+        print(f"Nothing re-scored: {waiting} job(s) need it, but a run is active, the budget is spent, or none do.")
+        return 0
+    summary = rescore(run_id)
+    print(f"Re-scored {summary['scored']} of {waiting} job(s).")
+    for code, message in summary["errors"]:
+        print(f"  {code}: {message}")
     return 0
 
 

@@ -223,3 +223,7 @@ See [SECURITY.md](SECURITY.md) to report a leak or a vulnerability.
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
+
+The place names WERA reads a job's country from (`services/agent/wera_agent/domain/places_data/`) are
+from [GeoNames](https://www.geonames.org/), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+`services/agent/scripts/build_places.py` rebuilds them.

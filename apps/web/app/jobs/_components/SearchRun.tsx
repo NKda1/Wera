@@ -1,13 +1,16 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { api, type Estimate } from "@/lib/api";
-import type { IntakeChannel, IntakeRun, RunPhase, SearchChannel, SearchProfile } from "@/lib/types";
+import { ApiRequestError, api, type Estimate } from "@/lib/api";
+import type { IntakeChannel, IntakeRun, PlaceOption, RunPhase, SearchChannel, SearchProfile } from "@/lib/types";
 import { Button, Spinner } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { Dialog } from "@/lib/ui/Dialog";
 import { Checkbox } from "@/lib/ui/Field";
 import { ProgressBar, ProgressSteps, type StepState } from "@/lib/ui/ProgressSteps";
+import { useToast } from "@/lib/ui/Toast";
+import { CityScope, savedMessage, WhereFields, whereSummary } from "./WhereFields";
 
 // Keyed on the wide type, because `RunPanel` has to name a re-score run as well as a channel.
 const NAMES: Record<IntakeChannel, string> = {
@@ -60,16 +63,24 @@ const STEPS: Record<IntakeChannel, RunPhase[]> = {
   score_more: ["scoring", "planning", "searching", "harvesting"],
 };
 
-/** PRF-05: show what a search will cost before it runs. */
+type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope">;
+
+const whereOf = (p: SearchProfile): Where => ({ countries: p.countries, locations: p.locations, remote: p.remote, cityScope: p.cityScope });
+
+/** PRF-05: show what a search will cost before it runs — and, first, where it will look (16 Nov). */
 export function SearchDialog({
   profile,
+  places,
   onClose,
   onStart,
 }: {
   profile: SearchProfile;
+  places: PlaceOption[];
   onClose: () => void;
   onStart: (channels: SearchChannel[]) => Promise<void>;
 }) {
+  const router = useRouter();
+  const toast = useToast();
   const enabled: Record<SearchChannel, boolean> = {
     board_search: profile.channels.boardSearch,
     email_alert: profile.channels.inbox,
@@ -78,6 +89,14 @@ export function SearchDialog({
   const [chosen, setChosen] = useState<SearchChannel[]>((Object.keys(enabled) as SearchChannel[]).filter((c) => enabled[c]));
   const [est, setEst] = useState<Estimate>();
   const [busy, setBusy] = useState(false);
+  // Where, picked here before the search. Saved before it runs, so the estimate and the search
+  // both read what is shown; `saves` re-reads the estimate after each save.
+  const [base, setBase] = useState<SearchProfile>(profile);
+  const [where, setWhere] = useState<Where>(whereOf(profile));
+  const [editing, setEditing] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [saves, setSaves] = useState(0);
+  const changed = JSON.stringify(where) !== JSON.stringify(whereOf(base));
 
   useEffect(() => {
     let live = true;
@@ -85,9 +104,29 @@ export function SearchDialog({
     return () => {
       live = false;
     };
-  }, [chosen]);
+  }, [chosen, saves]);
 
   const toggle = (c: SearchChannel, on: boolean) => setChosen((cs) => (on ? [...cs, c] : cs.filter((x) => x !== c)));
+
+  /** Save "where" if it changed. False when it couldn't be saved, so the search doesn't run. */
+  const saveWhere = async (): Promise<boolean> => {
+    if (!changed) return true;
+    setErrors({});
+    try {
+      const saved = await api.putProfile({ ...base, ...where });
+      setBase(saved);
+      setSaves((n) => n + 1);
+      toast({ tone: "ok", message: savedMessage(saved) });
+      router.refresh();
+      return true;
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.fields) {
+        setErrors(err.fields);
+        setEditing(true);
+      } else toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't save where to search." });
+      return false;
+    }
+  };
 
   return (
     <Dialog
@@ -105,7 +144,7 @@ export function SearchDialog({
             busy={busy}
             onClick={async () => {
               setBusy(true);
-              await onStart(chosen);
+              if (await saveWhere()) await onStart(chosen);
               setBusy(false);
             }}
           >
@@ -114,6 +153,27 @@ export function SearchDialog({
         </>
       }
     >
+      <section aria-labelledby="search-where" className="mb-4 border-b border-line pb-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p id="search-where" className="text-[14px] font-semibold">
+              Where
+            </p>
+            <p className="text-small text-ink-2">{whereSummary(where, places)}</p>
+          </div>
+          <Button variant="secondary" onClick={() => setEditing((e) => !e)} aria-expanded={editing}>
+            {editing ? "Done" : "Change"}
+          </Button>
+        </div>
+        <div className="mt-3">
+          {editing ? (
+            <WhereFields value={where} onChange={(next) => setWhere((w) => ({ ...w, ...next }))} places={places} errors={errors} />
+          ) : where.locations.length ? (
+            <CityScope value={where.cityScope} onChange={(cityScope) => setWhere((w) => ({ ...w, cityScope }))} />
+          ) : null}
+        </div>
+        {changed ? <p className="mt-2 text-small text-ink-2">Saved when the search starts. Jobs already found follow it.</p> : null}
+      </section>
       <fieldset>
         <legend className="sr-only">Channels</legend>
         <Checkbox

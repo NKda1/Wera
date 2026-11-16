@@ -33,9 +33,8 @@ from sqlalchemy.orm import Session
 
 from ..clock import iso
 from ..config import Site, usable_sites
-from ..domain import filters
+from ..domain import filters, places
 from ..domain.dedupe import canonical_url
-from ..domain.filters import COUNTRY_ALIASES
 from ..errors import ApiError
 from ..http import host_of, request
 from ..llm.gateway import structured
@@ -74,40 +73,15 @@ COUNTRY_LANGUAGES = {
 }
 
 
-# Cities a location may name without its country, for the countries in `places.COUNTRIES`. Only
-# enough to read "London" or "Berlin, Remote" — anything else falls to the country names.
-CITY_COUNTRIES = {
-    "london": "GB", "manchester": "GB", "edinburgh": "GB", "birmingham": "GB", "bristol": "GB", "leeds": "GB",
-    "cambridge": "GB", "oxford": "GB", "glasgow": "GB", "dublin": "IE", "cork": "IE", "amsterdam": "NL",
-    "rotterdam": "NL", "utrecht": "NL", "berlin": "DE", "munich": "DE", "hamburg": "DE", "frankfurt": "DE",
-    "paris": "FR", "lyon": "FR", "brussels": "BE", "antwerp": "BE", "madrid": "ES", "barcelona": "ES",
-    "zurich": "CH", "geneva": "CH", "prague": "CZ", "vienna": "AT", "milan": "IT", "rome": "IT",
-    "warsaw": "PL", "krakow": "PL", "lisbon": "PT", "porto": "PT", "stockholm": "SE", "gothenburg": "SE",
-    "new york": "US", "san francisco": "US", "seattle": "US", "boston": "US", "chicago": "US", "austin": "US",
-    "los angeles": "US", "toronto": "CA", "vancouver": "CA", "montreal": "CA", "ottawa": "CA",
-    "mexico city": "MX", "sao paulo": "BR", "são paulo": "BR", "sydney": "AU", "melbourne": "AU",
-    "brisbane": "AU", "auckland": "NZ", "wellington": "NZ", "bengaluru": "IN", "bangalore": "IN",
-    "mumbai": "IN", "hyderabad": "IN", "johannesburg": "ZA", "cape town": "ZA",
-}  # fmt: skip
-
-
 def target_countries(profile: SearchProfile) -> list[str]:
-    """The countries to plan for: the profile's, or else the ones its locations name.
+    """The countries to plan for: the ones ticked, then any a named city is in (`places.where`).
 
     An empty `countries` means "no restriction" to the rest of WERA, which a planner can't plan
     for — but a profile reading "London, UK" has said where perfectly clearly, and refusing it
-    for not ticking a box as well would be a validation error about nothing. Whole words only,
-    so "us" in "Austin" is not the United States.
+    for not ticking a box as well would be a validation error about nothing. And a city outside
+    the ticked countries is a request to search there: "Dubai" adds the UAE.
     """
-    if profile.countries:
-        return list(profile.countries)
-    found: list[str] = []
-    for place in profile.locations:
-        text = place.lower()
-        for code, aliases in [*COUNTRY_ALIASES.items(), *((c, (city,)) for city, c in CITY_COUNTRIES.items())]:
-            if code not in found and any(re.search(rf"(^|[^a-z]){re.escape(a)}($|[^a-z])", text) for a in aliases):
-                found.append(code)
-    return found
+    return places.where(profile.countries, profile.locations).countries
 
 
 def candidate_text(cv: MasterCV, profile: CvProfile) -> str:
@@ -314,7 +288,7 @@ def queries(
         seen.add((q, gl, hl))
         out.append(PlannedQuery(q=q, gl=gl, hl=hl, source=source, domain=domain, tier=tier, title=title))
 
-    def both(title: str, term: str, tier: int, lang: str, *, place: str, gl: str, boards: list[Site]) -> None:
+    def both(title: str, term: str, tier: int, lang: str, *, place: list[str], gl: str, boards: list[Site]) -> None:
         """An open search for `term`, and a `site:` search of each board that posts in `lang`."""
         phrase = _phrase(term, level, place, lang)
         add(f"{phrase} {NO_LINKEDIN}", gl=gl, hl=lang, source="open", tier=tier, title=title)
@@ -333,21 +307,27 @@ def queries(
                     domain=board.domain,
                 )
 
-    for country in target_countries(profile) or [""]:
-        place = _place(profile, country)
+    wanted = places.where(profile.countries, profile.locations)
+    for country in wanted.countries or [""]:
         gl = country.lower()
         hl = _english_or_first(country, matrix)
         boards = [b for b in usable_sites(profile, sites) if not country or b.serves([country])]
-        where = {"place": place, "gl": gl, "boards": boards}
+        groups = _places(profile, wanted, country)
+        # The first group is the cities the person named, else the country; with `first`, the
+        # rest of the country follows a tier later, for the top titles (SRCH-11, 16 Nov).
+        where = {"place": groups[0], "gl": gl, "boards": boards}
 
         for title in titles[:TIER_ONE_TITLES]:
             both(title, title, 1, hl, **where)
+        for group in groups[1:]:
+            for title in titles[:TIER_ONE_TITLES]:
+                both(title, title, 2, hl, place=group, gl=gl, boards=boards)
         for title in titles[TIER_ONE_TITLES:]:
             both(title, title, 2, hl, **where)
         for title in titles[:2]:
             for word in [*skills, *extra]:
                 add(
-                    f"{_phrase(title, level, place, hl, also=word)} {NO_LINKEDIN}",
+                    f"{_phrase(title, level, groups[0], hl, also=word)} {NO_LINKEDIN}",
                     gl=gl,
                     hl=hl,
                     source="open",
@@ -416,10 +396,10 @@ def leave_out(planned: list[PlannedQuery], refusing: Iterable[str]) -> list[Plan
     return out
 
 
-def _phrase(term: str, level: str | None, place: str, lang: str, *, also: str = "") -> str:
+def _phrase(term: str, level: str | None, place: list[str], lang: str, *, also: str = "") -> str:
     """One search, written the way a person looking for this job would type it: the title as a
     phrase, their level when the title doesn't say it, what else they asked for, "job", and where —
-    `"Software Engineer" graduate job in London`.
+    `"Software Engineer" graduate job in "London"`.
 
     Measured live, the bare `"Software Engineer" London` was too weak: Google answered with senior
     roles, other boards' search pages and articles, and three searches surfaced 3, 1 and 2 jobs.
@@ -430,12 +410,20 @@ def _phrase(term: str, level: str | None, place: str, lang: str, *, also: str = 
     them paid for before the location filter hid them. What emptied the old Firecrawl searches was
     quoting the profile's whole `"London, UK"` — a comma and a country no posting writes — not
     quoting the city. A local-language term gets no English words around it.
+
+    `place` is one place (`_places` gives each search its own); it is a list so `["remote"]` and
+    no place at all read the same way as a city.
     """
-    town = f'"{place}"' if place and place != "remote" else ""
+    if place == ["remote"]:
+        town = ""
+    elif len(place) == 1:
+        town = f'"{place[0]}"'
+    else:
+        town = "(" + " OR ".join(f'"{p}"' for p in place) + ")" if place else ""
     if lang != "en":
         return " ".join(f'"{term}" {also} {town}'.split())
     lvl = level if level and not _has_level(term) else ""
-    where = "remote job" if place == "remote" else f"job in {town}" if town else "job"
+    where = "remote job" if place == ["remote"] else f"job in {town}" if town else "job"
     return " ".join(f'"{term}" {lvl} {also} {where}'.split())
 
 
@@ -451,27 +439,24 @@ def _has_level(title: str) -> bool:
     return bool(set(title.lower().replace("-", " ").split()) & filters.LEVEL_WORDS)
 
 
-def _place(profile: SearchProfile, country: str) -> str:
-    """Where, as a posting would say it: the first city the profile names in this country, else
-    the country's name, else nothing. "Remote" when that is all the person wants."""
+def _places(profile: SearchProfile, wanted: places.Where, country: str) -> list[list[str]]:
+    """The place each of this country's searches names, most wanted first — one per search.
+
+    The cities the person named here (and any WERA couldn't place) come first. Then, for a country
+    with no city named — or, with `city_scope: first`, after its cities — the cities the
+    country's jobs are in (`places.hubs`). Never the country's name: `job in "Switzerland"` came
+    back as salary pages, social posts and other countries' boards (16 Nov), and so did one search
+    OR-ing Zürich, Geneva, Basel and Switzerland together; `job in "Zürich"` found postings.
+    `["remote"]` when remote work is all the person wants.
+    """
     if profile.remote == "remote_only":
-        return "remote"
-    for location in profile.locations:
-        city = location.split(",")[0].strip()
-        if city and (not country or _country_of(location) in (country, None)):
-            return city
-    if country:
-        names = COUNTRY_ALIASES.get(country)
-        return names[0].title() if names else country
-    return ""
-
-
-def _country_of(location: str) -> str | None:
-    text = location.lower()
-    for code, aliases in [*COUNTRY_ALIASES.items(), *((c, (city,)) for city, c in CITY_COUNTRIES.items())]:
-        if any(re.search(rf"(^|[^a-z]){re.escape(a)}($|[^a-z])", text) for a in aliases):
-            return code
-    return None
+        return [["remote"]]
+    named = [*wanted.cities.get(country, []), *wanted.loose] if country else list(wanted.loose)
+    groups = [[city] for city in named]
+    if country and (not groups or profile.city_scope == "first"):
+        taken = {places.fold(c) for c in named}
+        groups += [[hub] for hub in places.hubs(country) if places.fold(hub) not in taken]
+    return groups or [[]]
 
 
 def _english_or_first(country: str, matrix: TargetMatrix | None) -> str:
@@ -716,9 +701,10 @@ def discover_feeds(
     out = FeedDiscovery()
     countries = sorted({q.gl for q in planned if q.gl} or {c.lower() for c in (profile.countries if profile else [])})
     titles = list(dict.fromkeys(q.title for q in sorted(planned, key=lambda q: q.tier)))
-    cities = [loc.split(",")[0].strip() for loc in (profile.locations if profile else []) if loc.strip()]
     levels = set(profile.seniority if profile else [])
-    queries = feeds.queries_for(titles, cities[:2], countries)
+    wanted = places.where(profile.countries, profile.locations) if profile else places.Where([], {}, [])
+    scope = profile.city_scope if profile else "first"
+    queries = feeds.queries_for(titles, feeds.places_for(wanted, city_scope=scope, countries=countries))
     exclude = sorted(
         {t.removeprefix("-site:") for q in planned if q.source == "open" for t in q.q.split() if t.startswith("-site:")}
     )

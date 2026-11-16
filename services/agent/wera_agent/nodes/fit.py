@@ -26,6 +26,11 @@ from ..schemas.cv import MasterCV
 from ..schemas.jobs import FitEvidence, FitReport, FitWeights, Job, JobKeyword
 from ..schemas.llm_outputs import CULTURE_LIMIT, KEYWORD_LIMIT, FitScoreOutput, KeywordList
 
+# The scoring rubric's version (MATCH-04). Bump it when `FIT_SCORE` changes what a score means, and
+# every stored score is re-scored by the next rescore run — keywords are still reused, since what a
+# post asks for doesn't change with the rubric. 2026-11-16: location left `eligibility`.
+RUBRIC = "2026-11-16"
+
 
 def job_hash(job: Job) -> str:
     """The parts of a job that could change its score. A new description is a new job to score;
@@ -48,9 +53,14 @@ def cached_evidence(session: Session, job: Job, *, cv_version: int, model: str) 
     row = session.get(FitReportRow, job.id)
     if row is None or row.cv_version != cv_version or row.model != model:
         return None
-    if (row.job_hash or "") != job_hash(job):
+    if (row.job_hash or "") != job_hash(job) or not current_rubric(row.evidence):
         return None
     return with_posted_keywords(FitEvidence.model_validate(row.evidence), job)
+
+
+def current_rubric(evidence: dict) -> bool:
+    """Whether stored evidence was judged with today's rubric (`RUBRIC`)."""
+    return evidence.get("rubric") == RUBRIC
 
 
 def with_posted_keywords(evidence: FitEvidence, job: Job) -> FitEvidence:
@@ -135,7 +145,7 @@ def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidenc
         session,
         "fit.score",
         FitScoreOutput,
-        {"cv": cv_text(cv), "job": _job_block(job)},
+        {"cv": cv_text(cv, home=False), "job": _job_block(job)},
         context={"cv": cv},
     )
     keywords, culture = known_keywords(session, job) or (keywords_for(session, job, cv) if job.description_md else ([], []))
@@ -150,6 +160,7 @@ def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidenc
         keywords=keywords,
         culture=culture,
         model=model,
+        rubric=RUBRIC,
     )
 
 

@@ -912,6 +912,16 @@
         },
         "reason": {
           "type": "string"
+        },
+        "rubric": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -924,7 +934,8 @@
         "cvBulletIds",
         "keywords",
         "culture",
-        "model"
+        "model",
+        "rubric"
       ],
       "title": "FitEvidence",
       "type": "object"
@@ -980,6 +991,16 @@
         "roughOnly": {
           "type": "boolean"
         },
+        "rubric": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "stale": {
           "default": false,
           "type": "boolean"
@@ -999,6 +1020,7 @@
         "keywords",
         "culture",
         "model",
+        "rubric",
         "jobId",
         "freshness",
         "total",
@@ -2424,6 +2446,115 @@
       "title": "Salary",
       "type": "object"
     },
+    "SavedProfile": {
+      "description": "`PUT /profile`'s answer: the profile, and what it changed on the list when \"where\" moved.",
+      "properties": {
+        "channels": {
+          "$ref": "#/$defs/ProfileChannels"
+        },
+        "cityScope": {
+          "default": "first",
+          "enum": [
+            "first",
+            "only"
+          ],
+          "type": "string"
+        },
+        "countries": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "generatedFromCvVersion": {
+          "type": "integer"
+        },
+        "international": {
+          "default": false,
+          "type": "boolean"
+        },
+        "locations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "recency": {
+          "$ref": "#/$defs/Recency"
+        },
+        "refiltered": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WhereChange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "remote": {
+          "enum": [
+            "any",
+            "remote_only",
+            "no_remote"
+          ],
+          "type": "string"
+        },
+        "seniority": {
+          "items": {
+            "$ref": "#/$defs/Seniority"
+          },
+          "type": "array"
+        },
+        "sites": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "titles": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "titles",
+        "skills",
+        "locations",
+        "countries",
+        "cityScope",
+        "international",
+        "remote",
+        "seniority",
+        "exclude",
+        "sites",
+        "recency",
+        "channels",
+        "generatedFromCvVersion",
+        "updatedAt",
+        "refiltered"
+      ],
+      "title": "SavedProfile",
+      "type": "object"
+    },
     "ScalarDiff": {
       "properties": {
         "from": {
@@ -2615,6 +2746,14 @@
         "channels": {
           "$ref": "#/$defs/ProfileChannels"
         },
+        "cityScope": {
+          "default": "first",
+          "enum": [
+            "first",
+            "only"
+          ],
+          "type": "string"
+        },
         "countries": {
           "default": [],
           "items": {
@@ -2630,6 +2769,10 @@
         },
         "generatedFromCvVersion": {
           "type": "integer"
+        },
+        "international": {
+          "default": false,
+          "type": "boolean"
         },
         "locations": {
           "items": {
@@ -2681,6 +2824,8 @@
         "skills",
         "locations",
         "countries",
+        "cityScope",
+        "international",
         "remote",
         "seniority",
         "exclude",
@@ -3524,6 +3669,23 @@
         "detail"
       ],
       "title": "Violation",
+      "type": "object"
+    },
+    "WhereChange": {
+      "description": "What saving a new \"where\" did to the jobs already found (16 Nov): the list responds at once,\nrather than at the next search. `shown` came back from hiding; `hidden` are hidden now.",
+      "properties": {
+        "hidden": {
+          "type": "integer"
+        },
+        "shown": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "shown",
+        "hidden"
+      ],
+      "title": "WhereChange",
       "type": "object"
     },
     "YearMonth": {

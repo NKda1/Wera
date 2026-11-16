@@ -13,6 +13,7 @@ import type {
   MasterCV,
   ProfileProposalResult,
   ScoredJob,
+  SavedProfile,
   SearchProfile,
   Settings,
   SettingsResponse,
@@ -96,7 +97,8 @@ export const api = {
   getRun: (id: string) => call<IntakeRun>(`/api/intake/runs/${id}`),
   cancelRun: (id: string) => call<IntakeRun>(`/api/intake/runs/${id}/cancel`, { method: "POST", body: {} }),
 
-  putProfile: (p: SearchProfile) => call<SearchProfile>("/api/profile", { method: "PUT", body: p }),
+  /** Saving a changed "where" re-filters the jobs already found; `refiltered` says how many moved. */
+  putProfile: (p: SearchProfile) => call<SavedProfile>("/api/profile", { method: "PUT", body: p }),
   /** PRF-04: a proposal and its diff. Nothing is saved until putProfile. */
   generateProfile: () => call<ProfileProposalResult>("/api/profile/generate", { method: "POST", body: {} }),
 

@@ -388,6 +388,7 @@ export interface FitEvidence {
   keywords: JobKeyword[];
   model: string;
   reason: string;
+  rubric: string | null;
 }
 export interface SubScore {
   cvBulletIds: string[];
@@ -413,6 +414,7 @@ export interface FitReport {
   model: string;
   reason: string;
   roughOnly: boolean;
+  rubric: string | null;
   stale: boolean;
   total: number;
 }
@@ -691,9 +693,11 @@ export interface ScalarDiff {
 }
 export interface SearchProfile {
   channels: ProfileChannels;
+  cityScope: "first" | "only";
   countries: string[];
   exclude: string[];
   generatedFromCvVersion: number;
+  international: boolean;
   locations: string[];
   recency: Recency;
   remote: "any" | "remote_only" | "no_remote";
@@ -715,6 +719,34 @@ export interface QuickWin {
 }
 export interface RunIds {
   runIds: string[];
+}
+/**
+ * `PUT /profile`'s answer: the profile, and what it changed on the list when "where" moved.
+ */
+export interface SavedProfile {
+  channels: ProfileChannels;
+  cityScope: "first" | "only";
+  countries: string[];
+  exclude: string[];
+  generatedFromCvVersion: number;
+  international: boolean;
+  locations: string[];
+  recency: Recency;
+  refiltered: WhereChange | null;
+  remote: "any" | "remote_only" | "no_remote";
+  seniority: Seniority[];
+  sites: string[];
+  skills: string[];
+  titles: string[];
+  updatedAt: string;
+}
+/**
+ * What saving a new "where" did to the jobs already found (16 Nov): the list responds at once,
+ * rather than at the next search. `shown` came back from hiding; `hidden` are hidden now.
+ */
+export interface WhereChange {
+  hidden: number;
+  shown: number;
 }
 /**
  * The scheduled job search: when the Strategist and the Harvester run without being asked.

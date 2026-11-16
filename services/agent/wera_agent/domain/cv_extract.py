@@ -171,6 +171,16 @@ def _strip_contacts(text: str) -> str:
     return re.sub(r"\s{2,}", " ", text).strip(" ,;|•·-")
 
 
+# "Location: Birmingham, UK" up to the next field ("| Phone: …") or the end of the line.
+LOCATION_LABEL = re.compile(r"\b(?:location|address|based in|city)\s*:\s*([^|•·;]+?)\s*(?:[|•·;]|$)", re.I)
+# A field whose value `_strip_contacts` took away: "Email:", "Phone:", left with nothing after.
+_EMPTY_LABEL = re.compile(r"\b[A-Za-z][A-Za-z ]{0,15}:\s*(?=[|•·;,]|$)")
+
+
+def _without_empty_labels(text: str) -> str:
+    return re.sub(r"\s{2,}", " ", _EMPTY_LABEL.sub(" ", text)).strip(" ,;|•·-")
+
+
 def _looks_like_name(line: str) -> bool:
     """Two to four capitalised words, no digits, no comma.
 
@@ -213,9 +223,17 @@ def _person(preamble: list[str]) -> tuple[str, str, str | None, list[ParsedLink]
     # A location is a line with a comma and no digits that isn't the name — "London, United
     # Kingdom". Left empty rather than guessed when nothing fits; the person fills it in, and
     # §5.7 treats an empty location as "no location filter" rather than as a wrong one.
+    #
+    # A labelled contact line says so itself: "Email: … | Phone: … | Location: Birmingham, UK"
+    # is Birmingham. Read whole, it was stored as "Email: | Phone: | Location: Birmingham, UK"
+    # (16 Nov) — the contacts went, their labels stayed — and every prompt was told so.
     location = ""
     for line in preamble:
-        text = _strip_contacts(line)
+        labelled = LOCATION_LABEL.search(line)
+        if labelled:
+            location = _strip_contacts(labelled.group(1))
+            break
+        text = _without_empty_labels(_strip_contacts(line))
         if text and text != name and "," in text and not any(ch.isdigit() for ch in text) and len(text) <= 60:
             location = text
             break

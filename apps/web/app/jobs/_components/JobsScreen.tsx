@@ -682,7 +682,7 @@ export function JobsScreen({
       </footer>
 
       {importing ? <ImportDialog onClose={() => setImporting(false)} /> : null}
-      {searching ? <SearchDialog profile={profile} onClose={() => setSearching(false)} onStart={startSearch} /> : null}
+      {searching ? <SearchDialog profile={profile} places={places} onClose={() => setSearching(false)} onStart={startSearch} /> : null}
       {rejecting ? <RejectDialog job={rejecting} onClose={() => setRejecting(undefined)} onReject={(reasonCode, reason) => (setRejecting(undefined), decide(rejecting, { action: "reject", reasonCode, reason }))} /> : null}
 
       <Dialog

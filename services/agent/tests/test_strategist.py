@@ -113,15 +113,21 @@ class TestTheMatrixOverTheApi:
             "GB",
             "DE",
         ]
-        # Whole words only: the "us" in Busan is not the United States. Austin is, as a known city.
-        assert strategist.target_countries(profile.model_copy(update={"countries": [], "locations": ["Busan"]})) == []
+        # Busan is South Korea (the gazetteer knows it), not the United States by way of its "us".
+        assert strategist.target_countries(profile.model_copy(update={"countries": [], "locations": ["Busan"]})) == ["KR"]
         assert strategist.target_countries(profile.model_copy(update={"countries": [], "locations": ["Austin, TX"]})) == ["US"]
-        assert strategist.target_countries(profile.model_copy(update={"countries": ["NL"]})) == ["NL"]
+        assert strategist.target_countries(profile.model_copy(update={"countries": ["NL"], "locations": []})) == ["NL"]
+        # A city outside the ticked countries adds its own: "Dubai" is a search of the UAE.
+        assert strategist.target_countries(profile.model_copy(update={"countries": ["GB"], "locations": ["Dubai"]})) == [
+            "GB",
+            "AE",
+        ]
 
     def test_a_refresh_is_kept_until_the_profile_changes(self, client):
         with transaction() as session:
             store = Store(session)
-            store.put_profile(store.get_profile().model_copy(update={"countries": ["GB", "DE"]}))
+            # The demo's cities, cut to these countries: a named city adds its own (Zurich, CH).
+            store.put_profile(store.get_profile().model_copy(update={"countries": ["GB", "DE"], "locations": ["London", "Berlin"]}))  # fmt: skip
         made = client.post("/strategy")
         assert made.status_code == 200, made.text
         assert {m["country"] for m in made.json()["markets"]} == {"GB", "DE"}
@@ -129,7 +135,7 @@ class TestTheMatrixOverTheApi:
 
         with transaction() as session:
             store = Store(session)
-            store.put_profile(store.get_profile().model_copy(update={"countries": ["GB"]}))
+            store.put_profile(store.get_profile().model_copy(update={"countries": ["GB"], "locations": ["London"]}))
         assert client.get("/strategy").json() is None  # a plan for a search nobody is running now
 
     def test_verified_proposals_are_appended_unreviewed(self, client, tmp_path, monkeypatch):
@@ -150,7 +156,7 @@ class TestTheMatrixOverTheApi:
         monkeypatch.setattr(site_discovery, "confirm", lambda _c, _o: True)
         with transaction() as session:
             store = Store(session)
-            store.put_profile(store.get_profile().model_copy(update={"countries": ["GB"]}))
+            store.put_profile(store.get_profile().model_copy(update={"countries": ["GB"], "locations": ["London"]}))
         made = client.post("/strategy").json()
         assert made["markets"][0]["proposed"] == ["lawjobs.example"]
         written = next(s for s in config.sites() if s.domain == "lawjobs.example")

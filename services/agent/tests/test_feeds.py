@@ -74,16 +74,24 @@ class TestTheQueries:
         assert feeds.split_level("Software Engineering Internship") == ("Software Engineering", "intern")
         assert feeds.split_level("Backend Engineer") == ("Backend Engineer", None)
 
-    def test_one_query_per_title_and_city_in_one_country(self):
-        qs = feeds.queries_for(["Graduate Software Engineer", "Backend Engineer"], ["London"], ["gb"])
+    def test_one_query_per_title_and_place(self):
+        qs = feeds.queries_for(["Graduate Software Engineer", "Backend Engineer"], [("London", "gb")])
         assert [(q.role, q.level, q.city, q.country) for q in qs] == [
             ("Software Engineer", "graduate", "London", "gb"),
             ("Backend Engineer", None, "London", "gb"),
         ]
 
-    def test_with_several_countries_a_city_isnt_guessed_at(self):
-        qs = feeds.queries_for(["Backend Engineer"], ["London"], ["gb", "us"])
-        assert [(q.city, q.country) for q in qs] == [(None, "gb"), (None, "us")]
+    def test_a_city_goes_with_its_own_country(self):
+        """16 Nov: London and Switzerland asked Reed for the whole UK, because with two countries
+        the city was dropped. Each city now goes with the country it is in."""
+        from wera_agent.domain import places
+
+        wanted = places.where(["CH", "GB"], ["London, UK"])
+        only = feeds.places_for(wanted, city_scope="only", countries=["ch", "gb"])
+        assert only == [(None, "ch"), ("London", "gb")]
+        # `first`: the rest of the country after its city.
+        first = feeds.places_for(wanted, city_scope="first", countries=["ch", "gb"])
+        assert first == [(None, "ch"), ("London", "gb"), (None, "gb")]
 
 
 class TestTheGate:
@@ -216,6 +224,19 @@ class TestFindingTheOriginal:
         hit = resource.original(lead, serper=serper, sites=[], gl="gb", hl="en", exclude=[])
         assert hit is not None and "ashbyhq.com" in hit.url
 
+    def test_an_employer_page_with_only_a_slug_is_the_original_of_a_lead_it_spells(self):
+        """16 Nov: Adzuna's Zürich roles were lost because Cudos AG's page is `/de/jobs/<slug>/`,
+        which reads as a category with nothing else to go on. The lead is the something else."""
+        lead = feeds.Lead(url="https://www.adzuna.ch/details/1", title="Junior Software Engineer im Cross-Company-Programm", company="Cudos AG", location="Zürich", date=None, snippet="")  # fmt: skip
+        serper = FakeSerper({"Cudos": [
+            Result("https://cudos.ch/de/jobs/junior-software-engineer-cudos-trail/", "Junior Software Engineer im Cross-Company-Programm", "Cudos AG Zürich", None, 1),
+        ]})  # fmt: skip
+        hit = resource.original(lead, serper=serper, sites=[], gl="ch", hl="en", exclude=[])
+        assert hit is not None and hit.url.startswith("https://cudos.ch/de/jobs/")
+        # A category page is still a category, whatever the lead: its slug doesn't spell the job.
+        category = FakeSerper({"Cudos": [Result("https://cudos.ch/de/jobs/informatik/", "Junior Software Engineer im Cross-Company-Programm", "Cudos AG", None, 1)]})  # fmt: skip
+        assert resource.original(lead, serper=category, sites=[], gl="ch", hl="en", exclude=[]) is None
+
     def test_a_different_job_at_the_same_company_isnt_it(self):
         serper = FakeSerper({"TD Bank": [Result("https://td.wd3.myworkdayjobs.com/en-US/x/job/London/Senior-Risk-Analyst_R9", "Senior Risk Analyst", "TD Bank", None, 1)]})  # fmt: skip
         assert resource.original(self.LEAD, serper=serper, sites=[], gl="gb", hl="en", exclude=[]) is None
@@ -283,7 +304,8 @@ class TestOneSearchPerQuestion:
             return_value=httpx.Response(200, json={"results": []})
         )
         plan = [PlannedQuery(q=f'"{t}" London', gl="gb", hl="en", source="open", tier=1, title=t) for t in ("Graduate Software Engineer", "Junior Software Engineer")]  # fmt: skip
-        profile = store.get_profile().model_copy(update={"locations": ["London, UK"], "seniority": ["graduate", "junior"]})
+        # `only`, so London is the one place asked: `first` would ask the rest of the UK as well.
+        profile = store.get_profile().model_copy(update={"locations": ["London, UK"], "seniority": ["graduate", "junior"], "city_scope": "only"})  # fmt: skip
         strategist.discover_feeds(plan, profile, queue=TargetQueue(redis, "plan"), known_urls=set(), sites=[], now=NOW, redis=redis, resource=FakeSerper({}))  # fmt: skip
         assert reed_route.call_count == 1  # both are "Software Engineer" at graduate level to Reed
         assert {c.request.url.params["title_only"] for c in adzuna_route.calls} == {"graduate", "junior"}

@@ -11,12 +11,12 @@
 import { X } from "lucide-react";
 import { useId, useMemo, useState } from "react";
 import { regionName } from "@/lib/regions";
-import type { PlaceOption, SearchProfile } from "@/lib/types";
+import type { PlaceOption, SavedProfile, SearchProfile } from "@/lib/types";
 import { ChipInput } from "@/lib/ui/ChipInput";
 import { cn } from "@/lib/ui/cn";
 import { Checkbox, Input, Label, Select } from "@/lib/ui/Field";
 
-type Where = Pick<SearchProfile, "countries" | "locations" | "remote">;
+type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope">;
 
 /** What searches a country, in a few words: the thing that decides whether picking it is useful. */
 export function coverage(place: PlaceOption): string {
@@ -26,13 +26,39 @@ export function coverage(place: PlaceOption): string {
   return parts.join(" · ");
 }
 
-/** "London, Manchester · United Kingdom", or "Anywhere" — the profile card's one-line answer. */
+/** "London first · United Kingdom, Switzerland", or "Anywhere" — the profile card's one-line answer. */
 export function whereSummary(profile: Where, places: PlaceOption[]): string {
   const names = profile.countries.map((c) => places.find((p) => p.code === c)?.name ?? c);
   const cities = profile.locations.map((l) => l.split(",")[0].trim()).filter(Boolean);
   const remote = profile.remote === "remote_only" ? "Remote only" : "";
-  const place = [cities.join(", "), names.join(", ")].filter(Boolean).join(" · ");
+  const named = cities.length ? `${cities.join(", ")} ${profile.cityScope === "only" ? "only" : "first"}` : "";
+  const place = [named, names.join(", ")].filter(Boolean).join(" · ");
   return [place || (remote ? "" : "Anywhere"), remote].filter(Boolean).join(" · ");
+}
+
+/** What a named city does to its country (16 Nov). Picked before each search, in the Search dialog. */
+const SCOPES: { id: SearchProfile["cityScope"]; label: string; description: string }[] = [
+  {
+    id: "first",
+    label: "These cities first, then the rest of the country",
+    description: "Searches your cities first and keeps jobs anywhere else in those countries too.",
+  },
+  {
+    id: "only",
+    label: "Only these cities",
+    description: "In a country where you named a city, only that city. Countries with no city are searched everywhere.",
+  },
+];
+
+/** What a save says. When "where" changed, the jobs already found followed it, and it says how many. */
+export function savedMessage(saved: SavedProfile): string {
+  const moved = saved.refiltered;
+  if (!moved) return "Search profile saved. The next search uses it.";
+  const parts = [
+    moved.shown ? `${moved.shown} ${moved.shown === 1 ? "job" : "jobs"} now shown` : "",
+    moved.hidden ? `${moved.hidden} hidden` : "",
+  ].filter(Boolean);
+  return `Where saved${parts.length ? `: ${parts.join(", ")}` : ""}. The next search looks there.`;
 }
 
 export function WhereFields({
@@ -131,9 +157,11 @@ export function WhereFields({
         onChange={(locations) => onChange({ locations })}
         max={8}
         error={errors.locations}
-        hint="Within the countries above. Leave empty to search the whole country."
+        hint="A city in a country you haven't ticked adds that country — Dubai searches the UAE. Leave empty to search whole countries."
         placeholder="Add a city"
       />
+
+      {value.locations.length ? <CityScope value={value.cityScope} onChange={(cityScope) => onChange({ cityScope })} /> : null}
 
       <div>
         <Label htmlFor={remoteId}>Remote</Label>
@@ -144,5 +172,32 @@ export function WhereFields({
         </Select>
       </div>
     </div>
+  );
+}
+
+/** "These cities first" or "only these cities": what a named city does to its country. */
+export function CityScope({ value, onChange }: { value: SearchProfile["cityScope"]; onChange: (next: SearchProfile["cityScope"]) => void }) {
+  const name = useId();
+  return (
+    <fieldset>
+      <legend className="mb-1.5 text-[14px] font-semibold">Your cities</legend>
+      <div className="grid gap-1">
+        {SCOPES.map((scope) => (
+          <label key={scope.id} className="flex cursor-pointer items-start gap-3 py-1">
+            <input
+              type="radio"
+              name={name}
+              className="mt-1 size-4 shrink-0 cursor-pointer accent-forest-700"
+              checked={value === scope.id}
+              onChange={() => onChange(scope.id)}
+            />
+            <span className="min-w-0">
+              <span className="block text-[15px] font-semibold">{scope.label}</span>
+              <span className="block text-small text-ink-2">{scope.description}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
   );
 }

@@ -189,16 +189,51 @@ class TestCountryTargeting:
         assert filters.wrong_location(uk, profile(locations=[], countries=["GB"])) is None
 
     def test_a_two_letter_code_does_not_match_inside_another_word(self):
-        """Substring-matching "us" puts Austin in the United States, and "uk" puts Kyiv in the
-        UK. Country names are matched whole-word for exactly this reason."""
+        """Substring-matching "us" put Austin in the United States, and "uk" put Kyiv in the UK.
+        Austin *is* in the United States — the gazetteer says so, not the "us" in its name — and
+        Kyiv still isn't in the UK."""
         austin = job(location=Location(city="Austin", country=None, raw="Austin"), remote="onsite")
-        assert filters.wrong_location(austin, profile(locations=[], countries=["US"])) == "Austin"
+        assert filters.wrong_location(austin, profile(locations=[], countries=["US"])) is None
+        assert filters.wrong_location(austin, profile(locations=[], countries=["GB"])) == "Austin"
         kyiv = job(location=Location(city="Kyiv", country="Ukraine", raw="Kyiv, Ukraine"), remote="onsite")
         assert filters.wrong_location(kyiv, profile(locations=[], countries=["GB"])) == "Kyiv"
 
     def test_naming_neither_a_city_nor_a_country_hides_nothing_on_location(self):
         anywhere = job(location=Location(city="Lima", country="Peru", raw="Lima, Peru"), remote="onsite")
         assert filters.wrong_location(anywhere, profile(locations=[], countries=[])) is None
+
+
+class TestCitiesBelongToTheirCountry:
+    """16 Nov, live: a profile of Switzerland and "London, UK" found no Swiss jobs. A posting
+    naming only its city ("Zürich", "Belfast", "Bedford") matched no country, and the profile's
+    city wasn't scoped to its own country: "Birmingham, UK" passed on its "uk"."""
+
+    @staticmethod
+    def at(raw: str) -> Job:
+        return job(location=Location(city=raw.split(",")[0], raw=raw), remote="onsite")
+
+    @pytest.mark.parametrize("raw", ["Zürich", "Zürich, CH", "Geneva, Switzerland", "Thun", "London, England, GBR"])
+    def test_kept_either_way(self, raw):
+        for scope in ("only", "first"):
+            wanted = profile(countries=["CH", "GB"], locations=["London, UK"], city_scope=scope)
+            assert filters.hidden_reason(self.at(raw), wanted) is None, (raw, scope)
+
+    @pytest.mark.parametrize("raw", ["Belfast", "Bedford", "Birmingham, UK", "Milton Keynes area,England UK"])
+    def test_the_rest_of_the_country_follows_the_choice(self, raw):
+        only = profile(countries=["CH", "GB"], locations=["London, UK"], city_scope="only")
+        first = profile(countries=["CH", "GB"], locations=["London, UK"], city_scope="first")
+        assert filters.hidden_reason(self.at(raw), only).startswith(filters.ELSEWHERE)
+        assert filters.hidden_reason(self.at(raw), first) is None
+
+    def test_another_country_is_hidden_and_an_unknown_place_says_so(self):
+        wanted = profile(countries=["CH", "GB"], locations=["London, UK"])
+        assert filters.hidden_reason(self.at("Kfar Saba, 02, IL"), wanted) == f"{filters.ELSEWHERE}: Kfar Saba"
+        assert filters.hidden_reason(self.at("Melton"), wanted) == f"{filters.UNPLACED}: Melton"
+
+    def test_a_city_outside_the_ticked_countries_adds_its_own(self):
+        wanted = profile(countries=["GB"], locations=["Dubai"], city_scope="only")
+        assert filters.hidden_reason(self.at("Dubai - United Arab Emirates"), wanted) is None
+        assert filters.hidden_reason(self.at("Abu Dhabi"), wanted).startswith(filters.ELSEWHERE)
 
 
 class TestACityWrittenWithItsCountry:

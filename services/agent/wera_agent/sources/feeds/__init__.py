@@ -136,16 +136,30 @@ def skipped(feed_id: str, *, countries: set[str], person: Person | None) -> str 
     return None
 
 
-def queries_for(titles: list[str], cities: list[str], countries: list[str]) -> list[FeedQuery]:
-    """One query per title, per city when there is exactly one country (a city belongs to it),
-    else per country. Titles keep the plan's order, best first."""
+def queries_for(titles: list[str], places: list[tuple[str | None, str]]) -> list[FeedQuery]:
+    """One query per title, per place: a `(city, country)` pair, city None for the whole country.
+    Titles keep the plan's order, best first; places the order `places_for` gives them.
+
+    The places used to be the profile's cities only when it had exactly one country, and else
+    every country without a city — so a profile of London and Switzerland asked Reed for the
+    whole of the UK, and the filter then hid most of what came back (16 Nov)."""
     out: list[FeedQuery] = []
-    places: list[tuple[str | None, str]] = [(c, countries[0]) for c in cities] if len(countries) == 1 and cities else []
-    places = places or [(None, c) for c in countries]
     for title in titles:
         role, level = split_level(title)
         for city, country in places:
             out.append(FeedQuery(title=title, role=role, level=level, city=city, country=country))
+    return out
+
+
+def places_for(where: Any, *, city_scope: str, countries: list[str]) -> list[tuple[str | None, str]]:
+    """Each country's named cities (two at most), else the country; with `city_scope: first`, the
+    country follows its cities. `where` is `places.where(...)`; `countries` are the plan's `gl`s."""
+    out: list[tuple[str | None, str]] = []
+    for country in countries:
+        cities = [*where.cities.get(country.upper(), []), *where.loose][:2]
+        out += [(city, country) for city in cities]
+        if not cities or city_scope == "first":
+            out.append((None, country))
     return out
 
 

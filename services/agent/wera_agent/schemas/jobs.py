@@ -166,6 +166,9 @@ class FitEvidence(Model):
     # denominator, twelve of fifteen terms, and coverage read 7%.
     culture: list[str] = []
     model: str
+    # Which version of the scoring rubric judged this (`nodes.fit.RUBRIC`). A score from an older
+    # rubric is stale like one from another model, and is re-scored. None: before versions.
+    rubric: str | None = None
 
 
 class FitReport(FitEvidence):

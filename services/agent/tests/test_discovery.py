@@ -91,6 +91,29 @@ class TestTheQueries:
         planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
         assert not any("London," in q.q or "UK" in q.q for q in planned)
 
+    def test_a_country_with_no_city_is_asked_by_its_cities_one_a_search(self, store):
+        """16 Nov: `job in "Switzerland"` came back as salary pages and social posts, and so did one
+        search OR-ing its cities together. `job in "Zürich"` found postings."""
+        planned = strategist.queries(profile(store, countries=["CH"], locations=[]), store.cv_profile_cached(), BOARDS)
+        opened = [(q.tier, q.q) for q in planned if q.source == "open" and q.title == TITLES[0] and q.tier in (1, 2)]
+        assert opened[:3] == [
+            (1, '"Graduate Software Engineer" job in "Zürich" -site:linkedin.com'),
+            (2, '"Graduate Software Engineer" job in "Geneva" -site:linkedin.com'),
+            (2, '"Graduate Software Engineer" job in "Basel" -site:linkedin.com'),
+        ]
+        assert not any("Switzerland" in q.q for q in planned)
+
+    def test_first_asks_the_rest_of_the_country_a_tier_later_and_only_does_not(self, store):
+        first = strategist.queries(profile(store, city_scope="first"), store.cv_profile_cached(), BOARDS)
+        only = strategist.queries(profile(store, city_scope="only"), store.cv_profile_cached(), BOARDS)
+        assert {q.tier for q in first if '"Manchester"' in q.q} == {2}
+        assert not any('"Manchester"' in q.q for q in only)
+        assert all('"London"' in q.q for q in only if q.source == "open" and q.tier == 1)
+
+    def test_every_named_city_is_asked_not_only_the_first(self, store):
+        planned = strategist.queries(profile(store, locations=["London, UK", "Leeds, UK"], city_scope="only"), store.cv_profile_cached(), BOARDS)  # fmt: skip
+        assert {q.tier for q in planned if '"London"' in q.q} >= {1} and any('"Leeds"' in q.q for q in planned)
+
     def test_open_searches_never_ask_linkedin(self, store):
         planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
         assert all(q.q.endswith("-site:linkedin.com") for q in planned if q.source == "open")

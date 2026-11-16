@@ -40,6 +40,14 @@ class SearchProfile(Model):
     # field existed means. That keeps old rows readable with no migration, and it fails open: a
     # profile with no countries searches every reviewed board, rather than none.
     countries: Annotated[list[Country], count(0, 8, "Pick a country or leave it empty", "Use at most 8 countries")] = []
+    # What a city in `locations` does to its country (16 Nov), picked before each search. `first`
+    # searches the cities first and the rest of the country after, and hides nothing in that
+    # country; `only` keeps the country to the cities named in it. A profile saved before the
+    # choice existed reads as `first`, the wider of the two.
+    city_scope: Literal["first", "only"] = "first"
+    # SRCH-34: an international organisation's internationally recruited posts at any duty
+    # station, not only in `countries`. Locally recruited posts still follow `countries`.
+    international: bool = False
     remote: Literal["any", "remote_only", "no_remote"]
     seniority: list[Seniority]
     exclude: list[Term]  # title terms
@@ -75,3 +83,17 @@ class SearchProfile(Model):
     def targets_anywhere(self) -> bool:
         """No country named, so no board is ruled out on geography."""
         return not self.countries
+
+
+class WhereChange(Model):
+    """What saving a new "where" did to the jobs already found (16 Nov): the list responds at once,
+    rather than at the next search. `shown` came back from hiding; `hidden` are hidden now."""
+
+    shown: int
+    hidden: int
+
+
+class SavedProfile(SearchProfile):
+    """`PUT /profile`'s answer: the profile, and what it changed on the list when "where" moved."""
+
+    refiltered: WhereChange | None = None

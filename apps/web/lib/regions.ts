@@ -39,6 +39,7 @@ export const REGION_NAMES: Record<string, string> = {
   latin_america: "Latin America",
   apac: "Asia Pacific",
   africa: "Africa",
+  middle_east: "Middle East",
   global: "Global",
 };
 

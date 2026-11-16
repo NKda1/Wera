@@ -55,6 +55,29 @@ VENDOR_POSTINGS = (
 # embed: 6,000 of the watchlist's jobs live at URLs like `databricks.com/…/job?gh_jid=8593713002`.
 POSTING_PARAMS = {"gh_jid", "ashby_jid", "jobid", "job_id", "vacancyid"}
 
+# The generic posting: a job-ish segment with an id somewhere after it. An id is a run of five
+# digits, a UUID, a long hex string, or a requisition number with a short letter prefix
+# ("R0133741", "JR12345") — never a year, never a bare slug.
+#
+# The segments include how German, French, Dutch, Spanish and Italian boards write "jobs" (16 Nov:
+# jobs.ch's `/de/stellenangebote/detail/<uuid>/` was a posting read as "other", so a search of
+# Switzerland could not keep it).
+JOB_WORDS = (
+    r"jobs?|vacanc(?:y|ies)|positions?|roles?|openings?|careers?|graduate-jobs?"
+    r"|stellenangebote?|stellen|stelle|jobangebote?|emplois?|offres?(?:-d-emploi)?|vacatures?|empleos?|ofertas?|offerte"
+)
+JOB_SEGMENT = re.compile(rf"/(?:{JOB_WORDS}|o)/", re.I)
+ID = re.compile(
+    r"(?:^|[/_.=-])(?:\d{5,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{12,}|[a-z]{1,3}\d{5,})"
+    r"(?:$|[/_.?&-])",
+    re.I,
+)
+
+# A single slug under a jobs index, with nothing after it: `/jobs/software-engineer`, `/de/jobs/<slug>/`.
+ONE_SLUG = rf"^/(?:[a-z]{{2}}/)?(?:{JOB_WORDS})/[^/]+/?$"
+ONE_SLUG_PATH = re.compile(ONE_SLUG, re.I)
+
+
 # Pages that are never a posting, whatever else their path says.
 NOT_A_JOB = re.compile(
     r"/(?:blog|news|articles?|insights|resources|events?|about(?:-us)?|press|privacy|terms|cookies?|"
@@ -68,11 +91,11 @@ LISTING_PATH = re.compile(
     r"/(?:search|job-search|browse|categor(?:y|ies)|sectors?|locations?)(?:/|$)"
     r"|/in-[a-z0-9-]+/?$"
     r"|-jobs(?:-in-[a-z0-9-]+)?/?$"
-    r"|/(?:jobs?|vacanc(?:y|ies)|careers?|positions?|openings?|roles?|opportunities|graduate-jobs)/?$"
+    rf"|/(?:{JOB_WORDS}|opportunities)/?$"
     # One word under a jobs index is a category: builtinlondon `/jobs/remote`, Milkround
     # `/jobs/software-engineer`. Reached only after the posting rules, so a posting with an id
     # in that position has already been claimed.
-    r"|^/(?:[a-z]{2}/)?(?:jobs?|vacanc(?:y|ies)|graduate-jobs)/[^/]+/?$",
+    rf"|{ONE_SLUG}",
     re.I,
 )
 LISTING_PARAMS = {"page", "q", "query", "keywords", "search", "location", "order", "sort"}
@@ -80,13 +103,6 @@ LISTING_PARAMS = {"page", "q", "query", "keywords", "search", "location", "order
 # A company page, and a company's own jobs list on a board.
 COMPANY = re.compile(r"^/(?:[a-z]{2}/)?compan(?:y|ies)/[^/]+/?$", re.I)
 COMPANY_JOBS = re.compile(r"^/(?:[a-z]{2}/)?compan(?:y|ies)/[^/]+/jobs/?$", re.I)
-
-# The generic posting: a job-ish segment with an id somewhere after it. An id is a run of five
-# digits, a UUID or a long hex string — never a year, never a bare slug.
-JOB_SEGMENT = re.compile(r"/(?:jobs?|vacanc(?:y|ies)|positions?|roles?|openings?|careers?|graduate-jobs?|o)/", re.I)
-ID = re.compile(
-    r"(?:^|[/_.=-])(?:\d{5,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{12,})(?:$|[/_.?&-])", re.I
-)
 
 # Titles a dead page wears. Checked on the title only: "not found" in a description is a sentence,
 # in a title it is the page.

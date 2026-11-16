@@ -39,7 +39,7 @@ from ..schemas.cv import Contact, CvLine, MasterCV
 from ..schemas.cv_profile import CvProfile
 from ..schemas.jobs import ScoredJob
 from ..schemas.learning import SuggestionList
-from ..schemas.profile import SearchProfile
+from ..schemas.profile import SavedProfile, SearchProfile
 from ..schemas.runs import Estimate, IntakeRun, RunIds
 from ..schemas.settings import SettingsPatch, SettingsResponse
 from ..schemas.strategy import TargetMatrix
@@ -453,8 +453,9 @@ def get_profile(s: S) -> SearchProfile:
 
 
 @router.put("/profile")
-def put_profile(s: S, body: SearchProfile) -> SearchProfile:
-    return s.put_profile(body)
+def put_profile(s: S, body: SearchProfile) -> SavedProfile:
+    saved = s.put_profile(body)
+    return SavedProfile(**saved.model_dump(), refiltered=s.where_change)
 
 
 @router.post("/profile/generate")

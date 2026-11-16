@@ -12,10 +12,11 @@ searches both turned up is looked for once.
 """
 
 import re
+from urllib.parse import urlparse
 
 from ...config import Site
 from ...domain import dedupe
-from ..postings import classify
+from ..postings import ONE_SLUG_PATH, classify
 from ..serper import Result, Serper
 from . import Lead
 
@@ -44,11 +45,28 @@ def original(lead: Lead, *, serper: Serper, sites: list[Site], gl: str, hl: str,
         host = dedupe._host(result.url)
         if any(host == a or host.endswith(f".{a}") for a in AGGREGATORS):
             continue
-        if classify(result.url, title=result.title, sites=sites) != "posting":
+        kind = classify(result.url, title=result.title, sites=sites)
+        if kind != "posting" and not (kind == "listing" and _slug_is_the_lead(lead, result.url)):
             continue
         if same_job(lead, result):
             hits.append(result)
     return max(hits, key=lambda r: dedupe.link_rank(_as_job(r)), default=None)
+
+
+def _slug_is_the_lead(lead: Lead, url: str) -> bool:
+    """An employer page with only a slug (`cudos.ch/de/jobs/junior-software-engineer-cudos-trail/`)
+    is a posting when an API has just said that job exists and the slug spells its title.
+
+    `classify` reads one slug under `/jobs/` as a category, which is right with nothing else to go
+    on — Milkround's `/jobs/software-engineer` is one. A lead is the something else: on 16 Nov
+    Adzuna's two Zürich roles were lost because their employers' pages are written this way.
+    `same_job` still has to agree (title words, level, company) before the page is queued."""
+    path = urlparse(url).path
+    if not ONE_SLUG_PATH.match(path):
+        return False
+    slug = set(re.findall(r"[a-z0-9]+", path.lower().rstrip("/").rsplit("/", 1)[-1]))
+    words = {w for w in re.findall(r"[a-z0-9]+", lead.title.lower()) if len(w) > 2}
+    return len(words & slug) >= min(3, len(words))
 
 
 def same_job(lead: Lead, result: Result) -> bool:
