@@ -90,11 +90,18 @@ class Robots:
         self._rules: dict[str, Rules | None] = {}
 
     def allows(self, url: str) -> bool:
+        return self.verdict(url) == "allowed"
+
+    def verdict(self, url: str) -> str:
+        """`allowed`, `disallowed`, or `unreadable` — which `allows` also reads as a no, but a
+        caller saying why should not call a site that rate-limited it one that refused it."""
         host = urlparse(url).netloc
         if host not in self._rules:
             self._rules[host] = self._read(host)
         rules = self._rules[host]
-        return rules is not None and rules.allows(url)
+        if rules is None:
+            return "unreadable"
+        return "allowed" if rules.allows(url) else "disallowed"
 
     @staticmethod
     def _read(host: str) -> Rules | None:

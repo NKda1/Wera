@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     adzuna_app_id: str | None = None
     adzuna_app_key: SecretStr | None = None
     careerjet_api_key: SecretStr | None = None
+    # SRCH-35: ReliefWeb's approved `appname`, requested from apidoc.reliefweb.int. Not a secret
+    # (it travels in every URL), but nothing is asked without one: ReliefWeb refuses it with a 403.
+    reliefweb_appname: str | None = None
     # Careerjet also wants a Referer: the site its searches are made from. WERA's own web app here;
     # the public address once hosted ("Undeclared referrer" without one, 13 Nov).
     careerjet_referer: str = "http://localhost:3000"

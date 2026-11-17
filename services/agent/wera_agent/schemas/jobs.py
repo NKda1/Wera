@@ -51,9 +51,26 @@ class Salary(Model):
 
 
 class Ats(Model):
-    vendor: Literal["greenhouse", "lever", "ashby"]
+    # The employer's own system. The last four are international organisations' (SRCH-34), where
+    # `board_token` is the organisation's id in config/organisations.yaml.
+    vendor: Literal["greenhouse", "lever", "ashby", "un_careers", "taleo", "workday", "successfactors"]
     board_token: str
     job_id: str
+
+
+class InternationalPost(Model):
+    """What an international organisation's own system says about a post (SRCH-34)."""
+
+    org: str  # its id in config/organisations.yaml: "un", "who"
+    # The UN common system's grade as the post gives it, written one way: "P-2", "NO-B", "G-5",
+    # "I-1" (an internship). None for a contract with no grade, such as a consultancy.
+    grade: Opt[str] = None
+    # Internationally recruited posts are open to any nationality and move people; locally
+    # recruited ones (G and NO grades, "National Consultant") are for residents or nationals of
+    # the duty station's country. None when the post doesn't say.
+    recruitment: Opt[Literal["international", "local"]] = None
+    # The organisation's own job family or network, when it gives one.
+    family: Opt[str] = None
 
 
 class JobSource(Model):
@@ -129,6 +146,8 @@ class Job(Model):
     # did. Set when the job is first saved and kept through later sightings. A job found via
     # Adzuna carries Adzuna's linked label on its card (their terms).
     via: Opt[str] = None
+    # SRCH-34: a post at an international organisation, with its grade and who it is open to.
+    international: Opt[InternationalPost] = None
 
 
 class SubScore(Model):

@@ -242,7 +242,7 @@ def _job(
 
 def from_feed(feed: FeedJob, now: int) -> Job:
     """A watchlist job: the employer's own fields, so nothing needs inferring but the extras."""
-    return _job(
+    job = _job(
         title=feed.title,
         company=feed.company,
         location=feed.location,
@@ -257,7 +257,10 @@ def from_feed(feed: FeedJob, now: int) -> Job:
         # whose date is worth grouping on without a caveat.
         posted_precision="exact",
         now=now,
+        closes_at=feed.closes_at,
     )
+    job.international = feed.international
+    return job
 
 
 def closing_date(raw: object, now: int) -> str | None:

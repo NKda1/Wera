@@ -216,6 +216,14 @@ feeds:
     terms_reviewed_on: 2026-11-13
     max_searches: 2
     max_queued: 4
+  # SRCH-35: UN agencies, international organisations and NGOs, with each posting's full text.
+  # Needs RELIEFWEB_APPNAME (an approved appname, from apidoc.reliefweb.int) and its terms read:
+  # https://reliefweb.int/terms-conditions.
+  reliefweb:
+    enabled: true
+    terms_reviewed_on: null
+    max_searches: 3
+    max_queued: 6
 
 # SRCH-10: a short-term cache in front of Firecrawl, so a run doesn't pay for the last one's
 # answers again. `known_urls` (SRCH-05) already stops a job being re-scraped; this covers the two

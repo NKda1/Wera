@@ -26,7 +26,7 @@ import logfire
 from ..clock import iso
 from ..config import Company
 from ..http import request
-from ..schemas.jobs import Ats, Location
+from ..schemas.jobs import Ats, InternationalPost, Location
 
 GREENHOUSE = "https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
 LEVER = "https://api.lever.co/v0/postings/{token}?mode=json"
@@ -48,6 +48,8 @@ class FeedJob:
     description: str
     posted_at: str | None
     remote: str | None = None
+    closes_at: str | None = None  # LIFE-02: the application deadline, when the board gives one
+    international: InternationalPost | None = None  # SRCH-34
 
 
 @dataclass
@@ -56,6 +58,10 @@ class FeedResult:
     errors: list[str] = field(default_factory=list)
     # Only companies whose feed actually answered, so an outage can't close a job (ATS-03).
     answered: set[str] = field(default_factory=set)
+    # `vendor:board:job` for every job a board listed, read in full or not. An international
+    # organisation's list is read whole but only the postings that pass the profile come back as
+    # `jobs` (SRCH-34), so a job missing from `jobs` alone is not a job that closed.
+    listed: set[str] = field(default_factory=set)
 
 
 def html_to_text(raw: str | None) -> str:
@@ -311,7 +317,7 @@ def closed_tokens(result: FeedResult, known: dict[str, Ats]) -> list[str]:
     `known` maps a job id to the ATS identity WERA stored for it. A company whose board failed
     this run is skipped entirely — absence of evidence isn't evidence the job closed.
     """
-    seen = {f"{j.ats.vendor}:{j.ats.board_token}:{j.ats.job_id}" for j in result.jobs}
+    seen = {f"{j.ats.vendor}:{j.ats.board_token}:{j.ats.job_id}" for j in result.jobs} | result.listed
     gone = []
     for job_id, ats in known.items():
         board = f"{ats.vendor}:{ats.board_token}"

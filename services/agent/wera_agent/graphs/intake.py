@@ -23,7 +23,17 @@ from typing import Any, Protocol
 import logfire
 
 from ..clock import iso, now_ms, parse_ms
-from ..config import companies, companies_file, senders, sites, wera, write_companies
+from ..config import (
+    Organisation,
+    companies,
+    companies_file,
+    organisations,
+    organisations_file,
+    senders,
+    sites,
+    wera,
+    write_companies,
+)
 from ..db.session import engine, transaction
 from ..domain import dedupe, filters
 from ..errors import ApiError
@@ -175,7 +185,8 @@ def from_watchlist(profile: SearchProfile, now: int, *, discover: bool = False, 
             out.errors.append(("BOARD_DISCOVERY", f"Couldn't search for new boards ({type(exc).__name__})."))
 
     watched = companies()
-    if not watched:
+    orgs = organisations()
+    if not watched and not orgs:
         return out
     if tick is not None:
         # One fetch per employer covers every job on that board, so this is the honest unit: a
@@ -189,12 +200,39 @@ def from_watchlist(profile: SearchProfile, now: int, *, discover: bool = False, 
             results=0,
         )
     result = ats_feeds.fetch_all(watched)
+    if orgs:
+        _from_organisations(orgs, profile, now, into=result, tick=tick)
+    out.errors += [("WATCHLIST_FEED", message) for message in result.errors]
     out.results = len(result.jobs)
     out.jobs = [normalise.from_feed(feed, now) for feed in result.jobs]
-    out.errors += [("WATCHLIST_FEED", message) for message in result.errors]
     out.feed = result
     out.jobs += _from_direct_sites(profile, now, tick=tick)
     return out
+
+
+def _from_organisations(
+    orgs: list[Organisation], profile: SearchProfile, now: int, *, into: ats_feeds.FeedResult, tick: Progress | None = None
+) -> None:
+    """SRCH-34: international organisations' own vacancy systems, read into the watchlist's result.
+
+    A posting is read in full only if its list entry passes the profile's filters (MATCH-01) —
+    the same `hidden_reason` the run applies afterwards, so nothing is read that would be hidden.
+    Their ids all go into `listed`, so ATS-03 closes only what left a list that answered.
+    """
+    from ..sources import organisations as org_feeds
+
+    if tick is not None:
+        names = ", ".join(o.name for o in orgs[:3]) + ("…" if len(orgs) > 3 else "")
+        tick(0.6, phase="feeds", detail=names, done=0, total=len(orgs), results=len(into.jobs))
+
+    def wanted(feed: ats_feeds.FeedJob) -> bool:
+        return filters.hidden_reason(normalise.from_feed(feed, now), profile, now) is None
+
+    found = org_feeds.fetch_all(orgs, wanted=wanted, max_details=organisations_file().max_details)
+    into.jobs += found.jobs
+    into.errors += found.errors
+    into.answered |= found.answered
+    into.listed |= found.listed
 
 
 def _from_direct_sites(profile: SearchProfile, now: int, *, tick: Progress | None = None) -> list[Job]:

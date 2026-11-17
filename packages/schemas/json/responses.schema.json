@@ -318,7 +318,11 @@
           "enum": [
             "greenhouse",
             "lever",
-            "ashby"
+            "ashby",
+            "un_careers",
+            "taleo",
+            "workday",
+            "successfactors"
           ],
           "type": "string"
         }
@@ -1386,6 +1390,32 @@
       "title": "IntakeRun",
       "type": "object"
     },
+    "InternationalPost": {
+      "description": "What an international organisation's own system says about a post (SRCH-34).",
+      "properties": {
+        "family": {
+          "type": "string"
+        },
+        "grade": {
+          "type": "string"
+        },
+        "org": {
+          "type": "string"
+        },
+        "recruitment": {
+          "enum": [
+            "international",
+            "local"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "org"
+      ],
+      "title": "InternationalPost",
+      "type": "object"
+    },
     "Job": {
       "properties": {
         "applyUrl": {
@@ -1435,6 +1465,9 @@
         },
         "id": {
           "type": "string"
+        },
+        "international": {
+          "$ref": "#/$defs/InternationalPost"
         },
         "language": {
           "type": "string"
@@ -2627,6 +2660,9 @@
         },
         "id": {
           "type": "string"
+        },
+        "international": {
+          "$ref": "#/$defs/InternationalPost"
         },
         "language": {
           "type": "string"

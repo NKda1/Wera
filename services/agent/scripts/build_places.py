@@ -10,7 +10,7 @@ Without arguments it fetches both files from download.geonames.org. GeoNames dat
 
 Two files land in `wera_agent/domain/places_data/`:
 
-* `countries.tsv`: ISO code, name, continent, for every country GeoNames lists.
+* `countries.tsv`: ISO code, name, continent and ISO3 code, for every country GeoNames lists.
 * `cities.tsv.gz`: every place of 15,000 people or more, with the names a posting might write
   for it. Only Latin-script names are kept, since a job ad WERA reads writes "Zürich" or "Zurich"
   and never "チューリッヒ". Codes ("ZRH") and names with digits are dropped. That is what stops
@@ -64,7 +64,7 @@ def main(argv: list[str]) -> int:
         if line.startswith("#") or not line.strip():
             continue
         cols = line.split("\t")
-        rows.append(f"{cols[0]}\t{cols[4]}\t{cols[8]}")
+        rows.append(f"{cols[0]}\t{cols[4]}\t{cols[8]}\t{cols[1]}")
     (OUT / "countries.tsv").write_text("\n".join(sorted(rows)) + "\n", encoding="utf-8")
 
     out = []
@@ -80,8 +80,9 @@ def main(argv: list[str]) -> int:
         out.append(f"{country}\t{int(population or 0)}\t{name}\t{'|'.join(others)}")
     # Largest first, so a reader that stops at its first match finds the city most people mean.
     out.sort(key=lambda r: -int(r.split("\t")[1]))
-    with gzip.open(OUT / "cities.tsv.gz", "wt", encoding="utf-8", compresslevel=9) as f:
-        f.write("\n".join(out) + "\n")
+    # mtime 0: the same data builds the same bytes, so a rebuild that changed nothing changes no file.
+    with gzip.GzipFile(OUT / "cities.tsv.gz", "wb", compresslevel=9, mtime=0) as raw:
+        raw.write(("\n".join(out) + "\n").encode("utf-8"))
     print(f"{len(rows)} countries, {len(out)} places → {OUT}")
     return 0
 

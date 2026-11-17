@@ -16,7 +16,7 @@ import { ChipInput } from "@/lib/ui/ChipInput";
 import { cn } from "@/lib/ui/cn";
 import { Checkbox, Input, Label, Select } from "@/lib/ui/Field";
 
-type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope">;
+type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope" | "international">;
 
 /** What searches a country, in a few words: the thing that decides whether picking it is useful. */
 export function coverage(place: PlaceOption): string {
@@ -33,7 +33,8 @@ export function whereSummary(profile: Where, places: PlaceOption[]): string {
   const remote = profile.remote === "remote_only" ? "Remote only" : "";
   const named = cities.length ? `${cities.join(", ")} ${profile.cityScope === "only" ? "only" : "first"}` : "";
   const place = [named, names.join(", ")].filter(Boolean).join(" · ");
-  return [place || (remote ? "" : "Anywhere"), remote].filter(Boolean).join(" · ");
+  const orgs = profile.international ? "International organisations anywhere" : "";
+  return [place || (remote ? "" : "Anywhere"), orgs, remote].filter(Boolean).join(" · ");
 }
 
 /** What a named city does to its country (16 Nov). Picked before each search, in the Search dialog. */
@@ -162,6 +163,13 @@ export function WhereFields({
       />
 
       {value.locations.length ? <CityScope value={value.cityScope} onChange={(cityScope) => onChange({ cityScope })} /> : null}
+
+      <Checkbox
+        label="International organisations, any duty station"
+        description="UN, WHO, WIPO, WTO, IMF and ITU posts open to any nationality show wherever they are; posts for residents or nationals still follow your countries. Read from the organisations whose terms you've reviewed in config/organisations.yaml."
+        checked={value.international}
+        onChange={(e) => onChange({ international: e.target.checked })}
+      />
 
       <div>
         <Label htmlFor={remoteId}>Remote</Label>

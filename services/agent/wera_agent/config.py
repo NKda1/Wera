@@ -193,6 +193,42 @@ class Company(BaseModel):
         return f"{self.vendor}:{self.token}"
 
 
+class Organisation(BaseModel):
+    """An international organisation whose own vacancy system WERA reads (SRCH-34).
+
+    Read on the daily watchlist run, like an employer's ATS board: the organisation publishing
+    its own vacancies, over the same calls its public careers page makes. Gated like a board in
+    sites.yaml — `terms_reviewed_on` is a person's record that they read its terms, and an
+    organisation without one is listed and never fetched.
+    """
+
+    id: str  # short and stable, part of every job's identity: "un", "who", "wipo"
+    name: str  # as the job card names the employer: "United Nations", "WHO"
+    platform: Literal["un_careers", "taleo", "workday", "successfactors"]
+    host: str
+    # Taleo: the career section in its paths (`ex`) and its portal number. Workday: the tenant
+    # and site in `/wday/cxs/<tenant>/<site>/jobs`.
+    section: str | None = None
+    portal: str | None = None
+    tenant: str | None = None
+    site: str | None = None
+    terms_reviewed_on: date | None = None
+    enabled: bool = True
+
+    @property
+    def reviewed(self) -> bool:
+        return self.terms_reviewed_on is not None
+
+
+class OrganisationsFile(BaseModel):
+    """config/organisations.yaml."""
+
+    # Full postings read a run, across every organisation, newest first. Listing them is one
+    # request an organisation; each posting's own text is one more.
+    max_details: int = 40
+    organisations: list[Organisation] = []
+
+
 class CompaniesFile(BaseModel):
     """config/companies.yaml. Partly written by WERA (ATS-05), so it has its own model."""
 
@@ -452,6 +488,17 @@ def companies_file() -> CompaniesFile:
 @lru_cache
 def companies() -> list[Company]:
     return [c for c in companies_file().companies if c.enabled]
+
+
+@lru_cache
+def organisations_file() -> OrganisationsFile:
+    path = CONFIG_DIR / "organisations.yaml"
+    return OrganisationsFile.model_validate(_load("organisations.yaml")) if path.exists() else OrganisationsFile()
+
+
+def organisations() -> list[Organisation]:
+    """The organisations a run may read: enabled, and with their terms reviewed."""
+    return [o for o in organisations_file().organisations if o.enabled and o.reviewed]
 
 
 # The header kept on companies.yaml when WERA rewrites it. Discovery owns the list but not the

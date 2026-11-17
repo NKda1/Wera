@@ -42,7 +42,7 @@ from ..clock import parse_ms
 from ..config import Site
 from ..domain.filters import DAY_MS, RECENCY_MS
 from ..http import host_of, is_denied
-from ..schemas.jobs import Job, Salary
+from ..schemas.jobs import InternationalPost, Job, Salary
 from . import normalise
 from .firecrawl_search import CARD_SCHEMA, SearchCaps, SearchOutcome, scrape_card
 from .postings import classify, is_closed_page
@@ -151,12 +151,16 @@ def _from_feed(target: Target, redis: Any | None) -> tuple[dict[str, Any] | None
 
 
 def _from_api(job: Job, card: dict[str, Any], target: Target) -> None:
-    """What a job API knows that a page doesn't say plainly: who found it, and the salary as fields."""
+    """What a job API knows that a page doesn't say plainly: who found it, the salary as fields,
+    and (ReliefWeb, SRCH-35) that the employer is an international organisation."""
     if target.via:
         job.via = target.via
     if job.salary is None and isinstance(card.get("salary"), dict):
         with contextlib.suppress(ValueError):
             job.salary = Salary(**card["salary"])
+    if job.international is None and isinstance(card.get("international"), dict):
+        with contextlib.suppress(ValueError):
+            job.international = InternationalPost(**card["international"])
 
 
 def _gate(target: Target, rules: Robots, declined: set[str], sites: list[Site]) -> str | None:

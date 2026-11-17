@@ -694,7 +694,7 @@ def discover_feeds(
 
     from ..domain.filters import RECENCY_MS
     from ..http import is_denied
-    from ..sources.feeds import adzuna, careerjet, reed, usajobs
+    from ..sources.feeds import adzuna, careerjet, reed, reliefweb, usajobs
     from ..sources.feeds import resource as finding
     from ..sources.provider_guard import Guard
 
@@ -723,6 +723,8 @@ def discover_feeds(
             mine = []
             for q in queries:
                 asked_as = (q.role if feed_id == "usajobs" or (feed_id == "reed" and graduate and q.level) else q.title, q.level if feed_id == "adzuna" else None, q.city, q.country)  # fmt: skip
+                if feed_id == "reliefweb":
+                    asked_as = (q.role,)  # one search a role: its search is the whole world (SRCH-35)
                 if q.country in feed.countries and asked_as not in sent:
                     sent.add(asked_as)
                     mine.append(q)
@@ -736,6 +738,11 @@ def discover_feeds(
             return usajobs.search(query, guard, pathways=bool(levels & {"graduate", "intern"}))
         if feed_id == "adzuna":
             return adzuna.search(query, guard)
+        if feed_id == "reliefweb":
+            early = bool(levels) and levels <= {"intern", "graduate", "junior", "entry"}
+            return reliefweb.search(
+                query, guard, countries=countries, international=bool(profile and profile.international), early=early
+            )
         return careerjet.search(query, guard, person=person)  # type: ignore[arg-type]
 
     with logfire.span("strategist feeds", asks=len(asks)) as span:

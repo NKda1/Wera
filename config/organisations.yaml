@@ -1,0 +1,58 @@
+# International organisations whose own vacancy systems WERA reads (SRCH-34).
+#
+# Read on the daily watchlist run: the organisation publishing its own vacancies, through the
+# same calls its public careers page makes (checked by hand on 16 Nov 2026). No key, no Firecrawl
+# credits, no Serper searches. A posting whose list entry passes your profile's filters is read in
+# full (at most `max_details` a run); a job that leaves a list that answered is marked closed.
+#
+# `terms_reviewed_on` IS THE GATE, as in sites.yaml. An organisation with `null` there is listed
+# and never fetched. Setting a date records that a person read that organisation's terms of use
+# and its robots.txt and decided WERA may read its vacancies — nothing in the code sets it.
+#
+# Their jobs follow your search profile's countries, unless "International organisations, any
+# duty station" is on: then internationally recruited posts show wherever they are, and locally
+# recruited ones (G and NO grades, open to residents or nationals) still follow your countries.
+
+max_details: 40
+organisations:
+- id: un
+  name: United Nations
+  platform: un_careers
+  host: careers.un.org          # RSS /jobfeed, each posting from /api/public/opening/joV2/<id>/en
+  terms_reviewed_on: null
+- id: who
+  name: World Health Organization
+  platform: taleo
+  host: careers.who.int
+  section: ex
+  portal: '101430233'
+  terms_reviewed_on: null
+- id: wipo
+  name: WIPO
+  platform: taleo
+  host: wipo.taleo.net
+  section: wp_2
+  portal: '101430233'
+  terms_reviewed_on: null
+- id: wto
+  name: World Trade Organization
+  platform: workday
+  host: wto.wd103.myworkdayjobs.com
+  tenant: wto
+  site: External
+  terms_reviewed_on: null
+- id: imf
+  name: IMF
+  platform: workday
+  host: imf.wd5.myworkdayjobs.com
+  tenant: imf
+  site: IMF
+  terms_reviewed_on: null
+- id: itu
+  name: ITU
+  platform: successfactors
+  host: jobs.itu.int            # /search/ and /job/ pages; robots.txt disallows /services/ (its RSS)
+  terms_reviewed_on: null
+# The World Bank Group (worldbankgroup.csod.com, Cornerstone) publishes no feed WERA can read
+# without a session token, so it is not listed. Its posts reach WERA through ReliefWeb and the
+# open web search.

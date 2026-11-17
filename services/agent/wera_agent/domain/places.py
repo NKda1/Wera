@@ -162,7 +162,8 @@ def fold(text: str) -> str:
 def _countries() -> dict[str, Country]:
     out: dict[str, Country] = {}
     for line in (DATA / "countries.tsv").read_text(encoding="utf-8").splitlines():
-        code, name, continent = line.split("\t")
+        code, name, continent, iso3 = line.split("\t")
+        ISO3[code] = iso3
         if code in MIDDLE_EAST:
             region = "middle_east"
         elif code in EUROPE:
@@ -177,6 +178,8 @@ def _countries() -> dict[str, Country]:
     return out
 
 
+# ISO 3166-1 alpha-2 → alpha-3, for the APIs that take the longer code (ReliefWeb).
+ISO3: dict[str, str] = {}
 COUNTRIES: dict[str, Country] = {code: c for code, c in _countries().items() if c.region != "other"}
 
 
@@ -328,14 +331,8 @@ def split_places(raw: str) -> list[str]:
     return [p.strip() for p in re.split(r"\s*(?:\||;|•|\s+or\s+|\s+&\s+)\s*", raw) if p.strip()]
 
 
-# ISO 3166-1 alpha-3 codes a posting writes ("London, England, GBR"), for the countries that have one.
-_ISO3 = {
-    "GBR": "GB", "USA": "US", "CAN": "CA", "DEU": "DE", "FRA": "FR", "CHE": "CH", "NLD": "NL", "IRL": "IE",
-    "ESP": "ES", "ITA": "IT", "AUT": "AT", "BEL": "BE", "SWE": "SE", "POL": "PL", "PRT": "PT", "CZE": "CZ",
-    "DNK": "DK", "NOR": "NO", "FIN": "FI", "AUS": "AU", "NZL": "NZ", "SGP": "SG", "IND": "IN", "ZAF": "ZA",
-    "ARE": "AE", "SAU": "SA", "QAT": "QA", "ISR": "IL", "JPN": "JP", "KOR": "KR", "HKG": "HK", "CHN": "CN",
-    "BRA": "BR", "MEX": "MX", "ARG": "AR", "KEN": "KE", "NGA": "NG", "EGY": "EG",
-}  # fmt: skip
+# ISO 3166-1 alpha-3 codes a posting writes ("London, England, GBR") → alpha-2.
+_ISO3 = {three: two for two, three in ISO3.items()}
 
 
 # ---------------------------------------------------------------------------

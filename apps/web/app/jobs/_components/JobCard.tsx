@@ -2,7 +2,19 @@
 
 import { ChevronDown, ExternalLink } from "lucide-react";
 import { useId, useState } from "react";
-import { formatAge, formatClosing, formatEvergreen, formatLiveness, formatLocation, formatOrigin, formatPostedAge, formatSalary, sourceLine, sourceName } from "@/lib/format";
+import {
+  formatAge,
+  formatClosing,
+  formatEvergreen,
+  formatInternational,
+  formatLiveness,
+  formatLocation,
+  formatOrigin,
+  formatPostedAge,
+  formatSalary,
+  sourceLine,
+  sourceName,
+} from "@/lib/format";
 import type { ScoredJob } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -55,7 +67,16 @@ export function JobCard({
   // MATCH-10: appended rather than replacing anything, and empty for a confirmed job — if every
   // live card carried a liveness note, the one job WERA couldn't confirm would be invisible.
   const liveness = formatLiveness(job);
-  const meta = [job.company, formatLocation(job), formatSalary(job.salary), formatPostedAge(job), formatClosing(job), liveness, formatEvergreen(job)]
+  const meta = [
+    job.company,
+    formatLocation(job),
+    formatInternational(job),
+    formatSalary(job.salary),
+    formatPostedAge(job),
+    formatClosing(job),
+    liveness,
+    formatEvergreen(job),
+  ]
     .filter(Boolean)
     .join(" · ");
 

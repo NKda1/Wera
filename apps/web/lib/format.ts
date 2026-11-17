@@ -1,4 +1,4 @@
-import type { Channel, Job, Role, ScoredJob } from "./types";
+import type { Ats, Channel, Job, Role, ScoredJob } from "./types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -144,7 +144,16 @@ const ALERT_NAMES: Record<string, string> = {
   "gradcracker-alert": "Gradcracker alert",
 };
 
-const VENDOR_NAMES = { greenhouse: "Greenhouse", lever: "Lever", ashby: "Ashby" } as const;
+// The employer job systems a job can carry. The last four are international organisations' (SRCH-34).
+export const VENDOR_NAMES: Record<Ats["vendor"], string> = {
+  greenhouse: "Greenhouse",
+  lever: "Lever",
+  ashby: "Ashby",
+  un_careers: "UN Careers",
+  taleo: "Taleo",
+  workday: "Workday",
+  successfactors: "SuccessFactors",
+};
 
 export function siteName(domain: string): string {
   return SITE_NAMES[domain] ?? domain;
@@ -203,6 +212,14 @@ export function formatClosing(job: Pick<ScoredJob, "closesAt">, now: Date = new 
   if (days === 0) return "closes today";
   if (days === 1) return "closes tomorrow";
   return days <= 14 ? `closes in ${days} days` : `closes ${formatDate(job.closesAt)}`;
+}
+
+/** SRCH-34: an international organisation's grade, and who the post is open to. */
+export function formatInternational(job: Pick<ScoredJob, "international">): string {
+  const post = job.international;
+  if (!post) return "";
+  const who = post.recruitment === "international" ? "internationally recruited" : post.recruitment === "local" ? "locally recruited" : "";
+  return [post.grade, who].filter(Boolean).join(" · ");
 }
 
 /** LIFE-04: open two months or more — often a standing advert rather than a vacancy. */

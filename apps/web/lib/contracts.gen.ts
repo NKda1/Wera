@@ -282,7 +282,7 @@ export interface ApplicationWithJob {
 export interface Ats {
   boardToken: string;
   jobId: string;
-  vendor: "greenhouse" | "lever" | "ashby";
+  vendor: "greenhouse" | "lever" | "ashby" | "un_careers" | "taleo" | "workday" | "successfactors";
 }
 export interface Bullet {
   id: string;
@@ -477,6 +477,15 @@ export interface RunError {
   code: string;
   message: string;
 }
+/**
+ * What an international organisation's own system says about a post (SRCH-34).
+ */
+export interface InternationalPost {
+  family?: string;
+  grade?: string;
+  org: string;
+  recruitment?: "international" | "local";
+}
 export interface Job {
   applyUrl?: string;
   ats?: Ats;
@@ -490,6 +499,7 @@ export interface Job {
   foundBy?: FoundBy;
   hiddenReason?: string;
   id: string;
+  international?: InternationalPost;
   language: string;
   lastCheckedAt?: string;
   lastConfirmedAt?: string;
@@ -539,6 +549,7 @@ export interface ScoredJob {
   foundBy?: FoundBy;
   hiddenReason?: string;
   id: string;
+  international?: InternationalPost;
   language: string;
   lastCheckedAt?: string;
   lastConfirmedAt?: string;

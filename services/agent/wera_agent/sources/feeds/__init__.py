@@ -28,6 +28,7 @@ import httpx
 import logfire
 
 from ...config import FeedConfig, wera
+from ...domain.places import COUNTRIES
 from ...http import request
 from ...settings import get_settings
 from ..provider_guard import Guard, answer_key
@@ -66,6 +67,8 @@ FEEDS: dict[str, Feed] = {
     "usajobs": Feed("usajobs", "USAJOBS", frozenset({"us"}), full_text=True),
     "adzuna": Feed("adzuna", "Adzuna", ADZUNA_COUNTRIES, full_text=False),
     "careerjet": Feed("careerjet", "Careerjet", frozenset(CAREERJET_LOCALES), full_text=False, needs_person=True),
+    # SRCH-35: UN agencies, international organisations and NGOs, everywhere.
+    "reliefweb": Feed("reliefweb", "ReliefWeb", frozenset(c.lower() for c in COUNTRIES), full_text=True),
 }
 
 
@@ -115,6 +118,7 @@ def missing_key(feed_id: str) -> str | None:
         "usajobs": {"USAJOBS_API_KEY": s.usajobs_api_key, "USAJOBS_EMAIL": s.usajobs_email},
         "adzuna": {"ADZUNA_APP_ID": s.adzuna_app_id, "ADZUNA_APP_KEY": s.adzuna_app_key},
         "careerjet": {"CAREERJET_API_KEY": s.careerjet_api_key},
+        "reliefweb": {"RELIEFWEB_APPNAME": s.reliefweb_appname},
     }[feed_id]
     names = [name for name, value in needs.items() if unset(value)]
     return ", ".join(names) or None
@@ -173,19 +177,27 @@ def split_level(title: str) -> tuple[str, str | None]:
 
 
 def call(
-    guard: Guard, feed_id: str, url: str, *, params: dict[str, Any], key_params: dict[str, Any] | None = None, **kwargs: Any
+    guard: Guard,
+    feed_id: str,
+    url: str,
+    *,
+    params: dict[str, Any],
+    key_params: dict[str, Any] | None = None,
+    method: str = "GET",
+    **kwargs: Any,
 ) -> tuple[Any | None, str]:
-    """One GET to an API, through its guard: a shared answer when there is one, else one call for
+    """One call to an API, through its guard: a shared answer when there is one, else one call for
     everyone asking, counted on the day's meter; a 429 or repeated failure opens the breaker.
     Returns the JSON (or None) and how it was answered. `key_params`, when given, is what the
-    answer is shared under instead of `params` — the question without who asked it."""
+    answer is shared under instead of `params` — the question without who asked it. A POST's
+    `json` body is part of the question, so it is part of the key."""
     if seconds := guard.open_for():
         return None, f"breaker open {seconds}s"
-    key = answer_key(feed_id, url, sorted((key_params if key_params is not None else params).items()))
+    key = answer_key(feed_id, url, sorted((key_params if key_params is not None else params).items()), kwargs.get("json"))
 
     def fetch() -> Any | None:
         try:
-            response = request("GET", url, params=params, timeout=TIMEOUT, **kwargs)
+            response = request(method, url, params=params, timeout=TIMEOUT, **kwargs)
         except httpx.HTTPError as exc:
             guard.failed(type(exc).__name__)
             return None

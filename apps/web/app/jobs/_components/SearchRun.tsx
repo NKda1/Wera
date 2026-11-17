@@ -63,9 +63,15 @@ const STEPS: Record<IntakeChannel, RunPhase[]> = {
   score_more: ["scoring", "planning", "searching", "harvesting"],
 };
 
-type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope">;
+type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope" | "international">;
 
-const whereOf = (p: SearchProfile): Where => ({ countries: p.countries, locations: p.locations, remote: p.remote, cityScope: p.cityScope });
+const whereOf = (p: SearchProfile): Where => ({
+  countries: p.countries,
+  locations: p.locations,
+  remote: p.remote,
+  cityScope: p.cityScope,
+  international: p.international,
+});
 
 /** PRF-05: show what a search will cost before it runs — and, first, where it will look (16 Nov). */
 export function SearchDialog({

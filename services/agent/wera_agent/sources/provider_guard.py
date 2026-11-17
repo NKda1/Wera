@@ -47,7 +47,7 @@ POLL_SECONDS = 0.1
 # A day's count is kept a little past its day, so yesterday's can still be read in the morning.
 METER_TTL_SECONDS = 3 * 24 * 60 * 60
 # The providers a guard exists for, in the order `wera providers status` shows them.
-PROVIDERS = ("serper", "reed", "usajobs", "adzuna", "careerjet")
+PROVIDERS = ("serper", "reed", "usajobs", "adzuna", "careerjet", "reliefweb")
 
 
 def answer_key(provider: str, *parts: Any) -> str:

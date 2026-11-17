@@ -221,6 +221,7 @@ def merge_sources(into: Job, other: Job) -> Job:
     into.linkedin_url = into.linkedin_url or other.linkedin_url  # MAIL-07: stored, never fetched
     into.salary = into.salary or other.salary
     into.closes_at = into.closes_at or other.closes_at  # LIFE-02: whichever source gave a date
+    into.international = into.international or other.international  # SRCH-34: the grade, from its own system
     # Not "first one wins": the same job arrives from an alert email saying "3 days ago" and
     # from the employer's own feed with a real timestamp, and which order they arrive in is an
     # accident of scheduling. The better-evidenced date should win either way, or a job's

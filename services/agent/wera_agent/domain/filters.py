@@ -10,10 +10,10 @@ a guess about what someone wants, and they can look at what it hid and disagree.
 
 import re
 
-from ..clock import now_ms, parse_ms
+from ..clock import iso, now_ms, parse_ms
 from ..schemas.jobs import Job
 from ..schemas.profile import SearchProfile
-from . import places
+from . import grades, places
 from .dedupe import normalise_title
 from .places import COUNTRIES
 
@@ -202,6 +202,70 @@ LEVEL_ACCEPTS: dict[str, tuple[str, ...]] = {
 }
 
 
+# SRCH-34: which grade levels a profile's levels take. An entry-level grade is below everything
+# and never hidden; an internship is for a profile looking for one, or a graduate's (the UN's are
+# open to recent graduates), or one that names no level, which reads as early-career.
+GRADE_TAKEN_BY: dict[str, set[str]] = {
+    "intern": {"intern", "graduate"},
+    "mid": {"mid", "senior", "lead", "principal"},
+    "senior": {"senior", "lead", "principal"},
+    "director": {"principal"},
+}
+
+
+def grade_level(job: Job) -> str | None:
+    """The level an international organisation's grade puts a post at, or None."""
+    post = job.international
+    if post is None or not post.grade:
+        return None
+    parsed = grades.parse(post.grade)
+    return parsed.level if parsed else None
+
+
+def grade_outside(level: str, job: Job, profile: SearchProfile) -> str | None:
+    """Why a graded post is outside the levels the profile asks for, or None."""
+    taken_by = GRADE_TAKEN_BY.get(level)
+    wanted = {lv.lower().strip() for lv in profile.seniority if lv.strip()}
+    if taken_by is None or (level == "intern" and not wanted) or wanted & taken_by:
+        return None
+    grade = job.international.grade if job.international else level
+    if level == "intern":
+        return f"An internship, and your search isn't for one: {grade}"
+    return f"Grade is more senior than your search: {grade}"
+
+
+# What an international organisation calls technology work, in a title or a job family. Their
+# titles rarely use a target's words — the UN hires a software engineer as an "Associate
+# Information Systems Officer" — so for their posts, this stands in for the title (SRCH-34).
+TECH_ROLE = re.compile(
+    r"information (and (tele)?communications? )?technolog|information (management )?systems?|\bict\b|"
+    r"telecommunications? technolog|software|developer|devops|devsecops|data engineer|data scien|"
+    r"cyber\s?security|\bcloud\b|web develop|systems? (administrator|engineer|analyst)|"
+    r"\bit (officer|assistant|specialist|analyst)\b|programmer|machine learning|\bai\b",
+    re.I,
+)
+# The words a target title is about that make it technology work.
+TECH_TARGET = {
+    "software", "engineer", "data", "web", "backend", "frontend", "devops", "cloud", "security",
+    "cyber", "network", "systems", "ml", "ai", "machine", "python", "java", "javascript", "platform",
+    "infrastructure", "full", "stack", "application", "programmer",
+}  # fmt: skip
+
+
+def organisation_role_fits(job: Job, profile: SearchProfile) -> bool:
+    """An international organisation's post is the kind of work the person wants (MATCH-01).
+
+    A near miss is enough here — "Associate Data Scientist" against "Data Engineer" — and so is
+    a technology role, by its title or its job family, when the person's targets are technology.
+    The embedding pre-filter and the scoring cap still decide which of these are scored.
+    """
+    if near_miss(job.title, profile):
+        return True
+    targets = set().union(*(title_tokens(t) for t in profile.titles if t.strip())) if profile.titles else set()
+    family = job.international.family if job.international else None
+    return bool(targets & TECH_TARGET) and bool(TECH_ROLE.search(f"{job.title} {family or ''}"))
+
+
 def accepted_level_words(profile: SearchProfile) -> set[str]:
     """Title words the profile has explicitly opted into, so they can't hide a job."""
     out: set[str] = set()
@@ -243,6 +307,12 @@ def location_verdict(job: Job, profile: SearchProfile) -> tuple[str | None, bool
         return "remote", False
     if job.remote == "remote":
         return None, False  # `remote: any`, and this one is remote — where it nominally sits is moot
+    # SRCH-34: "International organisations, any duty station". An internationally recruited post
+    # moves the person who takes it, so its duty station is no reason to hide it; a locally
+    # recruited one (G and NO grades) is for residents or nationals, and follows the countries.
+    post = job.international
+    if profile.international and post is not None and post.recruitment != "local":
+        return None, False
     place = " ".join(filter(None, [job.location.city, job.location.country, job.location.raw])).lower()
     # "Hybrid", "Flexible", "Multiple locations": a working pattern, not a place, and nothing to
     # judge where the job is by. 21 jobs were hidden on 14 Nov as "Location isn't in your search:
@@ -333,6 +403,11 @@ def too_old(job: Job, profile: SearchProfile, now: int) -> str | None:
     window = RECENCY_MS.get(profile.recency)
     if window is None or not job.posted_at:
         return None
+    # SRCH-34: an international organisation's post stays open to its stated deadline — four to
+    # eight weeks is usual — and is not filled before it, which is the reason SRCH-24 keeps
+    # board postings to three weeks. Hidden for its age, most open UN vacancies would never show.
+    if job.international is not None and job.closes_at and job.closes_at[:10] >= iso(now)[:10]:
+        return None
     try:
         posted = parse_ms(job.posted_at)
     except (ValueError, TypeError):
@@ -359,14 +434,24 @@ def hidden_reason(job: Job, profile: SearchProfile, now: int | None = None) -> s
     term = excluded_term(job.title, profile)
     if term:
         return f"Title contains an excluded term: {term}"
-    senior = too_senior(job.title, profile)
-    if senior:
-        return f"Title is more senior than your search: {senior}"
+    # SRCH-34: an international organisation's grade says the level outright, so it decides
+    # instead of the title's words ("Head of Office" and "Associate Officer" both say little).
+    level = grade_level(job)
+    if level is not None:
+        above = grade_outside(level, job, profile)
+        if above:
+            return above
+    else:
+        senior = too_senior(job.title, profile)
+        if senior:
+            return f"Title is more senior than your search: {senior}"
     # After seniority, not before: "Head of Data" is both off-target and too senior, and "more
     # senior than your search" is the sharper thing to be told — it means the work is right and
     # the level isn't. What's left here is the genuinely different job, where "not one of your
     # titles" is exactly the point.
     off_target = title_mismatch(job.title, profile)
+    if off_target and job.international is not None and organisation_role_fits(job, profile):
+        off_target = None
     if off_target:
         # A near miss says so, and only one that would otherwise have passed: shown first in the
         # hidden list, it is where "Find more" points once every search has been sent (SRCH-26).
