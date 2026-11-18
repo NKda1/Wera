@@ -11,15 +11,23 @@ import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { Dialog } from "@/lib/ui/Dialog";
 import { Help, Label, Textarea } from "@/lib/ui/Field";
+import { JobLinks } from "@/lib/ui/JobLinks";
 import { Pill } from "@/lib/ui/Pill";
 import { Tabs } from "@/lib/ui/Tabs";
 import { useToast } from "@/lib/ui/Toast";
+import { cn } from "@/lib/ui/cn";
+import { CompanyPanel } from "./CompanyPanel";
+import { CvFileEditor } from "./CvFileEditor";
 import { AnswerPack, CvPaper, LetterPaper } from "./Documents";
 import { DraftProgress } from "./DraftProgress";
 import { ReviewRail } from "./ReviewRail";
 import type { CvLines } from "./SourceTag";
 
-type Tab = "cv" | "letter" | "answers";
+type Tab = "cv" | "letter" | "answers" | "company";
+type CvView = "lines" | "file";
+
+/** The note `Store.rewrite_letter` leaves on an application while its letter is redrafted alone. */
+const LETTER_REWRITE = "Rewriting the letter with the company brief";
 
 const NOTE_IDEAS = ["Make it shorter", "More about Python", "Focus on the agent work", "Keep it to one page"];
 
@@ -28,6 +36,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
   const toast = useToast();
   const [app, setApp] = useState(initial);
   const [tab, setTab] = useState<Tab>("cv");
+  const [cvView, setCvView] = useState<CvView>("lines");
   const [asking, setAsking] = useState(false);
   const [discarding, setDiscarding] = useState(false);
   const [busy, setBusy] = useState<string>();
@@ -102,6 +111,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
             {app.job.company} · {formatLocation(app.job)} · fit {app.job.fitTotal.toFixed(1)} ·{" "}
             {app.status === "drafting" ? "drafting now" : `drafted ${formatAgo(draftedAt)}`}
           </p>
+          <JobLinks job={app.job} className="mt-2" />
         </div>
         {/* On a narrow screen the primary action comes first and full width; it used to land
             alone on a second row under Discard. First in the markup too, so it is first to tab
@@ -151,7 +161,14 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
       {app.status === "drafting" || !pack ? (
         <Card className="mt-6 p-6">
           <h2 className="text-h2">Drafting your pack</h2>
-          <p className="mt-1 text-ink-2">{app.changeNote ? `Redrafting with your note: “${app.changeNote}”` : "Tailored CV, then cover letter, then an ATS check against the job."}</p>
+          <p className="mt-1 text-ink-2">
+            {/* The letter-only rewrite (`Store.rewrite_letter`) leaves its own note; it isn't one the person wrote. */}
+            {app.changeNote === LETTER_REWRITE
+              ? "Rewriting the cover letter with the company brief. The CV stays as it is."
+              : app.changeNote
+                ? `Redrafting with your note: “${app.changeNote}”`
+                : "Tailored CV, then cover letter, then an ATS check against the job."}
+          </p>
           <div className="mt-4">{app.draft ? <DraftProgress step={app.draft.step} progress={app.draft.progress} /> : null}</div>
         </Card>
       ) : (
@@ -166,13 +183,44 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
                 { id: "cv", label: "Tailored CV" },
                 { id: "letter", label: "Cover letter" },
                 { id: "answers", label: `Answer pack · ${answersCount}` },
+                { id: "company", label: "Company" },
               ]}
             />
           </div>
           <div className="mt-5 grid items-start gap-5 @4xl:grid-cols-[minmax(0,1fr)_320px]">
             <div role="tabpanel" id={`pack-panel-${tab}`} aria-labelledby={`pack-tab-${tab}`} className="min-w-0">
               {tab === "cv" ? (
-                <CvPaper doc={pack.cv} cv={cv} lines={lines} editable={editable} onSave={save("cv")} onToggleLine={toggleLine} />
+                <>
+                  <CvViewSwitch value={cvView} onChange={setCvView} />
+                  {cvView === "file" ? (
+                    <CvFileEditor
+                      appId={app.id}
+                      onSaved={(next) => {
+                        setApp((a) => ({ ...a, ...next }));
+                        router.refresh();
+                      }}
+                    />
+                  ) : (
+                    <CvPaper
+                      doc={pack.cv}
+                      cv={cv}
+                      lines={lines}
+                      editable={editable}
+                      rewritten={Boolean(pack.cvFile?.editedByUser)}
+                      onOpenFile={() => setCvView("file")}
+                      onSave={save("cv")}
+                      onToggleLine={toggleLine}
+                    />
+                  )}
+                </>
+              ) : tab === "company" ? (
+                <CompanyPanel
+                  app={app}
+                  editable={editable}
+                  busy={busy === "brief" ? "learn" : busy === "rewrite" ? "rewrite" : undefined}
+                  onLearn={() => run("brief", () => api.companyBrief(app.id), `Read what ${app.job.company} says about itself.`)}
+                  onRewrite={() => run("rewrite", () => api.rewriteLetter(app.id), "Rewriting the letter with the company brief…")}
+                />
               ) : tab === "letter" ? (
                 <LetterPaper letter={pack.letter} name={cv.person.name} lines={lines} editable={editable} onSave={save("letter")} />
               ) : (
@@ -188,6 +236,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
 
       {asking ? (
         <RequestChanges
+          rewritten={Boolean(pack?.cvFile?.editedByUser)}
           onClose={() => setAsking(false)}
           onSubmit={async (note) => {
             const ok = await run("regen", () => api.regenerate(app.id, note), "Redrafting with your note…");
@@ -224,6 +273,32 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
   );
 }
 
+/** The tailored CV line by line, with each line's source; or the RenderCV file the PDF is made from. */
+function CvViewSwitch({ value, onChange }: { value: CvView; onChange: (v: CvView) => void }) {
+  const views: [CvView, string][] = [
+    ["lines", "Lines and sources"],
+    ["file", "CV file and design"],
+  ];
+  return (
+    <div role="group" aria-label="How to show the CV" className="mb-4 flex flex-wrap gap-2">
+      {views.map(([id, label]) => (
+        <button
+          key={id}
+          type="button"
+          aria-pressed={value === id}
+          onClick={() => onChange(id)}
+          className={cn(
+            "inline-flex min-h-9 items-center border px-3 text-[13px] font-semibold transition-colors duration-150 pointer-coarse:min-h-11",
+            value === id ? "border-forest-700 bg-accent text-white" : "border-line bg-surface text-ink hover:border-forest-700 hover:text-forest-700",
+          )}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function StatusPill({ app }: { app: ApplicationWithJob }) {
   switch (app.status) {
     case "ready_for_review":
@@ -243,14 +318,18 @@ function StatusPill({ app }: { app: ApplicationWithJob }) {
   }
 }
 
-function RequestChanges({ onClose, onSubmit, busy }: { onClose: () => void; onSubmit: (note: string) => void; busy: boolean }) {
+function RequestChanges({ onClose, onSubmit, busy, rewritten }: { onClose: () => void; onSubmit: (note: string) => void; busy: boolean; rewritten: boolean }) {
   const [note, setNote] = useState("");
   return (
     <Dialog
       open
       onClose={onClose}
       title="Request changes"
-      description="WERA redrafts the CV and letter with your note. It can still only use lines from your master CV."
+      description={
+        rewritten
+          ? "WERA redrafts the CV and letter with your note, from lines in your master CV. Your own version of the CV file is replaced by the redraft; its theme stays."
+          : "WERA redrafts the CV and letter with your note. It can still only use lines from your master CV."
+      }
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>

@@ -130,3 +130,33 @@ def draft_pack(session: Session, app_id: str, *, note: str | None = None, ready:
 
 def _with_doc(inp, doc: TailoredCV):  # noqa: ANN001, ANN202 — a PackInput dataclass
     return replace(inp, doc=doc)
+
+
+async def redraft_letter(app_id: str) -> None:
+    """The letter again, alone, with the company brief (`Store.rewrite_letter`), then the ATS report
+    measured as the review screen measures it, CV file included. On failure the application is
+    parked as `changes_requested` with the reason, as a failed draft is."""
+    import asyncio
+
+    await asyncio.to_thread(_redraft_letter, app_id)
+
+
+def _redraft_letter(app_id: str) -> None:
+    from ..db.session import transaction
+
+    try:
+        with transaction() as session:
+            store = Store(session)
+            step_letter(session, app_id, note=None)
+            store.set_draft_step(app_id, "ats")
+            app, pack, job = store._app_row(app_id), store._load_pack(app_id), None
+            if pack is not None:
+                job = store._job(store._job_row(app.job_id))
+                pack.ats = store._measure_ats(app, pack, job)
+                store._save_pack(app_id, pack, ("ats",))
+            store.mark_ready(app_id)
+    except ApiError as err:
+        logfire.warn("Letter rewrite for {app_id} failed: {code}", app_id=app_id, code=err.code)
+        with transaction() as session:
+            store = Store(session)
+            store.mark_draft_failed(store.application_job_id(app_id), err.code, err.message)

@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ApiRequestError, api, type Estimate } from "@/lib/api";
+import { formatTime } from "@/lib/format";
 import type { IntakeChannel, IntakeRun, PlaceOption, RunPhase, SearchChannel, SearchProfile } from "@/lib/types";
 import { Button, Spinner } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -29,8 +30,9 @@ const PHASE_LABELS: Record<RunPhase, string> = {
   queued: "Starting",
   discovering: "Finding boards",
   planning: "Planning searches",
+  apis: "Asking job APIs",
   harvesting: "Reading postings",
-  searching: "Searching",
+  searching: "Searching Google",
   scraping: "Reading pages",
   feeds: "Checking feeds",
   reading: "Reading alerts",
@@ -45,8 +47,9 @@ const PHASE_LABELS: Record<RunPhase, string> = {
  *  queries while searching, pages while scraping, jobs while scoring — and labelling them all
  *  "queries" is what left the old panel reading "22 / 22 queries" through the scrape loop. */
 const PHASE_UNITS: Partial<Record<RunPhase, string>> = {
-  searching: "queries",
-  harvesting: "jobs",
+  apis: "searches",
+  searching: "searches",
+  harvesting: "jobs found",
   scraping: "pages",
   feeds: "employers",
   scoring: "jobs",
@@ -56,21 +59,20 @@ const PHASE_UNITS: Partial<Record<RunPhase, string>> = {
  *  `stepsFor` only while it is happening, because it is weekly and most runs skip it. */
 const STEPS: Record<IntakeChannel, RunPhase[]> = {
   // SRCH-20: plan, search, read, score — and read and score again until 8–12 are found.
-  board_search: ["planning", "searching", "harvesting", "scoring", "closing"],
+  board_search: ["planning", "apis", "searching", "harvesting", "scoring", "closing"],
   email_alert: ["reading", "collapsing", "filtering", "scoring", "closing"],
   watchlist: ["feeds", "collapsing", "filtering", "scoring", "closing"],
   rescore: ["scoring"],
   score_more: ["scoring", "planning", "searching", "harvesting"],
 };
 
-type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope" | "international">;
+type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope">;
 
 const whereOf = (p: SearchProfile): Where => ({
   countries: p.countries,
   locations: p.locations,
   remote: p.remote,
   cityScope: p.cityScope,
-  international: p.international,
 });
 
 /** PRF-05: show what a search will cost before it runs — and, first, where it will look (16 Nov). */
@@ -309,6 +311,7 @@ export function RunPanel({
                 {r.detail ? <p className="mt-1.5 text-small text-ink-2">{r.detail}</p> : null}
               </>
             ) : null}
+            <RunLog run={r} />
           </li>
         ))}
       </ul>
@@ -349,11 +352,62 @@ function stepsFor(r: IntakeRun): { label: string; state: StepState; detail?: str
   }));
 }
 
-/** How far through the current stage, in that stage's own unit. */
-function countFor(r: IntakeRun): string | undefined {
-  if (!r.total) return undefined;
+/** The current stage's count in its own unit: "3 / 12 jobs found". */
+function unitCount(r: IntakeRun): string | undefined {
   const unit = PHASE_UNITS[r.phase];
-  return unit ? `${r.done} / ${r.total} ${unit}` : undefined;
+  return r.total && unit ? `${r.done} / ${r.total} ${unit}` : undefined;
+}
+
+/** How far through the current stage: its percentage, and its count in its own unit. */
+function countFor(r: IntakeRun): string | undefined {
+  const count = unitCount(r);
+  const stage = stagePercent(r);
+  if (stage === undefined) return count;
+  return count ? `${stage}% · ${count}` : `${stage}%`;
+}
+
+/** UX-01 (17 Nov): the current stage's own percentage, from the run's `stageProgress` or, for a
+ *  stage that only counts, its done/total. Undefined when the stage has said neither. */
+function stagePercent(r: IntakeRun): number | undefined {
+  if (r.stageProgress > 0) return Math.round(r.stageProgress * 100);
+  if (r.total > 0) return Math.round((r.done / r.total) * 100);
+  return undefined;
+}
+
+/** What the run has done, step by step, with what each step found and how long it took. Open
+ *  while the run works, folded once it has finished — still there to read back. */
+function RunLog({ run }: { run: IntakeRun }) {
+  if (!run.log.length) return null;
+  const steps = [...run.log].reverse();
+  const list = (
+    <ol className="mt-2 flex flex-col gap-1 border-l-2 border-line pl-3 text-small">
+      {steps.map((step, i) => (
+        <li key={`${step.at}-${i}`} className="text-ink-2">
+          <span className="text-ink">{step.message}</span>
+          <span className="whitespace-nowrap">
+            {" "}
+            · {formatTime(step.at)}
+            {step.ms != null ? ` · ${seconds(step.ms)}` : ""}
+          </span>
+        </li>
+      ))}
+    </ol>
+  );
+  if (run.status === "running" || run.status === "queued") return list;
+  return (
+    <details className="mt-2">
+      <summary className="cursor-pointer text-small font-semibold text-forest-700">
+        What this run did ({run.log.length} {run.log.length === 1 ? "step" : "steps"})
+      </summary>
+      {list}
+    </details>
+  );
+}
+
+function seconds(ms: number): string {
+  if (ms < 1000) return "under a second";
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`;
 }
 
 function runStatus(r: IntakeRun): string {
@@ -364,8 +418,11 @@ function runStatus(r: IntakeRun): string {
     // above the bar and the active step below it can never disagree. The counts come from the
     // run rather than a constant: `queries` used to be a hardcoded 20, which was both frozen at
     // "0 / 20" for the whole search and wrong as soon as the query grid changed shape.
-    const count = countFor(r);
-    return count ? `${PHASE_LABELS[r.phase]} · ${count}` : `${PHASE_LABELS[r.phase]}…`;
+    // The whole run here, and the step's own percentage on the step below, so the two numbers
+    // never sit side by side with nothing to tell them apart.
+    const count = unitCount(r);
+    const whole = `${Math.round(r.progress * 100)}% overall`;
+    return count ? `${whole} · ${PHASE_LABELS[r.phase]} · ${count}` : `${whole} · ${PHASE_LABELS[r.phase]}…`;
   }
   // Neither of these *finds* anything, by design: they judge jobs WERA already has. "nothing
   // new" — true of every one of them ever — would read as a run that failed.

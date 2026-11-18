@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from ..domain.vocab import backing_text, cv_line_index, text_has_term
 from ..schemas.cv import MasterCV
 from ..schemas.jobs import FitEvidence, JobKeyword
-from ..schemas.pack import JobAnalysis
+from ..schemas.pack import CompanyBrief, JobAnalysis
 
 # What each slot is for, in the template's own terms (`cover_letter_template.body_segments`).
 SLOTS = {
@@ -124,12 +124,23 @@ def keywords_text(p: LetterPlan) -> str:
     return "\n".join(lines)
 
 
-def context_text(analysis: JobAnalysis | None) -> str:
+def context_text(analysis: JobAnalysis | None, brief: CompanyBrief | None = None) -> str:
     """The strategic context, quote by quote. A field the post doesn't state is left out, so its
-    clause in the template is left out with it — the letter can't fill what isn't there."""
+    clause in the template is left out with it — the letter can't fill what isn't there.
+
+    With a company brief (18 Nov), its facts from the company's own site follow, each with the
+    exact words it rests on — already checked against the page, and checked again if quoted."""
     if analysis is None:
-        return "Not available for this post. Ground the company half in `companyQuote` alone."
-    stated = {k: v for k, v in analysis.strategic_context.model_dump(by_alias=False).items() if v}
-    if not stated:
-        return "The post states none of these. Ground the company half in `companyQuote` alone."
-    return "\n".join(f'- {name}: "{quote}"' for name, quote in stated.items())
+        text = "Not available for this post. Ground the company half in `companyQuote` alone."
+    else:
+        stated = {k: v for k, v in analysis.strategic_context.model_dump(by_alias=False).items() if v}
+        text = (
+            "\n".join(f'- {name}: "{quote}"' for name, quote in stated.items())
+            if stated
+            else "The post states none of these. Ground the company half in `companyQuote` alone."
+        )
+    facts = [i for i in brief.items if i.source == "site"] if brief and brief.site else []
+    if facts and brief and brief.site:
+        lines = "\n".join(f'- {i.text} — "{i.quote}"' for i in facts)
+        text += f"\n\nVerified facts from the company's own site ({brief.site.url}), with their exact words:\n{lines}"
+    return text

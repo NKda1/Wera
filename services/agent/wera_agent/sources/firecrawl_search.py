@@ -346,3 +346,64 @@ def credits_remaining() -> int | None:
         return None
     value = getattr(usage, "remaining_credits", None)
     return int(value) if isinstance(value, int | float) else None
+
+
+@dataclass
+class FirecrawlSearch:
+    """Firecrawl's web search behind Serper's interface (SRCH-26, 18 Nov): the stand-in a search
+    asks when Serper's day is spent or it is failing, so APIs, Google and Firecrawl each keep a
+    job and a search doesn't stop because one provider did.
+
+    At most `max_queries` a search, each `SEARCH_CREDITS` charged to the run's `spend` inside its
+    credit cap. Postings it finds are tagged as Firecrawl's (`targets.source_of`), so the share
+    each source takes of a search can see them.
+    """
+
+    max_queries: int
+    spend: SearchOutcome
+    caps: SearchCaps
+    sent: int = 0
+    answered: int = 0
+    cached: int = 0
+    coalesced: int = 0
+    errors: list[str] = field(default_factory=list)
+    stopped: str | None = None
+
+    @property
+    def credits_used(self) -> int:
+        return self.answered * SEARCH_CREDITS
+
+    def search(self, q: str, *, gl: str, hl: str, page: int = 1) -> list[Any] | None:
+        from .serper import WINDOW, Result
+
+        if self.stopped is not None or page > 1:
+            return None
+        if self.sent >= self.max_queries:
+            self.stopped = "cap"
+            return None
+        if self.spend.credits_used + SEARCH_CREDITS > self.caps.max_credits:
+            self.stopped = "credits"
+            return None
+        self.sent += 1
+        result = _retrying(
+            lambda: _client().search(q, sources=["web"], limit=10, tbs=WINDOW, country=gl.upper() or None),
+            f"search {q[:60]}",
+            self.errors,
+        )
+        self.spend.queries_run += 1
+        self.spend.credits_used += SEARCH_CREDITS
+        if result is None:
+            return None
+        self.answered += 1
+        items = getattr(result, "web", None) or []
+        return [
+            Result(
+                url=str(getattr(item, "url", "") or ""),
+                title=str(getattr(item, "title", "") or ""),
+                snippet=str(getattr(item, "description", "") or ""),
+                date=None,
+                position=i + 1,
+            )
+            for i, item in enumerate(items)
+            if getattr(item, "url", None)
+        ]

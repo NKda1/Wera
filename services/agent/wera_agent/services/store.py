@@ -38,7 +38,7 @@ from ..db.models import (
     MasterCvRow,
     ProfileRow,
 )
-from ..domain import cv_build, cv_extract, dedupe, filters
+from ..domain import cv_build, cv_extract, dedupe, description, filters
 from ..domain.applications import ALLOWED
 from ..domain.cv_profile import build_profile
 from ..domain.places import COUNTRIES
@@ -47,7 +47,7 @@ from ..domain.scoring import build_fit_report, evergreen, js_round, liveness, po
 from ..domain.text import is_linkedin_url, title_case
 from ..domain.vocab import cv_line_index, master_cv_text, text_has_term
 from ..errors import ApiError, validation_error
-from ..llm.demo import PackInput, guard_cv, refresh_ats
+from ..llm.demo import PackInput, guard_cv
 from ..llm.gateway import structured
 from ..llm.pricing import pending_calls, spent_this_week_usd
 from ..llm.prompts import cv_text, profile_text, untrusted
@@ -68,16 +68,29 @@ from ..schemas.api import (
 )
 from ..schemas.applications import Application, ApplicationJob, ApplicationListItem, ApplicationWithJob, DraftProgress
 from ..schemas.cv import Contact, CvLine, MasterCV
+from ..schemas.cv_file import CvFile, CvFileIn, CvFileState, CvIssue, CvPreview
 from ..schemas.cv_profile import CvProfile
 from ..schemas.jobs import Ats, FitEvidence, FitWeights, FoundBy, Job, ScoredJob, SubScore
 from ..schemas.learning import Suggestion, SuggestionList
 from ..schemas.llm_outputs import CvProfileOutput, ParsedCv, ProfileProposal
-from ..schemas.pack import AnswerItem, AtsReport, Cited, CoverLetter, CvItem, CvSection, JobAnalysis, Pack, TailoredCV
+from ..schemas.pack import (
+    AnswerItem,
+    AtsReport,
+    Cited,
+    CompanyBrief,
+    CoverLetter,
+    CvItem,
+    CvSection,
+    JobAnalysis,
+    Pack,
+    TailoredCV,
+)
 from ..schemas.profile import SearchProfile, WhereChange
-from ..schemas.runs import ChannelSummary, Estimate, IntakeRun, RunError, RunIds
+from ..schemas.runs import ChannelSummary, Estimate, IntakeRun, RunError, RunIds, RunStep
 from ..schemas.settings import DEFAULT_SEARCH_CRON, SecretsStatus, SettingsPatch, SettingsResponse
 from ..schemas.strategy import PlannedQuery, TargetMatrix
 from ..settings import get_settings, llm_provider_name
+from ..sources.ats_feeds import careers_url
 from ..sources.harvest import BATCH
 from . import learning, providers
 from .demo_data import DAY, MIN, first_run_seeds, seed_to_job
@@ -118,6 +131,14 @@ def _latest_ms(*stamps: str | None) -> int | None:
     return max(found) if found else None
 
 
+# When the job world was last reset: the daily scoring limit counts from here (`Store.scored_today`).
+SCORE_WINDOW_KEY = "score_window_start"
+
+# A Strategist plan that failed is not asked for again for this long (`Store.plan_recently_failed`).
+PLAN_FAILED_KEY = "plan_failed"
+PLAN_RETRY_MS = 6 * 60 * 60 * 1000
+
+
 def get_kv(session: Session, key: str, default: Any = None) -> Any:
     row = session.get(KvRow, key)
     return default if row is None else row.value
@@ -131,6 +152,29 @@ def set_kv(session: Session, key: str, value: Any) -> None:
         row.value = value
 
 
+def current_view(job: Job) -> Job:
+    """The job as the screens read it (18 Nov): its description laid out by the current formatter,
+    and its summary only while it still describes the post.
+
+    The view is computed when a job is saved, and again when its description has changed since; this
+    also covers jobs saved before it existed or under an older formatter (`description.VERSION`),
+    so they read the same until `wera jobs reformat` stores theirs. A summary of a post that has since changed is hidden, not shown as
+    if it were current: the person asks for a new one.
+    """
+    if not job.description_md:
+        job.description_view = None
+    else:
+        view, key = job.description_view, description.source_key(job.description_md, title=job.title, company=job.company)
+        if view is None or view.version != description.VERSION or view.of != key:
+            job.description_view = description.describe(job.description_md, title=job.title, company=job.company)
+    if job.summary is not None:
+        from ..nodes import fit
+
+        if job.summary.job_hash != fit.job_hash(job):
+            job.summary = None
+    return job
+
+
 def save_job(
     session: Session,
     job: Job,
@@ -139,11 +183,13 @@ def save_job(
     *,
     created_at: str | None = None,
     cv_version: int | None = None,
+    cv_hash: str | None = None,
 ) -> None:
     """One job, and optionally the fit evidence that goes with it.
 
     Pass `cv_version` whenever `evidence` is given: it is part of the score's cache key, and a
-    row without it is a score WERA can't tell is stale.
+    row without it is a score WERA can't tell is stale. `cv_hash` (`fit.scoring_fingerprint`) is
+    the better key when the caller has the CV; without it the version is the key.
     """
     row = session.get(JobRow, job.id)
     if row is None:
@@ -156,7 +202,7 @@ def save_job(
     row.posted_at = job.posted_at
     row.first_seen = job.first_seen
     row.snoozed_until = job.snoozed_until
-    row.data = job.model_dump(mode="json")
+    row.data = current_view(job).model_dump(mode="json")
     if questions is not None:
         row.questions = questions
     if evidence is not None:
@@ -178,13 +224,14 @@ def save_job(
                     evidence=data,
                     model=evidence.model,
                     cv_version=cv_version,
+                    cv_hash=cv_hash,
                     job_hash=job_hash(job),
                     created_at=created_at or iso(now_ms()),
                 )
             )
         else:
             fit.evidence, fit.model = data, evidence.model
-            fit.cv_version, fit.job_hash = cv_version, job_hash(job)
+            fit.cv_version, fit.cv_hash, fit.job_hash = cv_version, cv_hash, job_hash(job)
 
 
 def _local(ms: int) -> datetime:
@@ -282,7 +329,7 @@ class Store:
         return SearchProfile.model_validate(self._profile_row().data)
 
     def _job(self, row: JobRow) -> Job:
-        return Job.model_validate(row.data)
+        return current_view(Job.model_validate(row.data))
 
     def _job_row(self, job_id: str) -> JobRow:
         row = self.s.get(JobRow, job_id)
@@ -337,7 +384,12 @@ class Store:
         row = self.s.get(FitReportRow, job.id)
         if row is None:
             return False
-        if row.cv_version is not None and row.cv_version != self.cv().version:
+        # The scoring fingerprint when the score has one (18 Nov): a save that changed nothing the
+        # scorer reads is not a reason to call a score out of date. The version otherwise.
+        if row.cv_hash is not None:
+            if row.cv_hash != self.cv_fingerprint():
+                return True
+        elif row.cv_version is not None and row.cv_version != self.cv().version:
             return True
         if row.model and row.model != self.scoring_model():
             return True
@@ -485,7 +537,15 @@ class Store:
                     job, evidence, questions = seed_to_job(seed, now)
                     job.first_seen = iso(now)
                     job.found_by = FoundBy(run_id=run.id, channel="board_search", at=iso(now))
-                    save_job(self.s, job, evidence, questions, created_at=iso(now), cv_version=self.cv().version)
+                    save_job(
+                        self.s,
+                        job,
+                        evidence,
+                        questions,
+                        created_at=iso(now),
+                        cv_version=self.cv().version,
+                        cv_hash=self.cv_fingerprint(),
+                    )
                     added.append(job.id)
                 run.results, run.new_jobs, run.credits_used = 118, len(added), 40 + len(added) * 5
             else:
@@ -539,6 +599,33 @@ class Store:
         """MATCH-12's switch: on unless the person turned it off in Settings."""
         return self._settings().get("learnedRanking") is not False
 
+    def daily_score_limit(self) -> bool:
+        """MATCH-05's switch: the 24-hour scoring ceiling, on unless turned off in Settings."""
+        return self._settings().get("dailyScoreLimit") is not False
+
+    def score_allowance(self) -> int | None:
+        """How many more jobs may be scored now, or None when the daily limit is switched off."""
+        if not self.daily_score_limit():
+            return None
+        return max(wera().max_scored_per_day - self.scored_today(), 0)
+
+    def score_cap_message(self) -> str:
+        """Why scoring stopped, and when it can start again: the oldest score in the window ages
+        out 24 hours after it was made, so that is when the next one is allowed."""
+        limit = wera().max_scored_per_day
+        oldest = self.s.scalar(
+            select(func.min(LlmCallRow.called_at)).where(
+                LlmCallRow.task == "fit.score",
+                LlmCallRow.attempt == 1,
+                LlmCallRow.called_at >= max(iso(self.now - DAY), str(get_kv(self.s, SCORE_WINDOW_KEY) or "")),
+            )
+        )
+        when = f"; the next frees at {_hhmm(iso(parse_ms(oldest) + DAY))}" if oldest else ""
+        return (
+            f"The scoring limit of {limit} jobs in 24 hours is used up{when}. The rest are waiting. "
+            "Turn the daily limit off in Settings to keep going; the weekly budget still applies."
+        )
+
     # ---- MATCH-13: what the decisions suggest changing ----
 
     def learning_suggestions(self) -> SuggestionList:
@@ -586,6 +673,14 @@ class Store:
         )
         return self.s.scalar(stmt) or 0
 
+    def stale_on_board(self) -> int:
+        """Jobs on the board with a score from before the CV changed (18 Nov): what the Jobs screen
+        offers to re-score once the review list is done. Unscored jobs are `awaiting_score`."""
+        if not self.awaiting_score() and not self.s.scalar(select(func.count()).select_from(FitReportRow)):
+            return 0
+        waiting = self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model())
+        return sum(1 for j in waiting if self.s.get(FitReportRow, j.id) is not None)
+
     def scored_today(self) -> int:
         """How many jobs reached the scoring tier in the last 24 hours (MATCH-05).
 
@@ -597,16 +692,26 @@ class Store:
         whole day's allowance to a single run's pre-filter, so nothing had to remember anything;
         now the allowance goes out in batches of eight and three "score more" clicks have to add
         up to no more than one old run was permitted.
+
+        First attempts only (17 Nov): a retry is the same job asked again, and counting it — with a
+        failure the gateway had recorded twice — put 40 rows against 38 jobs on 16 Nov.
         """
-        since = iso(self.now - DAY)
+        # From the later of a day ago and the last reset (18 Nov): a reset deletes the scores those
+        # calls bought, and counting them left a cleared list that couldn't be scored until the
+        # next day. The weekly budget still counts every call (COST-01).
+        since = max(iso(self.now - DAY), str(get_kv(self.s, SCORE_WINDOW_KEY) or ""))
         written = self.s.scalar(
-            select(func.count()).select_from(LlmCallRow).where(LlmCallRow.task == "fit.score", LlmCallRow.called_at >= since)
+            select(func.count())
+            .select_from(LlmCallRow)
+            .where(LlmCallRow.task == "fit.score", LlmCallRow.attempt == 1, LlmCallRow.called_at >= since)
         )
         # Plus this unit of work's own calls, which are written only when it commits (`gateway._record`).
-        pending = sum(1 for r in pending_calls(self.s) if r["task"] == "fit.score" and r["called_at"] >= since)
+        pending = sum(
+            1 for r in pending_calls(self.s) if r["task"] == "fit.score" and r["attempt"] == 1 and r["called_at"] >= since
+        )
         return int(written or 0) + pending
 
-    def jobs_needing_score(self, *, cv_version: int, model: str) -> list[Job]:
+    def jobs_needing_score(self, *, cv_version: int, model: str, scope: str = "board") -> list[Job]:
         """Every new job whose score is missing or no longer valid (SCH-02, COST-04).
 
         The gap this closes: `judge` scored only the jobs the *current run* had just found. Two
@@ -624,9 +729,22 @@ class Store:
 
         # Newest first, so the order is deterministic and the day's cap favours recent postings
         # when the embedding pre-filter has nothing to choose between.
-        rows = self.s.scalars(select(JobRow).where(JobRow.status == "new").order_by(JobRow.first_seen.desc())).all()
+        if scope == "review":
+            # The review list (18 Nov): what the person is acting on — shortlisted, in an
+            # application, or with a pack in Review or the tracker — re-scored before the board.
+            applied = select(ApplicationRow.job_id).where(ApplicationRow.status != "discarded")
+            rows = self.s.scalars(
+                select(JobRow)
+                .where(JobRow.status.in_(("shortlisted", "in_application")) | JobRow.id.in_(applied))
+                .order_by(JobRow.first_seen.desc())
+            ).all()
+        else:
+            rows = self.s.scalars(select(JobRow).where(JobRow.status == "new").order_by(JobRow.first_seen.desc())).all()
         jobs = [self._job(r) for r in rows]
-        return [j for j in jobs if fit.cached_evidence(self.s, j, cv_version=cv_version, model=model) is None]
+        fingerprint = self.cv_fingerprint()
+        return [
+            j for j in jobs if fit.cached_evidence(self.s, j, cv_version=cv_version, model=model, cv_hash=fingerprint) is None
+        ]
 
     def list_awaiting_score(self, *, limit: int) -> list[Job]:
         """New jobs with no fit report, newest first — the queue, not just its size.
@@ -797,18 +915,28 @@ class Store:
         ]
 
     def places(self) -> list[PlaceOption]:
-        """SRCH-11: every country a search can target, with the boards and APIs that cover it.
+        """SRCH-11: every country a search can target, with the boards and APIs that cover it —
+        within the markets (`markets.regions`), and any saved country outside them, unsearched.
 
         Read from the same gates a search uses (`Site.reviewed`, `feeds.skipped`), so a country
         never promises an API whose key is missing. Asked as an interactive search, which is
         the one that has a person for Careerjet; a scheduled run may skip it.
         """
+        from ..domain.places import market_countries
         from ..sources import feeds
 
         person = feeds.Person(ip="", user_agent="")
         boards = [s for s in sites() if s.reviewed]
+        markets = market_countries()
+        # A region's main markets: the countries a job API covers, which a region's checkbox ticks.
+        covered = {c.upper() for c in [*feeds.ADZUNA_COUNTRIES, *feeds.CAREERJET_LOCALES]}
+        saved = set(self._profile().countries)
         out: list[PlaceOption] = []
         for code, country in COUNTRIES.items():
+            # The markets (17 Nov: Europe and North America), and a saved country outside them,
+            # so the picker can name it and say it isn't searched.
+            if code not in markets and code not in saved:
+                continue
             out.append(
                 PlaceOption(
                     code=code,
@@ -820,6 +948,8 @@ class Store:
                         for fid, f in feeds.FEEDS.items()
                         if feeds.skipped(fid, countries={code.lower()}, person=person) is None
                     ],
+                    main=code in markets and code in covered,
+                    searched=code in markets,
                 )
             )
         return out
@@ -871,6 +1001,8 @@ class Store:
             hidden_total=self.count_jobs("hidden"),
             near_misses=self.count_near_misses(),
             awaiting_score=self.awaiting_score(),
+            stale_scores=self.stale_on_board(),
+            score_cap_message=self.score_cap_message() if self.score_allowance() == 0 else None,
             awaiting=self.list_awaiting_score(limit=self.HIDDEN_SHOWN),
             find_more_size=wera().surface.max,
             snoozed=self.count_jobs("snoozed"),
@@ -1089,7 +1221,7 @@ class Store:
         if existing is not None:
             raise ApiError(409, "ALREADY_KNOWN", f"WERA already has this job: {existing.title} at {existing.company}.")
         job.found_by = FoundBy(channel="manual", at=iso(self.now))
-        save_job(self.s, job, evidence, questions, created_at=iso(self.now), cv_version=cv.version)
+        save_job(self.s, job, evidence, questions, created_at=iso(self.now), cv_version=cv.version, cv_hash=self.cv_fingerprint())
         self.s.flush()
         return self.scored(job)
 
@@ -1146,6 +1278,8 @@ class Store:
         inp = self.pack_input(app.job_id, note=note or app.change_note)
         if self.has_document(app.id, "analysis"):
             inp.analysis = self.load_document(app.id, "analysis", JobAnalysis)
+        if self.has_document(app.id, "company"):
+            inp.brief = self.load_document(app.id, "company", CompanyBrief)
         return inp
 
     def save_document(self, app_id: str | None, kind: str, document: Any) -> None:
@@ -1578,6 +1712,8 @@ class Store:
             ats=AtsReport.model_validate(latest["ats"]),
             answers=[AnswerItem.model_validate(a) for a in latest.get("answers", {}).get("items", [])],
             analysis=JobAnalysis.model_validate(latest["analysis"]) if "analysis" in latest else None,
+            cv_file=CvFileState.model_validate(latest["rendercv"]) if "rendercv" in latest else None,
+            company=CompanyBrief.model_validate(latest["company"]) if "company" in latest else None,
         )
 
     def _save_pack(self, app_id: str, pack: Pack, kinds: tuple[str, ...] = PACK_KINDS) -> None:
@@ -1632,6 +1768,7 @@ class Store:
                 remote=job.remote,
                 apply_url=job.apply_url,
                 linkedin_url=job.linkedin_url,
+                careers_url=careers_url(job.ats),
                 fit_total=fit.total,
             ),
             draft=self._draft(app),
@@ -1659,6 +1796,11 @@ class Store:
         self._assert_budget()
         # Back to drafting. The graph redrafts from Gate 2 with the note as hints; the previous
         # versions of each document stay, so nothing the person saw is lost (G2-02).
+        stored = self._cv_file_row(app.id)
+        if stored and stored.get("editedByUser"):
+            # The redraft writes a new tailored CV, and a file still holding the old rewrite would
+            # quietly keep it out of the PDF. The design stays; the dialog said the rewrite goes.
+            self._save_document(app.id, "rendercv", {**stored, "editedByUser": False})
         app.status = "drafting"
         app.change_note = note.strip() or None
         app.draft_started_at = iso(self.now)
@@ -1717,6 +1859,13 @@ class Store:
         changed: tuple[str, ...]
 
         if kind == "cv":
+            if pack.cv_file and pack.cv_file.edited_by_user:
+                raise ApiError(
+                    409,
+                    "CV_FILE_EDITED",
+                    "You've rewritten this CV in the file editor, and the PDF uses your version. "
+                    "Discard those edits there to change lines here.",
+                )
             doc = pack.cv
             if patch.target == "summary":
                 if not text:
@@ -1745,9 +1894,7 @@ class Store:
                     raise ApiError(422, "VALIDATION", "A line can't be empty. Remove it instead.")
                 bullet.text = text
                 bullet.edited_by_user = True
-            pack.ats = refresh_ats(
-                pack, cv=self.cv(), evidence=self._evidence(job.id), cv_pages=self._settings()["cvPages"], job=job
-            )
+            pack.ats = self._measure_ats(app, pack, job)
             changed = ("cv", "ats")
         elif kind == "letter":
             m = re.fullmatch(r"p(\d+)", patch.target)
@@ -1762,9 +1909,7 @@ class Store:
             pack.letter.word_count = sum(len([w for w in re.split(r"\s+", p.text) if w]) for p in pack.letter.paragraphs)
             # The ATS report measures the letter too now, so an edit that adds or removes a
             # keyword has to show up there — the same reason a CV edit refreshes it.
-            pack.ats = refresh_ats(
-                pack, cv=self.cv(), evidence=self._evidence(job.id), cv_pages=self._settings()["cvPages"], job=job
-            )
+            pack.ats = self._measure_ats(app, pack, job)
             changed = ("letter", "ats")
         elif kind == "answers":
             answer = next((a for a in pack.answers if a.id == patch.target), None)
@@ -1776,6 +1921,228 @@ class Store:
             raise ApiError(404, "NOT_FOUND", "Unknown document.")
         self._save_pack(app.id, pack, changed)
         return self._with_job(app, True, pack)
+
+    # ---- the CV file (EXP-01, 18 Nov): RenderCV ----
+
+    def _cv_file_row(self, app_id: str) -> dict[str, Any] | None:
+        row = self.s.scalar(
+            select(DocumentRow)
+            .where(DocumentRow.application_id == app_id, DocumentRow.kind == "rendercv")
+            .order_by(DocumentRow.version.desc())
+            .limit(1)
+        )
+        return row.content if row else None
+
+    def _cv_document(self, app: ApplicationRow, pack: Pack, job: Job) -> tuple[dict[str, Any], str | None, list[str]]:
+        """The CV file as it stands: the document, the person's own text if they rewrote it, and
+        any roles it had to leave out.
+
+        Until they rewrite the `cv:` part it is rebuilt from the tailored CV on every read, with
+        their design, so a line edited on the review screen is in the PDF without a second step.
+        """
+        from ..export import cv_yaml
+
+        stored = self._cv_file_row(app.id)
+        if stored and stored.get("editedByUser"):
+            return cv_yaml.parse(stored["yaml"]), stored["yaml"], []
+        design = locale = None
+        if stored:
+            try:
+                prior = cv_yaml.parse(stored["yaml"])
+                design, locale = prior.get("design"), prior.get("locale")
+            except cv_yaml.CvFileInvalid:
+                logfire.warn("Stored CV file for {app_id} no longer parses; using the default design", app_id=app.id)
+        document, unresolved = cv_yaml.build(
+            pack.cv, self.cv(), design=design or cv_yaml.default_design(size=cv_yaml.page_size(job)), locale=locale
+        )
+        return document, None, unresolved
+
+    def _cv_dated(self, app: ApplicationRow) -> datetime:
+        """The date a CV is rendered as: approval, so an approved pack's bytes never change (EXP-03)."""
+        return datetime.fromisoformat(app.approved_at or app.created_at)
+
+    def _reviewable(self, app_id: str) -> tuple[ApplicationRow, Pack, Job]:
+        app = self._app_row(app_id)
+        pack = self._load_pack(app.id) if app.status != "drafting" else None
+        if pack is None:
+            raise ApiError(409, "NO_PACK", "This application has no drafted pack yet.")
+        return app, pack, self._job(self._job_row(app.job_id))
+
+    def _measure_ats(self, app: ApplicationRow, pack: Pack, job: Job) -> AtsReport:
+        """The ATS report for the CV that will be sent: the file's text, and the page count of the
+        PDF it renders to. A rewritten file is read back as a tailored CV for the parts that
+        need structure (which line is in the latest role); the pack's own draft isn't changed."""
+        from ..export import cv_pdf, cv_yaml
+        from ..nodes.ats import build_ats
+
+        cv = self.cv()
+        document, own, _ = self._cv_document(app, pack, job)
+        pages: int | None = None
+        try:
+            pages = cv_pdf.page_count(cv_pdf.render(document, self.get_contact(), on=self._cv_dated(app)))
+        except Exception as err:  # the editor and the lint both say why; the estimate stands in
+            logfire.warn("CV file for {app_id} didn't render for the ATS check: {err}", app_id=app.id, err=str(err))
+        return build_ats(
+            cv_yaml.as_tailored(document, pack.cv, cv) if own is not None else pack.cv,
+            cv=cv,
+            evidence=self._evidence(job.id),
+            cv_pages=self._settings()["cvPages"],
+            job=job,
+            letter=pack.letter,
+            text=cv_yaml.text(document),
+            pages=pages,
+        )
+
+    def cv_file(self, app_id: str) -> CvFile:
+        from ..export import cv_yaml
+
+        self.settle()
+        app, pack, job = self._reviewable(app_id)
+        document, own, unresolved = self._cv_document(app, pack, job)
+        design = document.get("design") or {}
+        size = (design.get("page") or {}).get("size") or cv_yaml.page_size(job)
+        name, location, links = cv_yaml.header(document)
+        return CvFile(
+            yaml=own if own is not None else cv_yaml.dump(document),
+            theme=design.get("theme") or cv_yaml.DEFAULT_THEME,
+            page_size="us-letter" if size == "us-letter" else "a4",
+            edited_by_user=own is not None,
+            editable=app.status == "ready_for_review",
+            themes=cv_yaml.themes("us-letter" if size == "us-letter" else "a4"),
+            name=name,
+            location=location,
+            links=links,
+            blocks=cv_yaml.blocks(document),
+            unresolved_role_ids=unresolved,
+        )
+
+    def save_cv_file(self, app_id: str, body: CvFileIn) -> tuple[CvFile, ApplicationWithJob]:
+        """The person's file, or WERA's again (`reset`). Their wording is theirs, as with any edit
+        (G2-02): it isn't re-guarded, and it is marked as theirs."""
+        from ..export import cv_pdf, cv_yaml
+
+        self.settle()
+        app, pack, job = self._reviewable(app_id)
+        if app.status != "ready_for_review":
+            raise ApiError(409, "INVALID_STATE", "Only a pack waiting for review can be edited.")
+        current, _, _ = self._cv_document(app, pack, job)
+        if body.reset:
+            document, _ = cv_yaml.build(pack.cv, self.cv(), design=current.get("design"), locale=current.get("locale"))
+            text, edited = cv_yaml.dump(document), False
+        else:
+            if body.yaml is None:
+                raise ApiError(422, "VALIDATION", "Send the file, or reset it.")
+            try:
+                document = cv_yaml.load(body.yaml)
+                # RenderCV can accept a file Typst then can't set (a hand-written `#call`), so
+                # nothing is saved that wouldn't download.
+                cv_pdf.render(document, self.get_contact(), on=self._cv_dated(app))
+            except cv_yaml.CvFileInvalid as err:
+                raise _cv_file_error(err.issues) from err
+            except Exception as err:
+                raise _cv_file_error(
+                    [CvIssue(message=f"RenderCV accepted the file but couldn't typeset it: {_first_line(err)}")]
+                ) from err
+            derived, _ = cv_yaml.build(pack.cv, self.cv(), design=document.get("design"), locale=document.get("locale"))
+            text, edited = body.yaml, cv_yaml.content(document) != cv_yaml.content(derived)
+        theme = (document.get("design") or {}).get("theme") or cv_yaml.DEFAULT_THEME
+        self._save_document(app.id, "rendercv", {"yaml": text, "theme": theme, "editedByUser": edited})
+        pack.cv_file = CvFileState(theme=theme, edited_by_user=edited)
+        pack.ats = self._measure_ats(app, pack, job)
+        self._save_pack(app.id, pack, ("ats",))
+        return self.cv_file(app_id), self._with_job(app, True, pack)
+
+    def preview_cv_file(self, app_id: str, body: CvFileIn) -> CvPreview:
+        """The file as page images, saved or not. Problems come back as issues, not errors: the
+        editor asks while the person types, and a half-written line is not a failure."""
+        from ..export import cv_pdf, cv_yaml
+
+        app, pack, job = self._reviewable(app_id)
+        try:
+            document = (
+                cv_yaml.load(body.yaml) if body.yaml is not None and not body.reset else self._cv_document(app, pack, job)[0]
+            )
+            return CvPreview(pages=cv_pdf.preview(document, self.get_contact(), on=self._cv_dated(app)), issues=[])
+        except cv_yaml.CvFileInvalid as err:
+            return CvPreview(pages=[], issues=err.issues)
+        except Exception as err:
+            return CvPreview(pages=[], issues=[CvIssue(message=f"RenderCV couldn't typeset it: {_first_line(err)}")])
+
+    # ---- the company brief (18 Nov) ----
+
+    def company_brief(self, app_id: str) -> ApplicationWithJob:
+        """What the post and the company's own About page say about it, each item quoted and
+        checked (`llm_outputs.CompanyBriefOutput`). One page, one fast-tier call. A brief without
+        a site page says why there isn't one, and is written from the post alone."""
+        from ..nodes.fit import _job_block
+        from ..schemas.llm_outputs import CompanyBriefOutput
+        from ..schemas.pack import BriefItem, CompanySource
+        from ..sources import company_page
+
+        self.settle()
+        app, pack, job = self._reviewable(app_id)
+        self._assert_budget()
+        page, note = company_page.read(job)
+        site = untrusted(f"page from {page.url}", page.text) if page else f"No page from the company's own site. {note}"
+        out = structured(
+            self.s,
+            "company.brief",
+            CompanyBriefOutput,
+            {"job": _job_block(job), "site": site},
+            context={"post": job.description_md or "", "site": page.text if page else "", "company": job.company},
+        )
+        brief = CompanyBrief(
+            company=job.company,
+            items=[BriefItem.model_validate(i.model_dump()) for i in out.items],
+            site=CompanySource(url=page.url, fetched_at=iso(self.now), text_hash=page.text_hash, text=page.text)
+            if page
+            else None,
+            site_note=note,
+            model=self._settings()["models"]["fast"],
+            created_at=iso(self.now),
+        )
+        self._save_document(app.id, "company", brief.model_dump(mode="json"))
+        pack.company = brief
+        return self._with_job(app, True, pack)
+
+    def rewrite_letter(self, app_id: str) -> ApplicationWithJob:
+        """Redraft the letter alone, with the company brief (18 Nov). The CV, its file and the
+        answers are kept; the letter goes back to drafting and the review screen waits on it."""
+        from . import drafting
+
+        self.settle()
+        app = self._app_row(app_id)
+        if app.status != "ready_for_review" or self._load_pack(app.id) is None:
+            raise ApiError(409, "INVALID_STATE", "Only a pack waiting for review can have its letter rewritten.")
+        self._assert_budget()
+        app.status, app.draft_step, app.change_note = "drafting", "letter", "Rewriting the letter with the company brief"
+        app.draft_started_at = iso(self.now)
+        self.s.add(
+            DecisionRow(
+                job_id=app.job_id,
+                gate=2,
+                decision="request_changes",
+                note="letter only, with the company brief",
+                decided_at=iso(self.now),
+            )
+        )
+        self.s.flush()
+        self.defer(lambda: drafting.redraft_letter(app_id), name=f"letter:{app_id}")
+        return self._with_job(app, True)
+
+    def cv_pdf(self, app_id: str) -> bytes:
+        """The CV as PDF, with the contact details in it. The web route holds the approval gate
+        (G2-03), as it does for every other download, and lints the file before handing it over."""
+        from ..export import cv_pdf, cv_yaml
+
+        app, pack, job = self._reviewable(app_id)
+        document, _, _ = self._cv_document(app, pack, job)
+        try:
+            out = cv_pdf.render(document, self.get_contact(), on=self._cv_dated(app))
+        except cv_yaml.CvFileInvalid as err:
+            raise _cv_file_error(err.issues) from err
+        assert isinstance(out, bytes)
+        return out
 
     def _add_bullet(self, doc: TailoredCV, bullet_id: str) -> None:
         cv = self.cv()
@@ -1886,7 +2253,7 @@ class Store:
         self.s.flush()
         return ids
 
-    def start_rescore_if_idle(self) -> str | None:
+    def start_rescore_if_idle(self, scope: str = "board") -> str | None:
         """Start a re-scoring pass, or say why not (CV-08, SCH-02).
 
         Returns the run id, or `None` when it didn't start. **Never raises**, which is the whole
@@ -1904,7 +2271,7 @@ class Store:
         if self.s.scalar(select(func.count()).select_from(IntakeRunRow).where(IntakeRunRow.status == "running")):
             logfire.info("Not re-scoring yet: a run is already active")
             return None
-        if not self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model()):
+        if not self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model(), scope=scope):
             # A fresh install, or a CV edit that changed nothing a score depends on. Either way a
             # run row here would be a progress bar for no work.
             logfire.info("Nothing to re-score")
@@ -1915,6 +2282,23 @@ class Store:
             logfire.info("Not re-scoring: this week's model budget is spent")
             return None
         return self._start_scoring_run("rescore")
+
+    def start_rescore(self, scope: str = "board") -> RunIds:
+        """ "Re-score the other N jobs" (18 Nov): the board's stale scores, when a person asks.
+
+        Raises, unlike `start_rescore_if_idle`: this is a button, and a button that silently does
+        nothing is worse than one that says why it can't.
+        """
+        self.settle()
+        active = self.s.scalars(select(IntakeRunRow.channel).where(IntakeRunRow.status == "running")).first()
+        if active is not None:
+            raise ApiError(409, "RUN_ACTIVE", f"{_run_name(active)} already running. Wait for it to finish or cancel it.")
+        if not self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model(), scope=scope):
+            raise ApiError(409, "NOTHING_TO_SCORE", "Every job here already has an up-to-date score.")
+        if self.score_allowance() == 0:
+            raise ApiError(429, "DAILY_CAP", self.score_cap_message())
+        self._assert_budget()  # COST-01
+        return RunIds(run_ids=[self._start_scoring_run("rescore")])
 
     def start_score_more(self) -> RunIds:
         """ "Find more" (SRCH-26): the next 8–12 — the unscored backlog, then the queue, then the
@@ -1934,15 +2318,8 @@ class Store:
             cv_version=self.cv().version, model=self.scoring_model()
         ):
             raise ApiError(409, "NOTHING_TO_SCORE", "Every job on your list has an up-to-date score. Run a search to find more.")
-        cfg = wera()
-        if self.scored_today() >= cfg.max_scored_per_day:
-            raise ApiError(
-                429,
-                "DAILY_CAP",
-                f"WERA has scored {cfg.max_scored_per_day} jobs today, which is the daily limit. "
-                "The rest are waiting, and tomorrow's run will reach them. Raise `max_scored_per_day` "
-                "in config/wera.yaml to change it.",
-            )
+        if self.score_allowance() == 0:
+            raise ApiError(429, "DAILY_CAP", self.score_cap_message())
         self._assert_budget()  # COST-01
         if self._searches_used_up():
             near = self.count_near_misses()
@@ -1974,10 +2351,11 @@ class Store:
         if self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model()):
             return False
         try:
-            queue = targets.TargetQueue(targets.connect(), self.plan_key())
-            if queue.size():
-                return False
+            queue = targets.TargetQueue(targets.connect(), self.plan_key(), pool=self.pool_key(), reader=self.reader_key())
             planned, _ = self.search_queries(refresh=False, probe=False)
+            countries = {q.gl for q in planned if q.gl}
+            if queue.size(accept=lambda t: not t.country or not countries or t.country in countries):
+                return False
             sent = queue.tiers_sent()
         except Exception:  # noqa: BLE001 — not knowing is not "used up"
             return False
@@ -2038,6 +2416,8 @@ class Store:
             # code rather than the row, because it is how scoring is handed out *now*.
             batch_size=BATCH,
             errors=[RunError.model_validate(e) for e in run.errors],
+            stage_progress=run.stage_progress or 0,
+            log=[RunStep.model_validate(step) for step in run.log or []],
         )
 
     def cancel_run(self, run_id: str) -> IntakeRun:
@@ -2245,6 +2625,54 @@ class Store:
     # Firecrawl's Markdown and the feeds never have them. This many is that read, not a stray one.
     LAYOUT_LINES = 10
 
+    def summarise_job(self, job_id: str) -> ScoredJob:
+        """`job.summary`, on click (18 Nov): one fast-tier call, kept on the job until its post
+        changes (`current_view` hides a stale one), so a second click is free. It doesn't count
+        against the daily scoring limit — it reads one post for the person who asked."""
+        from ..nodes import fit
+        from ..schemas.jobs import JobSummary
+        from ..schemas.llm_outputs import SUMMARY_LIMITS, JobSummaryOutput
+
+        self.settle()
+        row = self._job_row(job_id)
+        job = self._job(row)
+        if not job.description_md:
+            raise ApiError(409, "NO_DESCRIPTION", "This job has no description to summarise. Paste the post in to get one.")
+        if job.summary is None:
+            self._assert_budget()
+            out = structured(
+                self.s,
+                "job.summary",
+                JobSummaryOutput,
+                {"job": fit._job_block(job)},
+                context={"post": job.description_md, "title": job.title, "company": job.company},
+            )
+            if not out.gist and not any(getattr(out, name) for name in SUMMARY_LIMITS):
+                raise ApiError(
+                    502,
+                    "SUMMARY_UNSUPPORTED",
+                    "The summary didn't hold up against the post, so none is shown. Try again, or read the post.",
+                )
+            job.summary = JobSummary(
+                **out.model_dump(), job_hash=fit.job_hash(job), model=self._settings()["models"]["fast"], created_at=iso(self.now)
+            )
+            save_job(self.s, job)
+        return self.get_job(job_id)
+
+    def reformat_saved(self) -> tuple[int, int]:
+        """Stores every saved job's description view under the current formatter. Returns how
+        many were rewritten and how many there are. Nothing a score reads changes."""
+        changed = total = 0
+        for row in self.s.scalars(select(JobRow)).all():
+            total += 1
+            before = row.data.get("descriptionView")
+            data = current_view(Job.model_validate(row.data)).model_dump(mode="json")
+            if data.get("descriptionView") != before:
+                row.data = data
+                changed += 1
+        self.s.flush()
+        return changed, total
+
     def tidy_saved(self, *, apply: bool = False) -> list[dict[str, str]]:
         """Today's reading rules applied to what was saved before them (12 Nov review).
 
@@ -2370,6 +2798,7 @@ class Store:
         self.s.flush()
         self.s.expire_all()  # the ORM is holding rows that no longer exist
         self.cleared_jobs = counts[JobRow.__tablename__]
+        set_kv(self.s, SCORE_WINDOW_KEY, iso(self.now))
         logfire.info("Cleared the job backlog for {reason}: {counts}", reason=reason, counts=counts)
         return counts
 
@@ -2404,13 +2833,21 @@ class Store:
         if composed is not None:
             cv.summary = composed
 
-    def put_cv(self, cv: MasterCV, *, rescore: bool = True) -> int:
+    def put_cv(self, cv: MasterCV, *, rescore: bool = True, replace: bool = False, fresh: bool | None = None) -> int:
         """Save a new version of the master CV, and re-judge the shortlist against it.
 
         `rescore=False` is for a caller that owns its own scoring — the eval harness pins a CV
         into a throwaway database and measures scoring itself, so a background pass there would
         spend money on fixtures and race the thing being measured.
+
+        **An edit never deletes anything** (18 Nov). `replace` is a new CV from an upload or import;
+        only then may the person choose to start fresh (`fresh`; `reset_on_cv_upload` is the
+        default choice), and starting fresh needs `allow_clear_jobs`. On 18 Nov a skill-level edit
+        cleared every job, score and pack, because the reset ran on every save.
         """
+        start_fresh = replace and (wera().reset_on_cv_upload if fresh is None else fresh)
+        if replace and fresh and not wera().allow_clear_jobs:
+            raise ApiError(403, "CLEAR_JOBS_OFF", "Starting fresh is turned off (allow_clear_jobs in config/wera.yaml).")
         ids = [
             *([cv.summary.id] if cv.summary else []),
             *[x for r in [*cv.experience, *cv.projects] for x in [r.id, *(b.id for b in r.bullets)]],
@@ -2451,14 +2888,17 @@ class Store:
         # someone is waiting on. `start_rescore_if_idle` declines instead of raising, so a busy
         # run or a spent budget costs the re-score, never the CV. Clearing is immediate — it is
         # fast, and a half-cleared list is worse than either state.
-        if rescore and wera().reset_on_cv_upload:
+        if rescore and start_fresh:
             self.reset_job_world()
             return cv.version
-        run_id = self.start_rescore_if_idle() if rescore else None
+        # The review list first (18 Nov): the jobs the person is acting on are re-scored now, and the
+        # rest of the board is offered on the Jobs screen (`stale_on_board`, `POST /intake/rescore`).
+        # Nothing at all when the save changed nothing the scorer reads (`fit.scoring_fingerprint`).
+        run_id = self.start_rescore_if_idle(scope="review") if rescore else None
         if run_id is not None:
             from ..graphs.intake import run_rescore
 
-            self.defer(lambda: run_rescore(run_id), name=f"rescore:{run_id}")
+            self.defer(lambda: run_rescore(run_id, scope="review"), name=f"rescore:{run_id}")
         return cv.version
 
     def import_cv_yaml(self, text: str) -> MasterCV:
@@ -2543,12 +2983,25 @@ class Store:
 
     # The profile fields that say where a job may be (SRCH-11). Changing any of them re-applies
     # MATCH-01's location rule to the jobs already found (`refilter_where`).
-    WHERE_FIELDS = ("countries", "locations", "city_scope", "international", "remote")
+    WHERE_FIELDS = ("countries", "locations", "city_scope", "remote")
 
     def put_profile(self, profile: SearchProfile) -> SearchProfile:
         """Save the profile. When "where" changed, the jobs already found follow it at once
         (`refilter_where`), and `where_change` says how many moved."""
         before = self._profile()
+        # SRCH-11 (17 Nov): a country outside the markets WERA searches for now can stay where it
+        # was saved, but can't be added — no search would go there.
+        from ..domain.places import country_name, market_countries
+
+        added = [c for c in profile.countries if c not in before.countries and c not in market_countries()]
+        if added:
+            names = ", ".join(country_name(c) for c in added)
+            raise ApiError(
+                422,
+                "VALIDATION",
+                f"WERA searches Europe and North America for now; {names} can't be added.",
+                {"countries": f"{names} isn't searched for now: WERA covers Europe, the US and Canada."},
+            )
         profile.updated_at = iso(self.now)
         self._profile_row().data = profile.model_dump(mode="json")
         moved = any(getattr(before, f) != getattr(profile, f) for f in self.WHERE_FIELDS)
@@ -2647,11 +3100,15 @@ class Store:
         """
         refusing = self.refusing_hosts(probe=refresh if probe is None else probe)
         matrix = self.strategy(refusing=refusing)
-        if matrix is None and refresh:
+        if matrix is None and refresh and not self.plan_recently_failed():
             try:
                 matrix = self.refresh_strategy()
             except ApiError as exc:
+                set_kv(self.s, PLAN_FAILED_KEY, {"key": self._plan_attempt_key(), "at": iso(self.now), "code": exc.code})
                 logfire.warn("Searching without a fresh Strategist plan: {code}", code=exc.code)
+            else:
+                if get_kv(self.s, PLAN_FAILED_KEY):
+                    set_kv(self.s, PLAN_FAILED_KEY, {})
         planned = (
             matrix.queries if matrix is not None else strategist.queries(self._profile(), self.cv_profile_cached(), sites(), None)
         )
@@ -2680,6 +3137,62 @@ class Store:
             return planned
         minus = " ".join(f'-intitle:"{t}"' for t in terms)
         return [q.model_copy(update={"q": f"{q.q} {minus}"}) for q in planned]
+
+    def plan_seconds(self) -> float:
+        """How long a Strategist plan usually takes: the median of the last five that answered, for
+        the planning step's bar to move by (UX-01). Fifteen seconds before there are any."""
+        latencies = sorted(
+            self.s.scalars(
+                select(LlmCallRow.latency_ms)
+                .where(LlmCallRow.task == "strategist.plan", LlmCallRow.ok.is_(True))
+                .order_by(LlmCallRow.id.desc())
+                .limit(5)
+            ).all()
+        )
+        return latencies[len(latencies) // 2] / 1000 if latencies else 15.0
+
+    def _plan_attempt_key(self) -> str:
+        return f"{self.plan_key()}:{self.scoring_model()}"
+
+    def plan_recently_failed(self) -> bool:
+        """Whether the Strategist failed this same plan in the last `PLAN_RETRY_MS`.
+
+        A failed plan used to be asked for again by every search, and paid for again: on 16–17 Nov
+        each one cost 37–115 seconds and two cut-off replies before the search fell back to the
+        person's own titles anyway. A new CV, profile or model is a new plan, and is asked.
+        """
+        failed = get_kv(self.s, PLAN_FAILED_KEY)
+        if not isinstance(failed, dict) or failed.get("key") != self._plan_attempt_key():
+            return False
+        try:
+            return self.now - parse_ms(failed["at"]) < PLAN_RETRY_MS
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def cv_fingerprint(self) -> str:
+        """What the scorer reads of the current CV (`fit.scoring_fingerprint`): a score's CV key."""
+        from ..nodes.fit import scoring_fingerprint
+
+        return scoring_fingerprint(self.cv())
+
+    def pool_key(self) -> str:
+        """The shared pool a search's public postings wait in: the industry and the level (18 Nov).
+
+        The industry is the Strategist's `field` ("backend engineering"), else the titles when
+        there is no plan. The pool holds postings only — url, title, snippet, source, country —
+        nothing about the person, ranked against each reader's own CV when they read it. So a
+        second search in a day, or later a second person in the same industry, starts from a
+        filled pool and pays only for what is new.
+        """
+        profile = self._profile()
+        matrix = get_kv(self.s, "target_matrix") or {}
+        field = re.sub(r"[^a-z0-9]+", "-", str(matrix.get("field") or "").lower()).strip("-")
+        industry = field or f"titles-{strategist.pool_key(profile)}"
+        return f"{industry}:{'+'.join(sorted(profile.seniority)) or 'any'}"
+
+    def reader_key(self) -> str:
+        """This person's record of what they have read from a pool (`TargetQueue(reader=…)`)."""
+        return f"me-{strategist.pool_key(self._profile())}"
 
     def plan_key(self) -> str:
         """Which plan a discovery queue belongs to: the CV version and the profile's fingerprint."""
@@ -2820,8 +3333,10 @@ class Store:
                 "secrets": SecretsStatus.model_validate(env.secret_status()).model_dump(),
                 "llmProvider": llm_provider_name(data["baseUrl"]),
                 "allowClearJobs": wera().allow_clear_jobs,
+                "maxScoredPerDay": wera().max_scored_per_day,
                 "scheduledIntake": bool(data.get("scheduledIntake", False)),
                 "learnedRanking": data.get("learnedRanking") is not False,
+                "dailyScoreLimit": self.daily_score_limit(),
             }
         )
 
@@ -2883,6 +3398,17 @@ class Store:
 
 
 # ---------------------------------------------------------------------------
+
+
+def _cv_file_error(issues: list[CvIssue]) -> ApiError:
+    """422 with each issue keyed by where it is, the way a form's fields are (SPEC §9.4)."""
+    fields = {(f"line {i.line}" if i.line else i.where or "file"): i.message for i in issues}
+    first = issues[0] if issues else CvIssue(message="The CV file isn't valid.")
+    return ApiError(422, "CV_FILE_INVALID", (f"Line {first.line}: " if first.line else "") + first.message, fields)
+
+
+def _first_line(err: Exception) -> str:
+    return (str(err).strip().splitlines() or [type(err).__name__])[0][:300]
 
 
 def _split_doc_id(doc_id: str) -> tuple[str, str]:

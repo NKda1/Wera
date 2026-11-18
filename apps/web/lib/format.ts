@@ -76,14 +76,27 @@ const ORIGIN: Record<Channel, string> = {
   manual: "Added",
 };
 
-/** Where a job came from and when: "Search 11 Nov". Empty for a job saved before tagging. */
-/** SRCH-31/32: the job APIs, as a job's origin names them ("Search 12 Nov · via Reed"). */
-export const VIA: Record<string, string> = { reed: "Reed", usajobs: "USAJOBS", adzuna: "Adzuna", careerjet: "Careerjet" };
+/** SRCH-31/32: the job APIs, as a job's origin names them ("Search 12 Nov, 08:54 · via Reed"). */
+export const VIA: Record<string, string> = {
+  reed: "Reed",
+  usajobs: "USAJOBS",
+  adzuna: "Adzuna",
+  careerjet: "Careerjet",
+  reliefweb: "ReliefWeb",
+};
 
+/** Which run found a job, to the minute: "Search 17 Nov, 08:54". The minute, not just the day,
+ *  because two searches on one day are two different searches (17 Nov). */
+export function foundLabel(found: NonNullable<Job["foundBy"]>): string {
+  return `${ORIGIN[found.channel] ?? "Found"} ${formatDate(found.at)}, ${formatTime(found.at)}`;
+}
+
+/** Where a job came from and when: "Search 17 Nov, 08:54 · via Reed". Empty for a job saved
+ *  before tagging. */
 export function formatOrigin(job: Pick<Job, "foundBy" | "via">): string {
   if (!job.foundBy) return "";
   const via = job.via ? ` · via ${VIA[job.via] ?? job.via}` : "";
-  return `${ORIGIN[job.foundBy.channel] ?? "Found"} ${formatDate(job.foundBy.at)}${via}`;
+  return `${foundLabel(job.foundBy)}${via}`;
 }
 
 /** The urgency groups, in the order the Jobs screen shows them. Mirrors `domain.scoring.URGENCY`. */

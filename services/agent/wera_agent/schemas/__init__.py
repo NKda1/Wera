@@ -5,6 +5,7 @@ from .api import (
     ApiErrorBody,
     ApplicationList,
     ApplicationPatchIn,
+    CvFileSaved,
     CvImportIn,
     CvVersion,
     DecisionIn,
@@ -25,6 +26,7 @@ from .api import (
 )
 from .applications import Application, ApplicationListItem, ApplicationWithJob
 from .cv import Contact, CvLine, MasterCV
+from .cv_file import CvFile, CvFileIn, CvPreview
 from .cv_profile import CvProfile
 from .jobs import FitEvidence, FitReport, FitWeights, Job, ScoredJob
 from .learning import SuggestionList
@@ -76,6 +78,9 @@ RESPONSES = [
     ApplicationList,
     TestResult,
     JobsCleared,
+    CvFile,
+    CvPreview,
+    CvFileSaved,
     ApiErrorBody,
 ]
 REQUESTS = [
@@ -85,6 +90,7 @@ REQUESTS = [
     ImportUrlIn,
     ImportTextIn,
     RegenerateIn,
+    CvFileIn,
     CvImportIn,
     RunIn,
     SiteReviewIn,

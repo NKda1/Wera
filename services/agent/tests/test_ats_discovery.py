@@ -344,7 +344,7 @@ class TestInsideAnIntakeRun:
         from wera_agent.graphs import intake
         from wera_agent.sources import ats_feeds
 
-        monkeypatch.setattr(ats_feeds, "fetch_all", lambda cs: ats_feeds.FeedResult())
+        monkeypatch.setattr(ats_feeds, "fetch_all", lambda cs, **_k: ats_feeds.FeedResult())
         out = intake.from_watchlist(profile(titles=["ML Engineer"]), 1_760_000_000_000, discover=True)
 
         assert watchlist, "no search was run"
@@ -358,7 +358,7 @@ class TestInsideAnIntakeRun:
         from wera_agent.graphs import intake
         from wera_agent.sources import ats_feeds
 
-        monkeypatch.setattr(ats_feeds, "fetch_all", lambda cs: ats_feeds.FeedResult())
+        monkeypatch.setattr(ats_feeds, "fetch_all", lambda cs, **_k: ats_feeds.FeedResult())
         intake.from_watchlist(profile(), 1_760_000_000_000, discover=True)
         assert not any("linkedin" in c.token.lower() for c in companies())
 
@@ -369,7 +369,7 @@ class TestInsideAnIntakeRun:
         from wera_agent.sources import ats_feeds
 
         monkeypatch.setattr(disc, "discover", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
-        monkeypatch.setattr(ats_feeds, "fetch_all", lambda cs: ats_feeds.FeedResult())
+        monkeypatch.setattr(ats_feeds, "fetch_all", lambda cs, **_k: ats_feeds.FeedResult())
         out = intake.from_watchlist(profile(), 1_760_000_000_000, discover=True)
         assert [code for code, _ in out.errors] == ["BOARD_DISCOVERY"]
         assert out.feed is not None  # the feeds were still fetched
@@ -378,7 +378,7 @@ class TestInsideAnIntakeRun:
         from wera_agent.graphs import intake
         from wera_agent.sources import ats_feeds
 
-        monkeypatch.setattr(ats_feeds, "fetch_all", lambda cs: ats_feeds.FeedResult())
+        monkeypatch.setattr(ats_feeds, "fetch_all", lambda cs, **_k: ats_feeds.FeedResult())
         out = intake.from_watchlist(profile(), 1_760_000_000_000, discover=False)
         assert (out.queries, out.credits_used, out.discovered) == (0, 0, 0)
         assert not watchlist

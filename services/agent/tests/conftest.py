@@ -69,6 +69,11 @@ def isolated(tmp_path, monkeypatch) -> Iterator[None]:
         "LOGFIRE_READ_TOKEN",
     ):
         monkeypatch.delenv(name, raising=False)
+    # The real embedder downloads a model on first use; a test that runs a real search uses the
+    # deterministic hash embedder instead, as the demo does (`prefilter.embedder`).
+    from wera_agent.nodes import prefilter
+
+    monkeypatch.setattr(prefilter, "_cached", {"hash": prefilter.HashEmbedder(), "fast": prefilter.HashEmbedder()})
     get_settings.cache_clear()
     reset_caches()
     clock.freeze()

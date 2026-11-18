@@ -4,8 +4,9 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from .applications import ApplicationListItem, ApplicationStatus
+from .applications import ApplicationListItem, ApplicationStatus, ApplicationWithJob
 from .base import Model, Opt, check, required
+from .cv_file import CvFile
 from .jobs import Job, ScoredJob
 from .learning import ReasonCode
 from .profile import SearchProfile
@@ -48,6 +49,11 @@ class ShortlistMeta(Model):
     # New jobs with no fit report yet: past the day's scoring cap (MATCH-05), or left unscored
     # by a run that stopped. They are not on the shortlist, and saying so beats their absence.
     awaiting_score: int
+    # 18 Nov: jobs on the board whose score predates a CV change. After an edit the review list is
+    # re-scored at once and these are offered ("Re-score the other N"), not re-scored unasked.
+    stale_scores: int = 0
+    # The daily scoring limit, so an empty list can say why it is empty and when that changes.
+    score_cap_message: str | None = None
     # The jobs themselves, capped the same way `hidden` is. A count alone was all anyone got, so
     # a job WERA had found, stored and filtered *in* was invisible until something scored it —
     # which, before `jobs_needing_score`, could be never. `Job` rather than `ScoredJob` for the
@@ -93,6 +99,11 @@ class PlaceOption(Model):
     region: str
     boards: list[str] = []  # reviewed boards that name this country
     feeds: list[str] = []  # job APIs that would be asked here, from an interactive search
+    # 17 Nov: one of its region's main markets (a job API covers it), which the region's checkbox
+    # ticks; and whether WERA searches it at all — false only for a saved country outside the
+    # markets, listed so the picker can name it.
+    main: bool = False
+    searched: bool = True
 
 
 class SiteReviewIn(Model):
@@ -199,6 +210,13 @@ class ImportTextIn(Model):
 
 class RegenerateIn(Model):
     note: str = ""
+
+
+class CvFileSaved(Model):
+    """A saved CV file, and the application with its ATS report measured against it."""
+
+    file: CvFile
+    application: ApplicationWithJob
 
 
 class CvImportIn(Model):

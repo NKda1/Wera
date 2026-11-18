@@ -46,6 +46,9 @@ class ApplicationJob(Model):
     remote: RemoteMode | None
     apply_url: Opt[str] = None
     linkedin_url: Opt[str] = None
+    # The employer's own careers site, when WERA knows the system it hires through (17 Nov): the
+    # company itself, beside `apply_url`, which can be a board that carried the post.
+    careers_url: Opt[str] = None
     fit_total: float
 
 

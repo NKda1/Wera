@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from .base import Model, Opt
+from .cv_file import CvFileState
 from .jobs import KeywordCategory
 from .profile import Seniority
 
@@ -67,6 +68,45 @@ class CompanyFact(Model):
     # screen checks both against the post, and because they answer different questions: one is
     # "they wrote this letter for us", the other is "they know why they want to work here".
     policy_quote: str = ""
+    # 18 Nov: a fact from the company's own site, quoted word for word from the page the company
+    # brief read (`CompanyBrief.site`), and checked against that stored text. Empty without a brief.
+    site_quote: str = ""
+
+
+type BriefTopic = Literal["what_they_do", "who_they_serve", "size_or_stage", "values", "why_the_role"]
+
+
+class BriefItem(Model):
+    """One thing learned about the company, and the words it was learned from."""
+
+    topic: BriefTopic
+    text: str
+    source: Literal["post", "site"]
+    quote: str  # verbatim in the post, or in `CompanyBrief.site.text`
+
+
+class CompanySource(Model):
+    """The page a brief read, kept so its quotes can be checked again (and by the letter guard)."""
+
+    url: str
+    fetched_at: str
+    text_hash: str
+    text: str
+
+
+class CompanyBrief(Model):
+    """18 Nov: what the post and the company's own About page say about it, each item quoted.
+
+    Items whose quote isn't in its source were dropped before this was saved. `site` is absent
+    when WERA didn't read one, and `site_note` says why: an agency's post, a site whose
+    robots.txt says no, one that couldn't be read, or no site found."""
+
+    company: str
+    items: list[BriefItem]
+    site: Opt[CompanySource] = None
+    site_note: Opt[str] = None
+    model: str
+    created_at: str
 
 
 # The four segments of WERA's ATS letter template, in order. A three-paragraph letter folds the
@@ -224,3 +264,9 @@ class Pack(Model):
     # Absent on packs drafted before the rubric existed, and on any whose `job.analyse` call
     # failed: the analysis informs the letter, so its absence weakens a pack rather than breaking it.
     analysis: Opt[JobAnalysis] = None
+    # EXP-01 (18 Nov): the theme of the RenderCV file the CV PDF is rendered from, and whether
+    # the person rewrote it. Absent until they change either; the file itself is read separately.
+    cv_file: Opt[CvFileState] = None
+    # 18 Nov: the company brief, when the person asked for one. The letter is written with it when
+    # it exists at drafting time, or rewritten with it on request.
+    company: Opt[CompanyBrief] = None

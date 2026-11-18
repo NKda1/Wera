@@ -40,9 +40,40 @@ class QuickWin(Model):
     cheapest point on the ATS score (ATSC-07), and only the person can decide to claim it."""
 
     term: str
+    category: Opt[KeywordCategory] = None
     jobs: int
     share: float
     line: str  # where on the CV it already appears
+
+
+# Where a skill the posts ask for stands against the CV: in its skills list, in a line but not
+# the list (a quick win), or nowhere on it.
+type SkillStatus = Literal["covered", "quick_win", "missing"]
+
+
+class SkillDemand(Model):
+    """One skill the posts ask for, whatever the CV says about it — what the Upskills chart of
+    the most-asked skills draws, coloured by `status` (17 Nov)."""
+
+    term: str
+    category: Opt[KeywordCategory] = None
+    jobs: int
+    share: float
+    status: SkillStatus
+
+
+class Coverage(Model):
+    """Skill asks — one job asking for one skill — by where the CV stands on them. Counted over
+    asks rather than distinct skills, so a skill twenty jobs want weighs twenty times one that a
+    single job mentions."""
+
+    covered: int = 0
+    quick_wins: int = 0
+    missing: int = 0
+
+
+class CategoryCoverage(Coverage):
+    category: KeywordCategory | Literal["other"]
 
 
 class UpskillsReport(Model):
@@ -50,3 +81,8 @@ class UpskillsReport(Model):
     jobs_considered: int
     missing: list[Upskill]
     quick_wins: list[QuickWin]
+    # 17 Nov: the market against the CV as a whole, for the page's charts. Defaulted so a report
+    # built before these existed still reads.
+    demand: list[SkillDemand] = []
+    coverage: Coverage = Coverage()
+    by_category: list[CategoryCoverage] = []

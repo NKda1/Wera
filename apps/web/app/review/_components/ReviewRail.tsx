@@ -36,7 +36,7 @@ export function ReviewRail({
       {pack.ats.score != null ? <AtsScoreCard ats={pack.ats} /> : null}
       <AtsCard ats={pack.ats} />
 
-      <FormatChecksCard docId={`${appId}.cv`} cv={pack.cv} fallback={pack.ats.formatChecks} />
+      <FormatChecksCard docId={`${appId}.cv`} pack={pack} fallback={pack.ats.formatChecks} />
 
       {violations.length ? (
         <section className="rounded-card border border-amber-100 bg-amber-50 p-5 text-amber-700">
@@ -53,6 +53,7 @@ export function ReviewRail({
           <p className="mt-1.5 text-[14px] leading-relaxed text-white/85">
             {cited} of {bullets.length} bullets cite a master-CV entry. Nothing new was invented. Click a tag to see the original line.
             {edited ? ` ${edited} edited by you.` : ""}
+            {pack.cvFile?.editedByUser ? " You rewrote the CV file, and the downloads use your version." : ""}
           </p>
         </section>
       )}
@@ -94,7 +95,7 @@ export function ReviewRail({
  * an estimate from line lengths. These used to be the only checks shown, alongside three more the
  * agent simply asserted as passed for a PDF nobody had rendered.
  */
-function FormatChecksCard({ docId, cv, fallback }: { docId: string; cv: Pack["cv"]; fallback: FormatCheck[] }) {
+function FormatChecksCard({ docId, pack, fallback }: { docId: string; pack: Pack; fallback: FormatCheck[] }) {
   const [state, setState] = useState<{ checks: FormatCheck[] } | { error: string } | null>(null);
 
   useEffect(() => {
@@ -107,8 +108,9 @@ function FormatChecksCard({ docId, cv, fallback }: { docId: string; cv: Pack["cv
     return () => {
       live = false;
     };
-    // `cv` is the dependency that matters: an edit returns a new pack, and the PDF changes with it.
-  }, [docId, cv]);
+    // An edit returns a new pack, and the PDF changes with it: a line (`cv`), or the CV file's
+    // theme or text, which leave the tailored CV alone and re-measure the ATS report.
+  }, [docId, pack.cv, pack.cvFile, pack.ats]);
 
   const checks = state && "checks" in state ? state.checks : fallback;
   return (
@@ -118,7 +120,7 @@ function FormatChecksCard({ docId, cv, fallback }: { docId: string; cv: Pack["cv
         {state === null
           ? "Rendering the PDF to check it…"
           : "checks" in state
-            ? "Read from the PDF as it will download."
+            ? "Read from the PDF as it will download, rendered by RenderCV."
             : `Couldn't check the rendered PDF (${state.error}). Showing estimates.`}
       </p>
       <ul className="mt-2.5 space-y-1.5 text-[14px]">

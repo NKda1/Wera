@@ -94,6 +94,60 @@ class FoundBy(Model):
     at: str
 
 
+class JobFact(Model):
+    """One key fact about a job, in the post's own words: "Contract: Permanent", "Experience: 7+
+    years of finance experience". Read off the post in code, never written by a model."""
+
+    label: str
+    value: str
+
+
+type SectionKind = Literal["intro", "role", "requirements", "nice", "benefits", "company", "process", "legal", "other"]
+
+
+class DescriptionBlock(Model):
+    t: Literal["p", "ul", "ol", "h"]  # `h`: a sub-heading inside a section, over the list it names
+    text: Opt[str] = None  # a paragraph or a sub-heading
+    items: Opt[list[str]] = None  # a list
+
+
+class DescriptionSection(Model):
+    heading: str | None
+    kind: SectionKind
+    # Folded on the card: the company's own blurb, the legal small print, how to apply. Present
+    # and one click away, never deleted — the words are the employer's and the person may want them.
+    fold: bool
+    blocks: list[DescriptionBlock]
+
+
+class DescriptionView(Model):
+    """The description laid out to read (`domain.description`), computed from `description_md`
+    in code. `description_md` itself stays as it arrived, because the fit score's cache key
+    (`fit.job_hash`) reads it, and re-flowing it would make every score look stale."""
+
+    version: int  # `domain.description.VERSION`: a better formatter re-runs on the next read
+    # What it was laid out from (`description.source_key`): a re-sighting that brings a fuller
+    # description is laid out again, rather than showing the old text beside the new one.
+    of: str = ""
+    facts: list[JobFact]
+    sections: list[DescriptionSection]
+
+
+class JobSummary(Model):
+    """`job.summary` (18 Nov), written on click and kept until the post changes. Every item was
+    checked against the post in code; the ones whose words or numbers aren't in it were dropped."""
+
+    gist: str
+    duties: list[str]
+    must_haves: list[str]
+    nice_to_haves: list[str]
+    perks: list[str]
+    watch_outs: list[str]
+    job_hash: str  # `fit.job_hash` of the post it summarises
+    model: str
+    created_at: str
+
+
 class Job(Model):
     id: str
     dedupe_key: str
@@ -148,6 +202,9 @@ class Job(Model):
     via: Opt[str] = None
     # SRCH-34: a post at an international organisation, with its grade and who it is open to.
     international: Opt[InternationalPost] = None
+    # 18 Nov: the description to read, and a summary when the person asked for one.
+    description_view: Opt[DescriptionView] = None
+    summary: Opt[JobSummary] = None
 
 
 class SubScore(Model):

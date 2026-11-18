@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Copy, Minus, Plus } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { roleDates, year } from "@/lib/format";
 import type { AnswerItem, CoverLetter, MasterCV, TailoredCV } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
@@ -17,7 +17,9 @@ export function CvPaper({
   doc,
   cv,
   lines,
-  editable,
+  editable: reviewing,
+  rewritten = false,
+  onOpenFile,
   onSave,
   onToggleLine,
 }: {
@@ -25,14 +27,30 @@ export function CvPaper({
   cv: MasterCV;
   lines: CvLines;
   editable: boolean;
+  /** The person rewrote the CV file, which is what the downloads use now; line edits wait. */
+  rewritten?: boolean;
+  onOpenFile?: () => void;
   onSave: Save;
   onToggleLine: (action: "add" | "remove", bulletId: string) => Promise<void>;
 }) {
   const roles = new Map([...cv.experience, ...cv.projects].map((r) => [r.id, r]));
   const omitted = doc.omittedBulletIds.filter((id) => lines[id]);
+  const editable = reviewing && !rewritten;
 
   return (
     <div className="space-y-4">
+      {rewritten ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-control bg-amber-50 px-4 py-3 text-[14px] text-amber-700">
+          <p className="min-w-0 flex-1">
+            You rewrote this CV in its file, and the PDF and Word downloads use your version. This is WERA&apos;s draft, kept with its sources; line editing waits until you discard your edits.
+          </p>
+          {onOpenFile ? (
+            <Button variant="secondary" onClick={onOpenFile}>
+              Open the CV file
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       <Card className="px-5 py-7 sm:px-10 sm:py-10">
         <article aria-label="Tailored CV" className="text-[15px] leading-relaxed">
           <h2 className="text-[26px] font-bold tracking-[-0.01em]">{cv.person.name}</h2>
@@ -149,17 +167,22 @@ export function LetterPaper({
   onSave: Save;
 }) {
   const inRange = letter.wordCount >= 250 && letter.wordCount <= 350;
-  const quote = letter.companyFact.quote;
-  const highlight = (text: string) => {
-    if (!quote || !text.includes(quote)) return text;
-    const [before, ...rest] = text.split(quote);
+  // The company facts the guard verified: from the post, and (18 Nov) from the company's own site.
+  const quotes = [
+    { text: letter.companyFact.quote, title: "Quoted word for word from the job post" },
+    { text: letter.companyFact.siteQuote ?? "", title: "Quoted word for word from the company's own site" },
+  ].filter((q) => q.text);
+  const highlight = (text: string): ReactNode => {
+    const q = quotes.find((x) => text.includes(x.text));
+    if (!q) return text;
+    const [before, ...rest] = text.split(q.text);
     return (
       <>
-        {before}
-        <mark className="rounded-none bg-mint-100 px-0.5 text-ink" title="Quoted word for word from the job post">
-          {quote}
+        {highlight(before)}
+        <mark className="rounded-none bg-mint-100 px-0.5 text-ink" title={q.title}>
+          {q.text}
         </mark>
-        {rest.join(quote)}
+        {highlight(rest.join(q.text))}
       </>
     );
   };
@@ -170,7 +193,10 @@ export function LetterPaper({
         <span className={cn("rounded-none px-2.5 py-1 font-semibold", inRange ? "bg-mint-100 text-forest-900" : "bg-amber-50 text-amber-700")}>
           {letter.wordCount} words · target 250–350
         </span>
-        {quote ? <span className="rounded-none bg-mint-100 px-2.5 py-1 font-semibold text-forest-900">1 company fact quoted from the post</span> : null}
+        {letter.companyFact.quote ? <span className="rounded-none bg-mint-100 px-2.5 py-1 font-semibold text-forest-900">1 company fact quoted from the post</span> : null}
+        {letter.companyFact.siteQuote ? (
+          <span className="rounded-none bg-mint-100 px-2.5 py-1 font-semibold text-forest-900">1 fact quoted from the company&apos;s site</span>
+        ) : null}
       </div>
       <article aria-label="Cover letter" className="space-y-4 text-[15px] leading-relaxed">
         <p>{letter.greeting}</p>

@@ -4,6 +4,7 @@ import { ChevronDown, ExternalLink } from "lucide-react";
 import { useId, useState } from "react";
 import {
   formatAge,
+  formatAgo,
   formatClosing,
   formatEvergreen,
   formatInternational,
@@ -15,11 +16,13 @@ import {
   sourceLine,
   sourceName,
 } from "@/lib/format";
+import { api } from "@/lib/api";
 import type { ScoredJob } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { Chip } from "@/lib/ui/Chip";
 import { cn } from "@/lib/ui/cn";
+import { JobDescription, JobSummaryView } from "@/lib/ui/JobDescription";
 import { Markdown } from "@/lib/ui/Markdown";
 import { Menu } from "@/lib/ui/Menu";
 import { Pill } from "@/lib/ui/Pill";
@@ -103,7 +106,14 @@ export function JobCard({
               {isNew ? (
                 <span className="rounded-none bg-accent px-2.5 py-0.5 text-[11px] font-bold tracking-wide text-white uppercase">New</span>
               ) : null}
-              {origin ? <span className="text-small text-ink-2">{origin}</span> : null}
+              {/* SRCH-25 (17 Nov): which search, to the minute, and how long ago — so a job from
+                  this morning's search reads apart from one a week old. */}
+              {origin ? (
+                <span className="text-small text-ink-2">
+                  {origin}
+                  {job.foundBy ? <> · {formatAgo(job.foundBy.at)}</> : null}
+                </span>
+              ) : null}
               {/* SRCH-32: Adzuna's terms ask for its name, linked, on every job it found, at
                   least 116×23 px. WERA never follows Adzuna's tracked link to the job itself. */}
               {job.via === "adzuna" ? (
@@ -208,7 +218,7 @@ export function JobCard({
         <div id={detailsId} className="mt-5 grid gap-6 border-t border-line pt-5 @4xl:grid-cols-[1fr_260px] @4xl:pl-[84px]">
           <div className="min-w-0">
             {job.descriptionMd ? (
-              <Markdown source={job.descriptionMd} />
+              <PostPanel job={job} />
             ) : (
               <p className="rounded-control bg-amber-50 px-3.5 py-2.5 text-[14px] text-amber-700">
                 No public posting was found for this role, so WERA has no description. Open it on LinkedIn to read it, then paste the description to get a full score.
@@ -263,6 +273,67 @@ export function JobCard({
         </div>
       ) : null}
     </Card>
+  );
+}
+
+/**
+ * The post laid out to read (18 Nov), or its summary. The summary is one fast-tier call on the first
+ * click and kept on the job until the post changes, so it costs nothing to open again.
+ */
+function PostPanel({ job }: { job: ScoredJob }) {
+  const [view, setView] = useState<"full" | "summary">("full");
+  const [summary, setSummary] = useState(job.summary);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  const showSummary = async () => {
+    setView("summary");
+    if (summary || busy) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const next = await api.summariseJob(job.id);
+      setSummary(next.summary);
+      if (!next.summary) setError("No summary came back. Read the full post instead.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't summarise this post.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggle = (pressed: boolean) =>
+    cn(
+      "inline-flex min-h-9 items-center border px-3 text-[13px] font-semibold transition-colors duration-150 pointer-coarse:min-h-11",
+      pressed ? "border-forest-700 bg-accent text-white" : "border-line bg-surface text-ink hover:border-forest-700 hover:text-forest-700",
+    );
+
+  return (
+    <div>
+      <div role="group" aria-label="How to read the post" className="mb-3 flex flex-wrap gap-2">
+        <button type="button" aria-pressed={view === "full"} onClick={() => setView("full")} className={toggle(view === "full")}>
+          Full post
+        </button>
+        <button type="button" aria-pressed={view === "summary"} onClick={showSummary} className={toggle(view === "summary")}>
+          Summary
+        </button>
+      </div>
+      {view === "full" ? (
+        job.descriptionView ? (
+          <JobDescription view={job.descriptionView} />
+        ) : (
+          <Markdown source={job.descriptionMd ?? ""} />
+        )
+      ) : busy ? (
+        <p className="text-[14px] text-ink-2" role="status">
+          Reading the post…
+        </p>
+      ) : error ? (
+        <p className="rounded-control bg-amber-50 px-3.5 py-2.5 text-[14px] text-amber-700">{error}</p>
+      ) : summary ? (
+        <JobSummaryView summary={summary} />
+      ) : null}
+    </div>
   );
 }
 

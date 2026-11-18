@@ -285,6 +285,88 @@ class TestTruncation:
             assert row.cost_usd > 0
 
 
+def ran_on(provider: str | None = "Modal") -> httpx.Response:
+    """A reply with no thinking that still hit its ceiling: it never closed its JSON."""
+    body: dict[str, object] = {
+        "id": "gen-test",
+        "model": FAST,
+        "object": "chat.completion",
+        "created": 0,
+        "system_fingerprint": "fp-test",
+        "choices": [{"index": 0, "finish_reason": "length", "message": {"role": "assistant", "content": '{"titles": ['}}],
+        "usage": {"prompt_tokens": 3900, "completion_tokens": 1500, "total_tokens": 5400},
+    }
+    if provider:
+        body["provider"] = provider  # OpenRouter names the upstream host on every reply
+    return httpx.Response(200, json=body)
+
+
+class TestARunawayReply:
+    """17 Nov: two letters ran to 1,500 and then 3,000 tokens on one upstream host with no
+    thinking at all, and the same letter on another host came back first time. More room on the
+    same host only buys a longer runaway, so the retry goes somewhere else."""
+
+    @respx.mock
+    def test_it_is_retried_away_from_the_host_that_ran_on(self, store, live):
+        respx.post(COMPLETIONS).mock(side_effect=[ran_on("Modal"), reply(GOOD)])
+        assert generate(store).titles
+        first, second = (json.loads(c.request.content) for c in respx.calls)
+        assert "ignore" not in first["provider"]
+        assert second["provider"]["ignore"] == ["Modal"]
+        assert second["model"] == first["model"]  # the same model, on another host
+        assert second["provider"]["data_collection"] == "deny"  # never loosened by the retry
+
+    @respx.mock
+    def test_without_a_named_host_it_moves_to_the_next_model(self, store, live):
+        respx.post(COMPLETIONS).mock(side_effect=[ran_on(None), reply(GOOD, model=FALLBACK)])
+        assert generate(store).titles
+        first, second = (json.loads(c.request.content) for c in respx.calls)
+        assert second["model"] == wera().fallbacks["fast"][0] != first["model"]
+
+
+class TestACeilingForOneCall:
+    @respx.mock
+    def test_a_caller_can_give_one_call_more_room(self, store, live):
+        respx.post(COMPLETIONS).mock(return_value=reply(GOOD))
+        generate(store, max_tokens=3000)
+        (sent,) = (json.loads(c.request.content) for c in respx.calls)
+        assert sent["max_completion_tokens"] == 3000
+
+
+class TestAFailureIsRecordedOnce:
+    """16–17 Nov: 3 of 12 failures were in `llm_calls` twice. A failed call was buffered for
+    `flush_unrecorded` the moment it was recorded, and a request finishing elsewhere flushed it
+    while its own unit of work was still running — which then committed the same row."""
+
+    @respx.mock
+    def test_a_flush_mid_unit_of_work_does_not_write_it_again(self, client, live):
+        from wera_agent.db.session import transaction
+        from wera_agent.services.store import Store
+
+        respx.post(COMPLETIONS).mock(side_effect=[ran_on(), reply(GOOD)])
+        with transaction() as session:
+            assert generate(Store(session)).titles
+            gateway.flush_unrecorded()  # another request finishing meanwhile
+        gateway.flush_unrecorded()
+        with transaction() as session:
+            rows = calls(Store(session))
+        assert [(r.ok, r.attempt) for r in rows[-2:]] == [(False, 1), (True, 2)]
+        assert sum(1 for r in rows if not r.ok) == 1
+
+    @respx.mock
+    def test_a_failure_whose_work_rolled_back_is_still_written(self, client, live):
+        from wera_agent.db.session import transaction
+        from wera_agent.services.store import Store
+
+        respx.post(COMPLETIONS).mock(side_effect=[ran_on(), ran_on()])
+        with pytest.raises(ApiError), transaction() as session:
+            generate(Store(session))
+        assert gateway.flush_unrecorded() == 2
+        with transaction() as session:
+            rows = calls(Store(session))
+        assert [r.code for r in rows] == ["LLM_TRUNCATED", "LLM_TRUNCATED"]
+
+
 class TestAModelCallHoldsNoLock:
     """Logfire showed "database is locked" failing drafts, intake runs and the startup sweep: the
     call row was flushed at the first model call, which took SQLite's one write lock and held it
@@ -664,6 +746,29 @@ class TestPlaces:
 
         for place in store.places():
             assert filters.COUNTRY_ALIASES.get(place.code), f"{place.code} has no names a posting would use"
+
+    def test_only_europe_and_north_america_are_offered_for_now(self, store):
+        """17 Nov: the markets WERA searches. A region's main markets are those a job API covers."""
+        places = {p.code: p for p in store.places()}
+        assert {p.region for p in places.values() if p.searched} == {"europe", "north_america"}
+        assert "AE" not in places and "AU" not in places and "BM" not in places
+        assert places["DE"].main and places["US"].main and places["IE"].main
+        assert not places["LU"].main and places["LU"].searched  # in Europe, but no API covers it
+
+    def test_a_saved_country_outside_the_markets_is_listed_as_not_searched(self, store):
+        profile = store.get_profile()
+        store._profile_row().data = profile.model_copy(update={"countries": ["GB", "AU"]}).model_dump(mode="json")
+        au = next(p for p in store.places() if p.code == "AU")
+        assert au.searched is False and au.name == "Australia"
+
+    def test_a_country_outside_the_markets_cant_be_added_but_one_already_saved_can_stay(self, store):
+        profile = store.get_profile()
+        with pytest.raises(ApiError) as refused:
+            store.put_profile(profile.model_copy(update={"countries": ["GB", "AE"]}))
+        assert refused.value.code == "VALIDATION" and "United Arab Emirates" in refused.value.fields["countries"]
+        store._profile_row().data = profile.model_copy(update={"countries": ["GB", "AU"]}).model_dump(mode="json")
+        store.put_profile(store.get_profile().model_copy(update={"countries": ["GB", "AU", "DE"]}))  # AU stays
+        assert store.get_profile().countries == ["GB", "AU", "DE"]
 
 
 class TestOutputContracts:

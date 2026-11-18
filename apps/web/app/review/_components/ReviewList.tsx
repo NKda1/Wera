@@ -12,6 +12,7 @@ import { Pill } from "@/lib/ui/Pill";
 import { ScoreRing } from "@/lib/ui/ScoreRing";
 import { useToast } from "@/lib/ui/Toast";
 import { DraftProgress } from "./DraftProgress";
+import { JobLinks } from "@/lib/ui/JobLinks";
 
 type Item = ApplicationWithJob & { coverage?: number };
 
@@ -124,6 +125,7 @@ function PackRow({ app, primary }: { app: Item; primary?: boolean }) {
           {app.job.company} · {formatLocation(app.job)} · {app.status === "approved" ? `approved ${formatAgo(app.approvedAt)}` : `drafted ${formatAgo(draftedAt)}`}
           {app.coverage != null ? ` · ATS ${pct(app.coverage)}` : ""}
         </p>
+        <JobLinks job={app.job} className="mt-1" />
       </div>
       {/* Its own row on a phone: beside the text, the title and meta got ~100px and broke into
           five lines, because a `flex-1` text column never lets the row wrap. */}

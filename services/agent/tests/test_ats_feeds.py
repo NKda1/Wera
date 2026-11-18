@@ -174,3 +174,29 @@ class TestClosedDetection:
         result = ats_feeds.fetch_all([LEVER])
         known = {"job-gone": Ats(vendor="lever", board_token="saltmarsh", job_id="vanished")}
         assert ats_feeds.closed_tokens(result, known) == []
+
+
+class TestTheEmployersCareersSite:
+    """17 Nov: a reviewed pack lists the employer's own careers site beside the job page, when the
+    system they hire through is known."""
+
+    def test_each_system_names_its_public_board(self):
+        from wera_agent.schemas.jobs import Ats
+
+        assert (
+            ats_feeds.careers_url(Ats(vendor="greenhouse", board_token="deliveroo", job_id="1"))
+            == "https://job-boards.greenhouse.io/deliveroo"
+        )
+        assert ats_feeds.careers_url(Ats(vendor="lever", board_token="acme", job_id="1")) == "https://jobs.lever.co/acme"
+        assert ats_feeds.careers_url(Ats(vendor="ashby", board_token="abound", job_id="1")) == "https://jobs.ashbyhq.com/abound"
+
+    def test_an_international_organisation_is_its_own_host(self):
+        from wera_agent import config
+        from wera_agent.schemas.jobs import Ats
+
+        config.organisations_file.cache_clear()  # read from this repo's config, not another test's
+
+        assert ats_feeds.careers_url(Ats(vendor="taleo", board_token="who", job_id="1")) == "https://careers.who.int/"
+
+    def test_no_system_no_site(self):
+        assert ats_feeds.careers_url(None) is None

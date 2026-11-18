@@ -124,6 +124,9 @@
         "applyUrl": {
           "type": "string"
         },
+        "careersUrl": {
+          "type": "string"
+        },
         "company": {
           "type": "string"
         },
@@ -465,6 +468,45 @@
       "title": "AtsReport",
       "type": "object"
     },
+    "BriefItem": {
+      "description": "One thing learned about the company, and the words it was learned from.",
+      "properties": {
+        "quote": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "post",
+            "site"
+          ],
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "topic": {
+          "$ref": "#/$defs/BriefTopic"
+        }
+      },
+      "required": [
+        "topic",
+        "text",
+        "source",
+        "quote"
+      ],
+      "title": "BriefItem",
+      "type": "object"
+    },
+    "BriefTopic": {
+      "enum": [
+        "what_they_do",
+        "who_they_serve",
+        "size_or_stage",
+        "values",
+        "why_the_role"
+      ],
+      "type": "string"
+    },
     "Bullet": {
       "properties": {
         "id": {
@@ -486,6 +528,41 @@
         "tags"
       ],
       "title": "Bullet",
+      "type": "object"
+    },
+    "CategoryCoverage": {
+      "properties": {
+        "category": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KeywordCategory"
+            },
+            {
+              "const": "other",
+              "type": "string"
+            }
+          ]
+        },
+        "covered": {
+          "default": 0,
+          "type": "integer"
+        },
+        "missing": {
+          "default": 0,
+          "type": "integer"
+        },
+        "quickWins": {
+          "default": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "covered",
+        "quickWins",
+        "missing",
+        "category"
+      ],
+      "title": "CategoryCoverage",
       "type": "object"
     },
     "Channel": {
@@ -546,6 +623,40 @@
       "title": "Cited",
       "type": "object"
     },
+    "CompanyBrief": {
+      "description": "18 Nov: what the post and the company's own About page say about it, each item quoted.\n\nItems whose quote isn't in its source were dropped before this was saved. `site` is absent\nwhen WERA didn't read one, and `site_note` says why: an agency's post, a site whose\nrobots.txt says no, one that couldn't be read, or no site found.",
+      "properties": {
+        "company": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/BriefItem"
+          },
+          "type": "array"
+        },
+        "model": {
+          "type": "string"
+        },
+        "site": {
+          "$ref": "#/$defs/CompanySource"
+        },
+        "siteNote": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "company",
+        "items",
+        "model",
+        "createdAt"
+      ],
+      "title": "CompanyBrief",
+      "type": "object"
+    },
     "CompanyFact": {
       "properties": {
         "policyQuote": {
@@ -554,13 +665,43 @@
         },
         "quote": {
           "type": "string"
+        },
+        "siteQuote": {
+          "default": "",
+          "type": "string"
         }
       },
       "required": [
         "quote",
-        "policyQuote"
+        "policyQuote",
+        "siteQuote"
       ],
       "title": "CompanyFact",
+      "type": "object"
+    },
+    "CompanySource": {
+      "description": "The page a brief read, kept so its quotes can be checked again (and by the letter guard).",
+      "properties": {
+        "fetchedAt": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "textHash": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "fetchedAt",
+        "textHash",
+        "text"
+      ],
+      "title": "CompanySource",
       "type": "object"
     },
     "Contact": {
@@ -653,6 +794,177 @@
       "title": "CoverLetter",
       "type": "object"
     },
+    "Coverage": {
+      "description": "Skill asks \u2014 one job asking for one skill \u2014 by where the CV stands on them. Counted over\nasks rather than distinct skills, so a skill twenty jobs want weighs twenty times one that a\nsingle job mentions.",
+      "properties": {
+        "covered": {
+          "default": 0,
+          "type": "integer"
+        },
+        "missing": {
+          "default": 0,
+          "type": "integer"
+        },
+        "quickWins": {
+          "default": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "covered",
+        "quickWins",
+        "missing"
+      ],
+      "title": "Coverage",
+      "type": "object"
+    },
+    "CvBlock": {
+      "description": "One line of the CV as a reader sees it, in reading order. The Word file is written from\nthese and the PDF lint checks against them (ATSC-06), so both follow the file.",
+      "properties": {
+        "right": {
+          "type": "string"
+        },
+        "t": {
+          "enum": [
+            "heading",
+            "row",
+            "bullet",
+            "body"
+          ],
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "t",
+        "text"
+      ],
+      "title": "CvBlock",
+      "type": "object"
+    },
+    "CvFile": {
+      "description": "`GET /applications/{id}/cv-file`: the file, what is in it, and what can be done with it.\nNo contact details: those are added when it is rendered.",
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/CvBlock"
+          },
+          "type": "array"
+        },
+        "editable": {
+          "type": "boolean"
+        },
+        "editedByUser": {
+          "type": "boolean"
+        },
+        "links": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "location": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pageSize": {
+          "$ref": "#/$defs/PageSize"
+        },
+        "theme": {
+          "type": "string"
+        },
+        "themes": {
+          "items": {
+            "$ref": "#/$defs/CvTheme"
+          },
+          "type": "array"
+        },
+        "unresolvedRoleIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "yaml": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "yaml",
+        "theme",
+        "pageSize",
+        "editedByUser",
+        "editable",
+        "themes",
+        "name",
+        "links",
+        "blocks",
+        "unresolvedRoleIds"
+      ],
+      "title": "CvFile",
+      "type": "object"
+    },
+    "CvFileSaved": {
+      "description": "A saved CV file, and the application with its ATS report measured against it.",
+      "properties": {
+        "application": {
+          "$ref": "#/$defs/ApplicationWithJob"
+        },
+        "file": {
+          "$ref": "#/$defs/CvFile"
+        }
+      },
+      "required": [
+        "file",
+        "application"
+      ],
+      "title": "CvFileSaved",
+      "type": "object"
+    },
+    "CvFileState": {
+      "description": "What the person chose for this pack's CV file. Absent until they choose something: the\nfile is then WERA's, built from the tailored CV with the default design.",
+      "properties": {
+        "editedByUser": {
+          "default": false,
+          "type": "boolean"
+        },
+        "theme": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "theme",
+        "editedByUser"
+      ],
+      "title": "CvFileState",
+      "type": "object"
+    },
+    "CvIssue": {
+      "description": "Why the file can't be rendered, where the person can find it.",
+      "properties": {
+        "column": {
+          "type": "integer"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "where": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "title": "CvIssue",
+      "type": "object"
+    },
     "CvItem": {
       "properties": {
         "bullets": {
@@ -686,6 +998,29 @@
         "where"
       ],
       "title": "CvLine",
+      "type": "object"
+    },
+    "CvPreview": {
+      "description": "The file rendered as page images, for the editor. Issues instead when it won't render.",
+      "properties": {
+        "issues": {
+          "items": {
+            "$ref": "#/$defs/CvIssue"
+          },
+          "type": "array"
+        },
+        "pages": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "pages",
+        "issues"
+      ],
+      "title": "CvPreview",
       "type": "object"
     },
     "CvProfile": {
@@ -746,6 +1081,30 @@
       "title": "CvSection",
       "type": "object"
     },
+    "CvTheme": {
+      "properties": {
+        "design": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "note",
+        "design"
+      ],
+      "title": "CvTheme",
+      "type": "object"
+    },
     "CvVersion": {
       "properties": {
         "clearedJobs": {
@@ -761,6 +1120,99 @@
         "clearedJobs"
       ],
       "title": "CvVersion",
+      "type": "object"
+    },
+    "DescriptionBlock": {
+      "properties": {
+        "items": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "t": {
+          "enum": [
+            "p",
+            "ul",
+            "ol",
+            "h"
+          ],
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "t"
+      ],
+      "title": "DescriptionBlock",
+      "type": "object"
+    },
+    "DescriptionSection": {
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/DescriptionBlock"
+          },
+          "type": "array"
+        },
+        "fold": {
+          "type": "boolean"
+        },
+        "heading": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/SectionKind"
+        }
+      },
+      "required": [
+        "heading",
+        "kind",
+        "fold",
+        "blocks"
+      ],
+      "title": "DescriptionSection",
+      "type": "object"
+    },
+    "DescriptionView": {
+      "description": "The description laid out to read (`domain.description`), computed from `description_md`\nin code. `description_md` itself stays as it arrived, because the fit score's cache key\n(`fit.job_hash`) reads it, and re-flowing it would make every score look stale.",
+      "properties": {
+        "facts": {
+          "items": {
+            "$ref": "#/$defs/JobFact"
+          },
+          "type": "array"
+        },
+        "of": {
+          "default": "",
+          "type": "string"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/DescriptionSection"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "of",
+        "facts",
+        "sections"
+      ],
+      "title": "DescriptionView",
       "type": "object"
     },
     "DraftProgress": {
@@ -1329,6 +1781,13 @@
           "default": 0,
           "type": "integer"
         },
+        "log": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RunStep"
+          },
+          "type": "array"
+        },
         "newJobs": {
           "type": "integer"
         },
@@ -1347,6 +1806,10 @@
         },
         "results": {
           "type": "integer"
+        },
+        "stageProgress": {
+          "default": 0,
+          "type": "number"
         },
         "startedAt": {
           "type": "string"
@@ -1385,7 +1848,9 @@
         "fallbackPages",
         "queued",
         "batchSize",
-        "errors"
+        "errors",
+        "stageProgress",
+        "log"
       ],
       "title": "IntakeRun",
       "type": "object"
@@ -1453,6 +1918,9 @@
             "missing"
           ],
           "type": "string"
+        },
+        "descriptionView": {
+          "$ref": "#/$defs/DescriptionView"
         },
         "firstSeen": {
           "type": "string"
@@ -1530,6 +1998,9 @@
         "status": {
           "$ref": "#/$defs/JobStatus"
         },
+        "summary": {
+          "$ref": "#/$defs/JobSummary"
+        },
         "title": {
           "type": "string"
         },
@@ -1575,6 +2046,23 @@
         "strategicContext"
       ],
       "title": "JobAnalysis",
+      "type": "object"
+    },
+    "JobFact": {
+      "description": "One key fact about a job, in the post's own words: \"Contract: Permanent\", \"Experience: 7+\nyears of finance experience\". Read off the post in code, never written by a model.",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "value"
+      ],
+      "title": "JobFact",
       "type": "object"
     },
     "JobKeyword": {
@@ -1656,6 +2144,66 @@
         "archived"
       ],
       "type": "string"
+    },
+    "JobSummary": {
+      "description": "`job.summary` (18 Nov), written on click and kept until the post changes. Every item was\nchecked against the post in code; the ones whose words or numbers aren't in it were dropped.",
+      "properties": {
+        "createdAt": {
+          "type": "string"
+        },
+        "duties": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "gist": {
+          "type": "string"
+        },
+        "jobHash": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "mustHaves": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "niceToHaves": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "perks": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "watchOuts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "gist",
+        "duties",
+        "mustHaves",
+        "niceToHaves",
+        "perks",
+        "watchOuts",
+        "jobHash",
+        "model",
+        "createdAt"
+      ],
+      "title": "JobSummary",
+      "type": "object"
     },
     "JobsCleared": {
       "description": "SRCH-27: what \"Clear jobs\" removed \u2014 or, before it runs, what it would remove.",
@@ -2006,8 +2554,14 @@
         "ats": {
           "$ref": "#/$defs/AtsReport"
         },
+        "company": {
+          "$ref": "#/$defs/CompanyBrief"
+        },
         "cv": {
           "$ref": "#/$defs/TailoredCV"
+        },
+        "cvFile": {
+          "$ref": "#/$defs/CvFileState"
         },
         "letter": {
           "$ref": "#/$defs/CoverLetter"
@@ -2021,6 +2575,13 @@
       ],
       "title": "Pack",
       "type": "object"
+    },
+    "PageSize": {
+      "enum": [
+        "a4",
+        "us-letter"
+      ],
+      "type": "string"
     },
     "Paragraph": {
       "description": "A letter paragraph, and which part of the template it is doing.\n\nBoth optional, because a letter drafted before the template has no sections to report. A\nparagraph the person rewrites keeps its section: it is still the opening, or still the close.",
@@ -2100,11 +2661,19 @@
           },
           "type": "array"
         },
+        "main": {
+          "default": false,
+          "type": "boolean"
+        },
         "name": {
           "type": "string"
         },
         "region": {
           "type": "string"
+        },
+        "searched": {
+          "default": true,
+          "type": "boolean"
         }
       },
       "required": [
@@ -2112,7 +2681,9 @@
         "name",
         "region",
         "boards",
-        "feeds"
+        "feeds",
+        "main",
+        "searched"
       ],
       "title": "PlaceOption",
       "type": "object"
@@ -2224,6 +2795,9 @@
     "QuickWin": {
       "description": "A skill the posts ask for that the CV backs in a line but doesn't list as a skill: the\ncheapest point on the ATS score (ATSC-07), and only the person can decide to claim it.",
       "properties": {
+        "category": {
+          "$ref": "#/$defs/KeywordCategory"
+        },
         "jobs": {
           "type": "integer"
         },
@@ -2438,6 +3012,7 @@
         "queued",
         "discovering",
         "planning",
+        "apis",
         "harvesting",
         "searching",
         "scraping",
@@ -2450,6 +3025,38 @@
         "done"
       ],
       "type": "string"
+    },
+    "RunStep": {
+      "description": "One finished step of a run, as the run panel lists it (UX-01, 17 Nov).",
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/RunPhase"
+        }
+      },
+      "required": [
+        "at",
+        "phase",
+        "message",
+        "ms"
+      ],
+      "title": "RunStep",
+      "type": "object"
     },
     "Salary": {
       "properties": {
@@ -2508,10 +3115,6 @@
         },
         "generatedFromCvVersion": {
           "type": "integer"
-        },
-        "international": {
-          "default": false,
-          "type": "boolean"
         },
         "locations": {
           "items": {
@@ -2574,7 +3177,6 @@
         "locations",
         "countries",
         "cityScope",
-        "international",
         "remote",
         "seniority",
         "exclude",
@@ -2641,6 +3243,9 @@
             "missing"
           ],
           "type": "string"
+        },
+        "descriptionView": {
+          "$ref": "#/$defs/DescriptionView"
         },
         "evergreen": {
           "default": false,
@@ -2735,6 +3340,9 @@
         "status": {
           "$ref": "#/$defs/JobStatus"
         },
+        "summary": {
+          "$ref": "#/$defs/JobSummary"
+        },
         "title": {
           "type": "string"
         },
@@ -2806,10 +3414,6 @@
         "generatedFromCvVersion": {
           "type": "integer"
         },
-        "international": {
-          "default": false,
-          "type": "boolean"
-        },
         "locations": {
           "items": {
             "type": "string"
@@ -2861,7 +3465,6 @@
         "locations",
         "countries",
         "cityScope",
-        "international",
         "remote",
         "seniority",
         "exclude",
@@ -2933,6 +3536,20 @@
       "title": "SecretsStatus",
       "type": "object"
     },
+    "SectionKind": {
+      "enum": [
+        "intro",
+        "role",
+        "requirements",
+        "nice",
+        "benefits",
+        "company",
+        "process",
+        "legal",
+        "other"
+      ],
+      "type": "string"
+    },
     "Seniority": {
       "enum": [
         "intern",
@@ -2957,6 +3574,10 @@
             2
           ],
           "type": "integer"
+        },
+        "dailyScoreLimit": {
+          "default": true,
+          "type": "boolean"
         },
         "demoMode": {
           "type": "boolean"
@@ -3003,7 +3624,8 @@
         "inbox",
         "searchSchedule",
         "scheduledIntake",
-        "learnedRanking"
+        "learnedRanking",
+        "dailyScoreLimit"
       ],
       "title": "Settings",
       "type": "object"
@@ -3024,6 +3646,10 @@
           ],
           "type": "integer"
         },
+        "dailyScoreLimit": {
+          "default": true,
+          "type": "boolean"
+        },
         "demoMode": {
           "type": "boolean"
         },
@@ -3039,6 +3665,10 @@
         },
         "llmProvider": {
           "type": "string"
+        },
+        "maxScoredPerDay": {
+          "default": 70,
+          "type": "integer"
         },
         "models": {
           "$ref": "#/$defs/TierModels"
@@ -3079,9 +3709,11 @@
         "searchSchedule",
         "scheduledIntake",
         "learnedRanking",
+        "dailyScoreLimit",
         "secrets",
         "llmProvider",
-        "allowClearJobs"
+        "allowClearJobs",
+        "maxScoredPerDay"
       ],
       "title": "SettingsResponse",
       "type": "object"
@@ -3133,7 +3765,21 @@
         "rejected": {
           "type": "integer"
         },
+        "scoreCapMessage": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "snoozed": {
+          "type": "integer"
+        },
+        "staleScores": {
+          "default": 0,
           "type": "integer"
         }
       },
@@ -3144,6 +3790,8 @@
         "hiddenTotal",
         "nearMisses",
         "awaitingScore",
+        "staleScores",
+        "scoreCapMessage",
         "awaiting",
         "findMoreSize",
         "snoozed",
@@ -3234,11 +3882,47 @@
       "title": "Skill",
       "type": "object"
     },
+    "SkillDemand": {
+      "description": "One skill the posts ask for, whatever the CV says about it \u2014 what the Upskills chart of\nthe most-asked skills draws, coloured by `status` (17 Nov).",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/KeywordCategory"
+        },
+        "jobs": {
+          "type": "integer"
+        },
+        "share": {
+          "type": "number"
+        },
+        "status": {
+          "$ref": "#/$defs/SkillStatus"
+        },
+        "term": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "term",
+        "jobs",
+        "share",
+        "status"
+      ],
+      "title": "SkillDemand",
+      "type": "object"
+    },
     "SkillLevel": {
       "enum": [
         "familiar",
         "proficient",
         "expert"
+      ],
+      "type": "string"
+    },
+    "SkillStatus": {
+      "enum": [
+        "covered",
+        "quick_win",
+        "missing"
       ],
       "type": "string"
     },
@@ -3649,6 +4333,28 @@
     },
     "UpskillsReport": {
       "properties": {
+        "byCategory": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CategoryCoverage"
+          },
+          "type": "array"
+        },
+        "coverage": {
+          "$ref": "#/$defs/Coverage",
+          "default": {
+            "covered": 0,
+            "missing": 0,
+            "quickWins": 0
+          }
+        },
+        "demand": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SkillDemand"
+          },
+          "type": "array"
+        },
         "jobsConsidered": {
           "type": "integer"
         },
@@ -3672,7 +4378,10 @@
         "windowDays",
         "jobsConsidered",
         "missing",
-        "quickWins"
+        "quickWins",
+        "demand",
+        "coverage",
+        "byCategory"
       ],
       "title": "UpskillsReport",
       "type": "object"

@@ -165,10 +165,11 @@ class TestBuilding:
         cv = cv_build.to_master_cv(parsed(skills=["Python", "python", "Docker", "Python"]), version=1)
         assert [s.name for s in cv.skills] == ["Python", "Docker"]
 
-    def test_a_skill_level_is_never_guessed(self):
-        """A CV rarely states one, and an invented "expert" is a claim the person never made."""
-        cv = cv_build.to_master_cv(parsed(skills=["Python"]), version=1)
-        assert cv.skills[0].level is None
+    def test_an_uploaded_skill_registers_as_proficient(self):
+        """18 Nov: a skill on a CV is one the person claims, so it counts — but never as "expert",
+        which is a claim the person never made."""
+        cv = cv_build.to_master_cv(parsed(skills=["Python", "Docker"]), version=1)
+        assert [s.level for s in cv.skills] == ["proficient", "proficient"]
 
     def test_an_empty_bullet_is_dropped_rather_than_given_an_id(self):
         cv = cv_build.to_master_cv(parsed(experience=[role(org="Acme", bullets=["Real", "   ", ""])]), version=1)

@@ -5,6 +5,9 @@ import type {
   ApplicationStatus,
   ApplicationWithJob,
   Contact,
+  CvFile,
+  CvFileSaved,
+  CvPreview,
   Estimate,
   FormatCheck,
   IntakeChannel,
@@ -79,6 +82,8 @@ export const api = {
   decide: (jobId: string, d: Decision) => call<ScoredJob>(`/api/jobs/${jobId}/decision`, { method: "POST", body: d }),
   /** SRCH-25: the person opened this job, so its New tag goes. */
   markSeen: (jobId: string) => call<{ seen: boolean }>(`/api/jobs/${encodeURIComponent(jobId)}/seen`, { method: "POST", body: {} }),
+  /** The post in a minute's reading. The first click is one fast-tier model call; the summary is kept until the post changes. */
+  summariseJob: (jobId: string) => call<ScoredJob>(`/api/jobs/${encodeURIComponent(jobId)}/summary`, { method: "POST", body: {} }),
   markAllSeen: () => call<{ marked: number }>("/api/jobs/seen", { method: "POST", body: {} }),
   /** MATCH-13: a profile change the person's decisions point at — accepted, or not offered again. */
   acceptSuggestion: (id: string) => call<SearchProfile>(`/api/learning/suggestions/${encodeURIComponent(id)}/accept`, { method: "POST", body: {} }),
@@ -92,6 +97,8 @@ export const api = {
   startRun: (channels: IntakeChannel[]) => call<{ runIds: string[] }>("/api/intake/run", { method: "POST", body: { channels } }),
   /** MATCH-05: score the next batch from the pool the broad search already found. */
   scoreMore: () => call<{ runIds: string[] }>("/api/intake/score-more", { method: "POST", body: {} }),
+  /** CV-08 (18 Nov): re-score the board's jobs whose scores predate a CV change. */
+  rescoreBoard: () => call<{ runIds: string[] }>("/api/intake/rescore?scope=board", { method: "POST", body: {} }),
   /** SRCH-13: check which postings are still open. Free — feeds, plain HTTP and a browser. */
   recheck: () => call<{ started: boolean }>("/api/jobs/recheck", { method: "POST", body: {} }),
   getRun: (id: string) => call<IntakeRun>(`/api/intake/runs/${id}`),
@@ -117,11 +124,27 @@ export const api = {
   approvePack: (id: string) => call<ApplicationWithJob>(`/api/applications/${id}/approve`, { method: "POST", body: {} }),
   editDocument: (docId: string, patch: { target: string; text?: string; bulletId?: string }) =>
     call<ApplicationWithJob>(`/api/documents/${docId}`, { method: "PATCH", body: patch }),
+  /** What the post and the company's own About page say about it, each item quoted and checked. */
+  companyBrief: (appId: string) => call<ApplicationWithJob>(`/api/applications/${appId}/company-brief`, { method: "POST", body: {} }),
+  /** Redraft the letter alone, with the company brief; the pack shows as drafting until it's back. */
+  rewriteLetter: (appId: string) => call<ApplicationWithJob>(`/api/applications/${appId}/letter/rewrite`, { method: "POST", body: {} }),
+  /** EXP-01: the RenderCV file the CV PDF is made from, and what it prints. */
+  getCvFile: (appId: string) => call<CvFile>(`/api/applications/${appId}/cv-file`),
+  /** Saves the person's file, or with `reset` goes back to WERA's (keeping the design). */
+  saveCvFile: (appId: string, body: { yaml: string } | { reset: true }) => call<CvFileSaved>(`/api/applications/${appId}/cv-file`, { method: "PUT", body }),
+  /** The file as page images, saved or not. Problems come back as issues rather than errors. */
+  previewCvFile: (appId: string, yaml: string) => call<CvPreview>(`/api/applications/${appId}/cv-file/preview`, { method: "POST", body: { yaml } }),
   // Exports are plain <a download> links to /api/documents/:id/export (EXP-01).
   /** ATSC-05/06: the format lint, run on the PDF as it renders now. Works before approval. */
   getFormatChecks: (docId: string) => call<{ checks: FormatCheck[] }>(`/api/documents/${docId}/checks`),
 
-  putCv: (cv: MasterCV) => call<{ version: number; clearedJobs: number }>("/api/cv", { method: "PUT", body: cv }),
+  /** An edit by default, which never deletes anything. `replace` is a new CV from an upload or
+   *  import, where `fresh` starts over instead of re-scoring the jobs (18 Nov). */
+  putCv: (cv: MasterCV, opts: { replace?: boolean; fresh?: boolean } = {}) =>
+    call<{ version: number; clearedJobs: number }>(
+      `/api/cv${opts.replace ? `?replace=true${opts.fresh === undefined ? "" : `&fresh=${opts.fresh}`}` : ""}`,
+      { method: "PUT", body: cv },
+    ),
   putContact: (c: Contact) => call<Contact>("/api/cv/contact", { method: "PUT", body: c }),
   importCv: (yaml: string) => call<MasterCV>("/api/cv/import", { method: "POST", body: { yaml } }),
   /** CV-03: a PDF, DOCX or YAML file. Returns a proposal; nothing is saved until putCv. */

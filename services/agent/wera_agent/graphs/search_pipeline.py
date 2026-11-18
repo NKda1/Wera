@@ -22,7 +22,11 @@ today's scoring limit, or no more searches in the plan. It never pads with weak 
 then the tiers this plan hasn't sent yet.
 """
 
+import threading
+import time
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -30,10 +34,12 @@ import logfire
 
 from ..config import sites, wera
 from ..db.session import transaction
+from ..domain.dedupe import canonical_url
 from ..errors import ApiError
-from ..nodes import strategist
+from ..nodes import prefilter, strategist
+from ..settings import get_settings
 from ..sources import browser, feeds, harvest, targets
-from ..sources.firecrawl_search import SearchCaps, SearchOutcome
+from ..sources.firecrawl_search import FirecrawlSearch, SearchCaps, SearchOutcome
 from ..sources.provider_guard import Guard
 from ..sources.serper import Serper
 from . import intake
@@ -43,10 +49,106 @@ if TYPE_CHECKING:
 
 type Mode = Literal["search", "more"]
 
-# Where the bar is at each point of a search, for its own row. Scoring is where the time goes —
-# eleven seconds a job — so the jobs scored decide most of it.
-PLANNED_AT = 0.03
-SEARCHED_AT = 0.12
+# UX-01: a board search's steps, in order, each owning a slice of its bar (`search_progress` in
+# config/wera.yaml), and the phase each reports as.
+STAGES: tuple[str, ...] = ("planning", "apis", "searching", "reading")
+PHASE_OF = {"planning": "planning", "apis": "apis", "searching": "searching", "reading": "harvesting"}
+# How often a step that waits on one long call (the Strategist's plan) moves its bar.
+PACE_SECONDS = 2.0
+# How a posting was read, as the run's log says it.
+READ_HOW = {
+    "json-ld": "from the page's job data",
+    "model": "by the fast model",
+    "firecrawl": "by a paid scrape",
+    "cache": "from the crawl cache",
+    "feed": "from the job API",
+    "ats-feed": "from the employer's own feed",
+    "json-ld-rendered": "from the page's job data after rendering it",
+    "browser": "after rendering the page",
+}
+
+
+def _read_how(path: str) -> str:
+    if path in READ_HOW:
+        return READ_HOW[path]
+    if path in feeds.FEEDS:
+        return f"from {feeds.FEEDS[path].name}'s API"
+    return path.replace("-", " ")
+
+
+class Bar:
+    """A board search's own bar (UX-01, 17 Nov).
+
+    The bar used to have no number and one line of detail — "the job APIs", "tier 1 · 15
+    searches" — that stood for a minute at a time, so nobody watching could tell what was
+    happening or whether it had stopped. Each step now reports how far through itself it is, in a
+    sentence naming what it is doing, and adds a line to the run's log when it finishes.
+    """
+
+    def __init__(self, run_ids: dict[str, str]) -> None:
+        self.run_ids = run_ids
+        shares = wera().search_progress
+        self.edges: dict[str, tuple[float, float]] = {}
+        at = 0.0
+        for stage in STAGES:
+            share = getattr(shares, stage)
+            self.edges[stage] = (at, at + share)
+            at += share
+
+    def at(self, stage: str, fraction: float, detail: str, *, done: int | None = None, total: int | None = None) -> None:
+        lo, hi = self.edges[stage]
+        part = min(max(fraction, 0.0), 1.0)
+        intake.report(
+            self.run_ids,
+            phase=PHASE_OF[stage],
+            progress=lo + (hi - lo) * part,
+            stage=part,
+            detail=detail,
+            done=done,
+            total=total,
+        )
+
+    def step(self, stage: str) -> "strategist.Step":
+        """What a stage's own code calls with (fraction, sentence, done, total)."""
+        return lambda fraction, detail, done, total: self.at(stage, fraction, detail, done=done, total=total)
+
+    def done(self, stage: str, message: str, started: float) -> None:
+        """The step finished: its end of the bar, and a line in the run's log."""
+        lo, hi = self.edges[stage]
+        intake.report(
+            self.run_ids,
+            phase=PHASE_OF[stage],
+            progress=hi,
+            stage=1.0,
+            detail=message,
+            note=message,
+            took_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    @contextmanager
+    def pacing(self, stage: str, detail: str, *, expected_s: float) -> Iterator[None]:
+        """Moves the stage's bar while one long call runs, from how long that call usually takes.
+
+        Held at 95% of the stage until the call answers, and saying how long it has been — a bar
+        frozen at 3% for 115 seconds, as the Strategist's plan was on 16 Nov, reads as a hang.
+        """
+        started = time.monotonic()
+        stop = threading.Event()
+
+        def beat() -> None:
+            while not stop.wait(PACE_SECONDS):
+                waited = time.monotonic() - started
+                usually = f", usually {round(expected_s)} s" if waited > expected_s else ""
+                self.at(stage, min(0.95, waited / max(expected_s, 1.0)), f"{detail} · {round(waited)} s{usually}")
+
+        self.at(stage, 0.0, detail)
+        pacer = threading.Thread(target=beat, name="search-pace", daemon=True)
+        pacer.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            pacer.join(timeout=PACE_SECONDS)
 
 
 @dataclass
@@ -128,6 +230,7 @@ def _run(
 ) -> None:
     from ..services.store import Store
 
+    bar = Bar(run_ids)
     # "Find more" first scores what is already saved and waiting — no network at all — and only
     # goes looking if that leaves it short.
     if mode == "more":
@@ -138,21 +241,31 @@ def _run(
             return
 
     # Stage 1: the plan, and its queries.
-    intake.report(run_ids, phase="planning", progress=PLANNED_AT, detail="the Strategist's plan")
+    started = time.monotonic()
     with transaction() as session:
         store = Store(session, now)
-        planned, _matrix = store.search_queries(refresh=True)
         profile = store.get_profile()
+        asking = len(strategist.target_countries(profile))
+        with bar.pacing(
+            "planning",
+            f"Planning searches for {_count(asking, 'country', 'countries')} with the Strategist",
+            expected_s=store.plan_seconds(),
+        ):
+            planned, matrix = store.search_queries(refresh=True)
         known = store.known_apply_urls()
         key = store.plan_key()
+        pool, reader = store.pool_key(), store.reader_key()
+        # SRCH-26 (17 Nov): the pool is read best match first, scored against the CV for free.
+        rank = prefilter.lead_ranker(store.cv(), profile.titles if profile else [], demo_mode=get_settings().wera_demo_mode)
     if not planned:
         out.errors.append(("NO_QUERIES", "Add a target title to your search profile to search."))
         return
+    bar.done("planning", _plan_note(planned, matrix, now), started)
 
     # Redis and Serper are checked before anything is spent: a run that can't queue or can't ask
     # stops here, not after paying for half of it.
     client = targets.connect()
-    queue = targets.TargetQueue(client, key)
+    queue = targets.TargetQueue(client, key, pool=pool, rank=rank, reader=reader)
     serper = Serper(max_queries=caps.max_serper_queries, guard=Guard(client, "serper"))
     queue.retire_others()
     boards = sites()
@@ -161,22 +274,48 @@ def _run(
     # so Serper's first tier is only sent when they leave the search short of `surface.min`.
     person = feeds.recall_person(client, list(run_ids.values()))
     countries = {q.gl for q in planned if q.gl} or {c.lower() for c in (profile.countries if profile else [])}
+
+    saved = {canonical_url(u) or u for u in known}
+
+    def here(target: targets.Target) -> bool:
+        """A pooled posting this search may read: found for a country now ticked (or for none), and
+        not one the person already has — a shared pool outlives a CV, and a job already saved is
+        not worth paying to read again."""
+        if (canonical_url(target.url) or target.url) in saved:
+            return False
+        return not target.country or not countries or target.country in countries
+
+    # SRCH-26 (18 Nov): best match first, each ticked country's share, no source above the ceiling.
+    balance = targets.Balance(sorted(countries), per_run=surface_max, ceiling=wera().source_share.ceiling)
+
     if any(feeds.skipped(f, countries=countries, person=person) is None for f in feeds.FEEDS):
         tiers = [0, *tiers]
     pending = [t for t in tiers if mode == "search" or t not in queue.tiers_sent()]
     # Serper for finding snippet leads' originals (SRCH-32), on its own cap; made when tier 0 runs.
     resource: list[Serper] = []
 
+    # SRCH-26 (18 Nov): Firecrawl's search, asked instead when Serper's day is spent or it is
+    # failing — never for the run's own cap, which is the person's limit, not a provider's.
+    stand_in = FirecrawlSearch(max_queries=wera().source_share.firecrawl_searches, spend=out.spend, caps=caps)
+
+    def searcher() -> "Serper | FirecrawlSearch | None":
+        if not serper.stopped:
+            return serper
+        if serper.stopped in ("daily_budget", "breaker") and not stand_in.stopped and get_settings().firecrawl_api_key:
+            return stand_in
+        return None
+
     def sent() -> int:
-        return serper.sent + sum(r.sent for r in resource)
+        return serper.sent + stand_in.sent + sum(r.sent for r in resource)
 
     def discover_next() -> bool:
         """Stage 2 for the next tier. False when there is no tier left or Serper stopped."""
-        if not pending or serper.stopped:
+        if not pending or searcher() is None:
             return False
         tier = pending.pop(0)
+        started = time.monotonic()
         if tier == 0:
-            intake.report(run_ids, phase="searching", progress=PLANNED_AT, detail="the job APIs")
+            bar.at("apis", 0.0, "Asking the job APIs for your titles in each place")
             resource.append(
                 Serper(max_queries=strategist.RESOURCE_QUERIES, window=strategist.RESOURCE_WINDOW, guard=Guard(client, "serper"))
             )
@@ -190,8 +329,11 @@ def _run(
                 redis=client,
                 person=person,
                 resource=resource[0],
+                on_step=bar.step("apis"),
+                rank=rank,
             )
             queue.mark_tier_sent(0)
+            bar.done("apis", _feeds_note(asked), started)
             out.feeds = asked.by_feed
             out.queries = sent()
             out.errors += [("SEARCH", message) for message in asked.errors if ("SEARCH", message) not in out.errors]
@@ -201,9 +343,31 @@ def _run(
         if not sending:
             queue.mark_tier_sent(tier)  # no page 1 was rich enough for its page 2: nothing to pay for
             return discover_next()
-        intake.report(run_ids, phase="searching", progress=PLANNED_AT, detail=f"tier {tier} · {sending} searches")
-        found = strategist.discover(plan, [tier], serper=serper, queue=queue, known_urls=known, sites=boards, profile=profile)
+        engine = searcher()
+        if engine is stand_in:
+            room = max(stand_in.max_queries - stand_in.sent, 0)
+            said = f"Searching with Firecrawl (Serper is resting): tier {tier}, up to {_count(min(sending, room), 'search', 'searches')}"
+        else:
+            room = max(serper.max_queries - serper.sent, 0)
+            said = (
+                f"Searching Google: tier {tier}, {_count(sending, 'search', 'searches')}"
+                if sending <= room
+                else f"Searching Google: tier {tier}, {room} of its {sending} searches (this run's limit is {serper.max_queries})"
+            )
+        bar.at("searching", 0.0, said, done=0, total=min(sending, room))
+        found = strategist.discover(
+            plan,
+            [tier],
+            serper=engine,  # type: ignore[arg-type]
+            queue=queue,
+            known_urls=known,
+            sites=boards,
+            profile=profile,
+            on_step=bar.step("searching"),
+            engine="firecrawl" if engine is stand_in else "google",
+        )
         queue.mark_tier_sent(tier)
+        bar.done("searching", _search_note(tier, found, "Firecrawl" if engine is stand_in else "Google"), started)
         out.tiers.append(tier)
         out.queries = sent()
         out.results += found.results
@@ -215,11 +379,22 @@ def _run(
     if mode == "search":
         discover_next()  # a search always searches; "Find more" reads the queue first
 
+    reading_started = time.monotonic()
+
+    def reading(target: targets.Target) -> None:
+        bar.at(
+            "reading",
+            out.surfaced / surface_max,
+            f"Reading {target.title or 'a posting'} on {target.host} · {out.surfaced} of {surface_max} found so far",
+            done=out.surfaced,
+            total=surface_max,
+        )
+
     with browser.session() as fetch_html:
         while out.surfaced < surface_max:
             with transaction() as session:
                 intake._check_cancelled(session, list(run_ids.values()))
-            batch = queue.take(min(harvest.BATCH, surface_max - out.surfaced))
+            batch = queue.take(min(harvest.BATCH, surface_max - out.surfaced), accept=here, balance=balance)
             if not batch:
                 if out.surfaced >= surface_min:
                     break
@@ -229,10 +404,8 @@ def _run(
                 break
 
             # Stage 3: read and check.
-            progress = SEARCHED_AT + (1 - SEARCHED_AT) * out.surfaced / surface_max
-            intake.report(
-                run_ids, phase="harvesting", progress=progress, detail=batch[0].host, done=out.surfaced, total=surface_max
-            )
+            lo, hi = bar.edges["reading"]
+            progress = lo + (hi - lo) * out.surfaced / surface_max
             read = harvest.harvest(
                 batch,
                 caps=caps,
@@ -244,6 +417,7 @@ def _run(
                 fetch_html=fetch_html,
                 parse=intake.normalise_with_model,
                 redis=client,
+                on_read=reading,
             )
             out.read += len(batch) - read.put_back
             out.by_path.update(read.by_path)
@@ -262,7 +436,7 @@ def _run(
                 now=now,
                 run_ids=run_ids,
                 progress_from=progress,
-                progress_to=min(1.0, progress + (1 - SEARCHED_AT) * len(read.jobs) / surface_max),
+                progress_to=min(hi, progress + (hi - lo) * len(read.jobs) / surface_max),
                 limit=surface_max - out.surfaced,
                 only_these=True,
             )
@@ -275,7 +449,9 @@ def _run(
                 out.short = None if out.surfaced >= surface_min else _code_reason(code)
                 break
 
-    out.queued = queue.size()
+    out.queued = queue.size(accept=here)
+    if out.read or out.surfaced:
+        bar.done("reading", _reading_note(out, balance.split()), reading_started)
     if out.short:
         out.errors.append(("FEWER_THAN_8", f"Found {out.surfaced} of the {surface_min} a search aims for: {out.short}."))
     logfire.info(
@@ -293,7 +469,7 @@ def _stops(errors: list[tuple[str, str]]) -> bool:
 
 def _code_reason(code: str) -> str:
     if code == "DAILY_CAP":
-        return "today's scoring limit is used up"
+        return "the scoring limit of the last 24 hours is used up"
     if code == "BUDGET_REACHED":
         return "this week's model budget is spent"
     return "the model provider stopped answering"
@@ -322,3 +498,63 @@ def _paid_cap(spend: SearchOutcome, caps: SearchCaps | None) -> str:
         limit = f" of {caps.max_pages}" if caps is not None else ""
         return f"the limit{limit} paid page reads a run may make was reached"
     return "this run's Firecrawl credits are spent"
+
+
+def _count(n: int, noun: str, plural: str | None = None) -> str:
+    return f"{n} {noun if n == 1 else plural or noun + 's'}"
+
+
+def _plan_note(planned: list, matrix: object | None, now: int) -> str:
+    """What planning came to, for the run's log."""
+    from ..clock import iso
+
+    countries = _count(len({q.gl for q in planned if q.gl}), "country", "countries")
+    searches = _count(len(planned), "search", "searches")
+    if matrix is None:
+        return f"The Strategist didn't answer, so the searches use your titles as written: {searches} in {countries}"
+    if getattr(matrix, "generated_at", None) == iso(now):
+        return f"The Strategist planned {searches} in {countries}"
+    return f"Today's plan still fits your CV and profile: {searches} in {countries}"
+
+
+def _feeds_note(asked: "strategist.FeedDiscovery") -> str:
+    used = {f: st for f, st in asked.by_feed.items() if "skipped" not in st}
+    searches = sum(int(st.get("searches", 0)) for st in used.values())  # type: ignore[call-overload]
+    leads = sum(int(st.get("leads", 0)) for st in used.values())  # type: ignore[call-overload]
+    each = ", ".join(f"{feeds.FEEDS[f].name} {st['searches']}" for f, st in used.items() if st.get("searches"))
+    left = [feeds.FEEDS[f].name for f, st in asked.by_feed.items() if st.get("skipped")]
+    text = f"Job APIs: {_count(searches, 'search', 'searches')}, {_count(leads, 'posting')}, {asked.queued} queued to read"
+    if each:
+        text += f" ({each})"
+    if left:
+        text += f" · not asked: {', '.join(left)}"
+    return text
+
+
+def _search_note(tier: int, found: "strategist.Discovery", engine: str = "Google") -> str:
+    postings = found.kinds["posting"]
+    text = (
+        f"{engine}, tier {tier}: {_count(found.asked, 'search', 'searches')}, "
+        f"{_count(found.results, 'result')}, {_count(postings, 'posting')}, {found.queued} queued to read"
+    )
+    skipped = [
+        part
+        for part in (
+            f"{found.excluded} left out by title" if found.excluded else "",
+            f"{found.known} already saved" if found.known else "",
+        )
+        if part
+    ]
+    return text + (f" ({', '.join(skipped)})" if skipped else "")
+
+
+def _reading_note(out: Piped, split: str = "") -> str:
+    """What reading came to, short enough for the log's 200 characters: the split by place and
+    source first (SRCH-26), then what was kept and scored. How each was read is in Logfire."""
+    refused = sum(out.rejected.values())
+    where = f" ({split})" if split else ""
+    text = f"Read {_count(out.read, 'posting')}{where}: {sum(out.by_path.values())} kept"
+    if refused:
+        top = out.rejected.most_common(1)[0][0].replace("-", " ")
+        text += f", {refused} refused (most: {top})"
+    return text + f" · {_count(out.surfaced, 'job')} scored, {len(out.new_ids)} new on your shortlist"

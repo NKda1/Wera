@@ -304,7 +304,8 @@ class TestLetterRedraft:
         assert letter.guard.pass_
 
     def test_one_dropped_paragraph_out_of_four_is_not_redrafted(self, client, approved, monkeypatch):
-        """Dropping one from four still leaves a letter worth sending, so it isn't paid for twice."""
+        """Dropping one from four leaves a letter worth sending while it still has LTR-01's 150
+        words, so it isn't paid for twice."""
         respond, calls = self._spoil(1)
         monkeypatch.setattr(demo, "respond", respond)
         app_id = approved()
@@ -315,6 +316,33 @@ class TestLetterRedraft:
         assert len(letter.paragraphs) >= 3
         # The drop is still shown to the person.
         assert letter.guard.violations
+
+    def test_one_dropped_paragraph_that_leaves_it_short_is_redrafted(self, client, approved, monkeypatch):
+        """17 Nov: 6 of the last 15 letters lost one paragraph to the guard and came out at
+        124–148 words, and none was asked for again — three paragraphs counted as enough."""
+        real = demo.respond
+        calls: list[str] = []
+
+        def respond(task, variables, context, demo_input=None):
+            out = real(task, variables, context, demo_input)
+            if task == "letter.write":
+                calls.append(variables["note"])
+                if len(calls) == 1:
+                    for para in out["paragraphs"]:  # each short, so one cut leaves under 150
+                        para["text"] = " ".join(para["text"].split()[:40]).rstrip(".,;") + "."
+                    out["paragraphs"][1]["text"] += " I ran the Kubernetes platform for 40 teams."
+            return out
+
+        monkeypatch.setattr(demo, "respond", respond)
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+
+        assert len(calls) == 2, "the letter the guard left short should have been asked for again"
+        assert "under the 150 a letter needs" in calls[1]
+        assert "paragraph 2:" in calls[1]  # which one was cut, as the person counts
+        with transaction() as session:
+            letter = Store(session).load_document(app_id, "letter", CoverLetter)
+        assert letter.word_count >= 150
 
     def test_a_letter_that_stays_short_keeps_the_fuller_attempt_and_shows_why(self, client, approved, monkeypatch):
         """Two tries is the cap. Rather than loop, WERA keeps the better letter with its

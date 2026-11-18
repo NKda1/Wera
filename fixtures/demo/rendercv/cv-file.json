@@ -1,0 +1,140 @@
+{
+  "yaml": "# A RenderCV file (rendercv.com). Your email and phone are added when the PDF is made.\ncv:\n  name: Jordan Ellery\n  headline: Computer Science graduate building production AI tooling\n  location: London\n  custom_connections:\n    - fontawesome_icon: link\n      placeholder: jordan-ellery.example\n      url: https://jordan-ellery.example\n    - fontawesome_icon: link\n      placeholder: code.jordan-ellery.example\n      url: https://code.jordan-ellery.example\n  sections:\n    Summary:\n      - 'Computer Science graduate building production AI tooling: a FastAPI PII-detection gateway for LLM prompts, and a live TypeScript and Postgres platform with real users.'\n    Experience:\n      - company: International Digital Standards Union\n        position: AI Intern\n        start_date: 2026-02\n        end_date: 2026-08\n        location: Geneva\n        highlights:\n          - Built a FastAPI API gateway that scans prompts for personal data (regex and Presidio) before they reach third-party LLMs.\n          - Wrote prompt templates and evaluation notes for the gateway's redaction rules with the security team.\n      - company: Fieldmark\n        position: Founder and Developer\n        start_date: 2024-09\n        end_date: present\n        location: London\n        highlights:\n          - Built and run a scouting platform for grassroots basketball clubs in Europe on Next.js, Supabase / Postgres and Stripe, with real users.\n          - Added a LangGraph agent in Python that drafts weekly scouting summaries from coach notes for review.\n    Projects:\n      - company: LangChain community integrations\n        position: Open-source contributor\n        start_date: 2025-03\n        end_date: 2025-06\n        highlights:\n          - Added structured-output retries with schema validation to a LangChain community model integration in Python.\n    Education:\n      - institution: University of Westmoor\n        area: Computer Science\n        degree: BSc\n        start_date: 2023-09\n        end_date: 2026-06\n    Skills:\n      - Python · FastAPI · LangGraph · PostgreSQL · LLM guardrails · Presidio\ndesign:\n  theme: engineeringresumes\n  page:\n    size: a4\n    show_top_note: false\n  typography:\n    alignment: justified-with-no-hyphenation\n  header:\n    connections:\n      show_icons: false\nlocale:\n  language: english\n",
+  "theme": "engineeringresumes",
+  "pageSize": "a4",
+  "editedByUser": false,
+  "editable": false,
+  "themes": [
+    {
+      "id": "engineeringresumes",
+      "label": "Engineering résumés",
+      "note": "Black, compact, one column. Reads in order: the default.",
+      "design": "design:\n  theme: engineeringresumes\n  page:\n    size: a4\n    show_top_note: false\n  typography:\n    alignment: justified-with-no-hyphenation\n  header:\n    connections:\n      show_icons: false\n"
+    },
+    {
+      "id": "sb2nov",
+      "label": "sb2nov",
+      "note": "Title and company on two lines, dates on the right.",
+      "design": "design:\n  theme: sb2nov\n  page:\n    size: a4\n    show_top_note: false\n  typography:\n    alignment: justified-with-no-hyphenation\n  header:\n    connections:\n      show_icons: false\n"
+    },
+    {
+      "id": "engineeringclassic",
+      "label": "Engineering classic",
+      "note": "Like the default, with a coloured name and rules.",
+      "design": "design:\n  theme: engineeringclassic\n  page:\n    size: a4\n    show_top_note: false\n  typography:\n    alignment: justified-with-no-hyphenation\n  header:\n    connections:\n      show_icons: false\n"
+    },
+    {
+      "id": "harvard",
+      "label": "Harvard",
+      "note": "Serif, centred header, the US campus style.",
+      "design": "design:\n  theme: harvard\n  page:\n    size: a4\n    show_top_note: false\n  typography:\n    alignment: justified-with-no-hyphenation\n  header:\n    connections:\n      show_icons: false\n"
+    },
+    {
+      "id": "moderncv",
+      "label": "ModernCV",
+      "note": "Dates in a left margin.",
+      "design": "design:\n  theme: moderncv\n  page:\n    size: a4\n    show_top_note: false\n  typography:\n    alignment: justified-with-no-hyphenation\n  header:\n    connections:\n      show_icons: false\n"
+    },
+    {
+      "id": "ink",
+      "label": "Ink",
+      "note": "Company first, title below.",
+      "design": "design:\n  theme: ink\n  page:\n    size: a4\n    show_top_note: false\n  typography:\n    alignment: justified-with-no-hyphenation\n  header:\n    connections:\n      show_icons: false\n"
+    },
+    {
+      "id": "ember",
+      "label": "Ember",
+      "note": "Warm accent colour, diamond bullets.",
+      "design": "design:\n  theme: ember\n  page:\n    size: a4\n    show_top_note: false\n  header:\n    connections:\n      show_icons: false\n"
+    },
+    {
+      "id": "classic",
+      "label": "Classic",
+      "note": "RenderCV's own default. Dates are read after the bullets.",
+      "design": "design:\n  theme: classic\n  page:\n    size: a4\n    show_top_note: false\n  typography:\n    alignment: justified-with-no-hyphenation\n  header:\n    connections:\n      show_icons: false\n"
+    },
+    {
+      "id": "opal",
+      "label": "Opal",
+      "note": "Dates under each role's bullets, which some parsers misread.",
+      "design": "design:\n  theme: opal\n  page:\n    size: a4\n    show_top_note: false\n  header:\n    connections:\n      show_icons: false\n"
+    }
+  ],
+  "name": "Jordan Ellery",
+  "location": "London",
+  "links": [
+    "jordan-ellery.example",
+    "code.jordan-ellery.example"
+  ],
+  "blocks": [
+    {
+      "t": "heading",
+      "text": "Summary"
+    },
+    {
+      "t": "body",
+      "text": "Computer Science graduate building production AI tooling: a FastAPI PII-detection gateway for LLM prompts, and a live TypeScript and Postgres platform with real users."
+    },
+    {
+      "t": "heading",
+      "text": "Experience"
+    },
+    {
+      "t": "row",
+      "text": "AI Intern — International Digital Standards Union, Geneva",
+      "right": "2026"
+    },
+    {
+      "t": "bullet",
+      "text": "Built a FastAPI API gateway that scans prompts for personal data (regex and Presidio) before they reach third-party LLMs."
+    },
+    {
+      "t": "bullet",
+      "text": "Wrote prompt templates and evaluation notes for the gateway's redaction rules with the security team."
+    },
+    {
+      "t": "row",
+      "text": "Founder and Developer — Fieldmark, London",
+      "right": "2024 – present"
+    },
+    {
+      "t": "bullet",
+      "text": "Built and run a scouting platform for grassroots basketball clubs in Europe on Next.js, Supabase / Postgres and Stripe, with real users."
+    },
+    {
+      "t": "bullet",
+      "text": "Added a LangGraph agent in Python that drafts weekly scouting summaries from coach notes for review."
+    },
+    {
+      "t": "heading",
+      "text": "Projects"
+    },
+    {
+      "t": "row",
+      "text": "Open-source contributor — LangChain community integrations",
+      "right": "2025"
+    },
+    {
+      "t": "bullet",
+      "text": "Added structured-output retries with schema validation to a LangChain community model integration in Python."
+    },
+    {
+      "t": "heading",
+      "text": "Education"
+    },
+    {
+      "t": "row",
+      "text": "BSc Computer Science — University of Westmoor",
+      "right": "2026"
+    },
+    {
+      "t": "heading",
+      "text": "Skills"
+    },
+    {
+      "t": "body",
+      "text": "Python · FastAPI · LangGraph · PostgreSQL · LLM guardrails · Presidio"
+    }
+  ],
+  "unresolvedRoleIds": []
+}

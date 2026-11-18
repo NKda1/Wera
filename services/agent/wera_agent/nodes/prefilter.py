@@ -100,6 +100,39 @@ def cosine(reference: np.ndarray, candidates: np.ndarray) -> np.ndarray:
     return (candidates / norms[:, None]) @ ref
 
 
+# How much a lead whose title names one of the person's target titles is moved up, on top of its
+# similarity to the CV (which runs about 0.3–0.9 with the real embedder).
+TITLE_BOOST = 0.1
+
+
+def lead_ranker(cv: MasterCV, titles: list[str], *, demo_mode: bool) -> Any:
+    """How the search pool scores a posting before anything is paid to read it (17 Nov): its title
+    and snippet against the CV, by the same local embedding as `shortlist`, plus `TITLE_BOOST`
+    when the title names a target title. Free, and the same scale wherever the posting was found,
+    so with several places the best match is read first.
+
+    None when the embedding model can't be loaded (offline, first run with no network): the search
+    then reads in the order it found things, as it did before, rather than not at all."""
+    try:
+        model = embedder(demo_mode)
+        reference = model.embed([cv_profile_text(cv)])[0]
+    except Exception:  # noqa: BLE001 — ranking is an improvement, never a reason a search fails
+        logfire.warn("Couldn't load the embedding model; the search pool is read in the order found")
+        return None
+    wanted = [t.casefold() for t in titles if t.strip()]
+
+    def rank(items: list[tuple[str, str]]) -> list[float]:
+        if not items:
+            return []
+        scores = cosine(reference, model.embed([f"{title}. {snippet}" for title, snippet in items]))
+        return [
+            float(score) + (TITLE_BOOST if any(w in title.casefold() for w in wanted) else 0.0)
+            for (title, _snippet), score in zip(items, scores, strict=True)
+        ]
+
+    return rank
+
+
 def shortlist(jobs: list[Job], cv: MasterCV, *, demo_mode: bool, top_n: int = DEFAULT_TOP_N) -> list[Job]:
     """The `top_n` jobs closest to the CV, best first. Fewer jobs than that go through as they are.
 

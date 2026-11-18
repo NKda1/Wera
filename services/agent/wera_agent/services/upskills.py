@@ -25,13 +25,18 @@ from ..clock import parse_ms
 from ..db.models import ApplicationRow, FitReportRow, JobRow
 from ..domain.vocab import NOT_A_SKILL, cv_line_index, group_key, master_cv_text, skill_text, text_has_term
 from ..schemas.cv import MasterCV
-from ..schemas.upskills import QuickWin, Upskill, UpskillJob, UpskillsReport
+from ..schemas.upskills import CategoryCoverage, Coverage, QuickWin, SkillDemand, Upskill, UpskillJob, UpskillsReport
 
 DAY_MS = 24 * 60 * 60 * 1000
 WINDOW_DAYS = 60
 TREND_DAYS = 14
 TOP = 25
 EXAMPLES = 3
+# The most-asked skills, whatever the CV says about them: enough for the page to chart its top 15
+# within any one category.
+DEMAND = 40
+# The counters each status adds to, in `Coverage`'s field names.
+TALLY = {"covered": "covered", "quick_win": "quick_wins", "missing": "missing"}
 
 # Keywords that leak past `keywords.extract`'s soft-skill bucket and aren't something to learn.
 # Measured on the real reports (14 Nov): "problem solving" and "communication skills" were in the
@@ -97,13 +102,24 @@ def report(session: Session, cv: MasterCV, *, now: int, days: int = WINDOW_DAYS)
 
     missing: list[Upskill] = []
     wins: list[QuickWin] = []
+    demand: list[SkillDemand] = []
+    coverage = Coverage()
+    by_category: dict[str, CategoryCoverage] = {}
     for key, jobs in asked.items():
         term = spelled[key].most_common(1)[0][0]
         share = len(jobs) / considered if considered else 0.0
-        if text_has_term(master, term):
-            if not any(text_has_term(skill_text(s), term) for s in cv.skills):
-                line = next((v["text"] for v in lines.values() if text_has_term(v["text"], term)), "")
-                wins.append(QuickWin(term=term, jobs=len(jobs), share=round(share, 3), line=line[:160]))
+        category = categories[key].most_common(1)[0][0] if categories[key] else None
+        listed = any(text_has_term(skill_text(s), term) for s in cv.skills)
+        status = ("covered" if listed else "quick_win") if text_has_term(master, term) else "missing"
+        demand.append(SkillDemand(term=term, category=category, jobs=len(jobs), share=round(share, 3), status=status))
+        field = TALLY[status]
+        setattr(coverage, field, getattr(coverage, field) + len(jobs))
+        bucket = by_category.setdefault(category or "other", CategoryCoverage(category=category or "other"))
+        setattr(bucket, field, getattr(bucket, field) + len(jobs))
+        if status == "quick_win":
+            line = next((v["text"] for v in lines.values() if text_has_term(v["text"], term)), "")
+            wins.append(QuickWin(term=term, category=category, jobs=len(jobs), share=round(share, 3), line=line[:160]))
+        if status != "missing":
             continue
         score = sum((2 if e["required"] else 1) * (2 if e["double"] else 1) for e in jobs.values())
         recent = sum(1 for e in jobs.values() if e["seen"] >= recent_from)
@@ -116,7 +132,7 @@ def report(session: Session, cv: MasterCV, *, now: int, days: int = WINDOW_DAYS)
             Upskill(
                 term=term,
                 spellings=sorted(spelled[key]),
-                category=categories[key].most_common(1)[0][0] if categories[key] else None,
+                category=category,
                 jobs=len(jobs),
                 share=round(share, 3),
                 required_share=round(sum(e["required"] for e in jobs.values()) / len(jobs), 3),
@@ -130,7 +146,17 @@ def report(session: Session, cv: MasterCV, *, now: int, days: int = WINDOW_DAYS)
         )
     missing.sort(key=lambda u: (-u.score, -u.jobs, u.term.lower()))
     wins.sort(key=lambda w: (-w.jobs, w.term.lower()))
-    return UpskillsReport(window_days=days, jobs_considered=considered, missing=missing[:TOP], quick_wins=wins[:TOP])
+    demand.sort(key=lambda d: (-d.jobs, d.term.lower()))
+    order = {"hard_skill": 0, "tool": 1, "methodology": 2, "other": 3}
+    return UpskillsReport(
+        window_days=days,
+        jobs_considered=considered,
+        missing=missing[:TOP],
+        quick_wins=wins[:TOP],
+        demand=demand[:DEMAND],
+        coverage=coverage,
+        by_category=sorted(by_category.values(), key=lambda c: order[c.category]),
+    )
 
 
 def _as_written(cv: MasterCV, term: str) -> str:

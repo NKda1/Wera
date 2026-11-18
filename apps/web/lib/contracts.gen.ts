@@ -3,6 +3,7 @@
 
 export type Seniority = "intern" | "graduate" | "junior" | "entry" | "mid" | "senior" | "lead" | "principal";
 export type KeywordCategory = "hard_skill" | "methodology" | "tool";
+export type BriefTopic = "what_they_do" | "who_they_serve" | "size_or_stage" | "values" | "why_the_role";
 export type HookType = "Introduction" | "Core-Metric" | "Company-Mission" | "Industry-Problem" | "Referral";
 export type LetterSection = "opening_hook" | "core_value_proposition" | "strategic_alignment_and_culture" | "call_to_action_and_close";
 export type ApplicationStatus =
@@ -19,12 +20,15 @@ export type ApplicationStatus =
 export type DraftStep = "cv" | "letter" | "ats" | "answers";
 export type Channel = "board_search" | "email_alert" | "watchlist" | "manual";
 export type SearchChannel = "board_search" | "email_alert" | "watchlist";
+export type PageSize = "a4" | "us-letter";
+export type SectionKind = "intro" | "role" | "requirements" | "nice" | "benefits" | "company" | "process" | "legal" | "other";
 export type YearMonth = string;
 export type IntakeChannel = "board_search" | "email_alert" | "watchlist" | "rescore" | "score_more";
 export type RunPhase =
   | "queued"
   | "discovering"
   | "planning"
+  | "apis"
   | "harvesting"
   | "searching"
   | "scraping"
@@ -42,6 +46,7 @@ export type SkillLevel = "familiar" | "proficient" | "expert";
 export type PostedPrecision = "exact" | "approximate" | "unknown";
 export type Recency = "24h" | "7d" | "21d";
 export type SecretStatus = "set" | "missing" | "invalid";
+export type SkillStatus = "covered" | "quick_win" | "missing";
 export type SuggestionKind = "exclude_term" | "remove_title" | "add_title" | "add_location";
 
 /**
@@ -86,7 +91,9 @@ export interface Pack {
   analysis?: JobAnalysis;
   answers: AnswerItem[];
   ats: AtsReport;
+  company?: CompanyBrief;
   cv: TailoredCV;
+  cvFile?: CvFileState;
   letter: CoverLetter;
 }
 /**
@@ -165,6 +172,39 @@ export interface AtsPart {
   max: number;
   points: number;
 }
+/**
+ * 18 Nov: what the post and the company's own About page say about it, each item quoted.
+ *
+ * Items whose quote isn't in its source were dropped before this was saved. `site` is absent
+ * when WERA didn't read one, and `site_note` says why: an agency's post, a site whose
+ * robots.txt says no, one that couldn't be read, or no site found.
+ */
+export interface CompanyBrief {
+  company: string;
+  createdAt: string;
+  items: BriefItem[];
+  model: string;
+  site?: CompanySource;
+  siteNote?: string;
+}
+/**
+ * One thing learned about the company, and the words it was learned from.
+ */
+export interface BriefItem {
+  quote: string;
+  source: "post" | "site";
+  text: string;
+  topic: BriefTopic;
+}
+/**
+ * The page a brief read, kept so its quotes can be checked again (and by the letter guard).
+ */
+export interface CompanySource {
+  fetchedAt: string;
+  text: string;
+  textHash: string;
+  url: string;
+}
 export interface TailoredCV {
   cvVersion: number;
   guard: GuardResult;
@@ -198,6 +238,14 @@ export interface Cited {
   sourceIds: string[];
   text: string;
 }
+/**
+ * What the person chose for this pack's CV file. Absent until they choose something: the
+ * file is then WERA's, built from the tailored CV with the default design.
+ */
+export interface CvFileState {
+  editedByUser: boolean;
+  theme: string;
+}
 export interface CoverLetter {
   companyFact: CompanyFact;
   greeting: string;
@@ -211,6 +259,7 @@ export interface CoverLetter {
 export interface CompanyFact {
   policyQuote: string;
   quote: string;
+  siteQuote: string;
 }
 /**
  * A letter paragraph, and which part of the template it is doing.
@@ -228,6 +277,7 @@ export interface Paragraph {
 }
 export interface ApplicationJob {
   applyUrl?: string;
+  careersUrl?: string;
   company: string;
   fitTotal: number;
   id: string;
@@ -289,6 +339,12 @@ export interface Bullet {
   tags: string[];
   text: string;
 }
+export interface CategoryCoverage {
+  category: KeywordCategory | "other";
+  covered: number;
+  missing: number;
+  quickWins: number;
+}
 export interface ChannelSummary {
   channel: SearchChannel;
   detail: string;
@@ -308,9 +364,74 @@ export interface CoreCompetencies {
   primaryDomains: string[];
   technicalStack: string[];
 }
+/**
+ * Skill asks — one job asking for one skill — by where the CV stands on them. Counted over
+ * asks rather than distinct skills, so a skill twenty jobs want weighs twenty times one that a
+ * single job mentions.
+ */
+export interface Coverage {
+  covered: number;
+  missing: number;
+  quickWins: number;
+}
+/**
+ * One line of the CV as a reader sees it, in reading order. The Word file is written from
+ * these and the PDF lint checks against them (ATSC-06), so both follow the file.
+ */
+export interface CvBlock {
+  right?: string;
+  t: "heading" | "row" | "bullet" | "body";
+  text: string;
+}
+/**
+ * `GET /applications/{id}/cv-file`: the file, what is in it, and what can be done with it.
+ * No contact details: those are added when it is rendered.
+ */
+export interface CvFile {
+  blocks: CvBlock[];
+  editable: boolean;
+  editedByUser: boolean;
+  links: string[];
+  location?: string;
+  name: string;
+  pageSize: PageSize;
+  theme: string;
+  themes: CvTheme[];
+  unresolvedRoleIds: string[];
+  yaml: string;
+}
+export interface CvTheme {
+  design: string;
+  id: string;
+  label: string;
+  note: string;
+}
+/**
+ * A saved CV file, and the application with its ATS report measured against it.
+ */
+export interface CvFileSaved {
+  application: ApplicationWithJob;
+  file: CvFile;
+}
+/**
+ * Why the file can't be rendered, where the person can find it.
+ */
+export interface CvIssue {
+  column?: number;
+  line?: number;
+  message: string;
+  where?: string;
+}
 export interface CvLine {
   text: string;
   where: string;
+}
+/**
+ * The file rendered as page images, for the editor. Issues instead when it won't render.
+ */
+export interface CvPreview {
+  issues: CvIssue[];
+  pages: string[];
 }
 export interface CvProfile {
   coreCompetencies: CoreCompetencies;
@@ -357,6 +478,36 @@ export interface ImpliedAchievement {
 export interface CvVersion {
   clearedJobs: number;
   version: number;
+}
+export interface DescriptionBlock {
+  items?: string[];
+  t: "p" | "ul" | "ol" | "h";
+  text?: string;
+}
+export interface DescriptionSection {
+  blocks: DescriptionBlock[];
+  fold: boolean;
+  heading: string | null;
+  kind: SectionKind;
+}
+/**
+ * The description laid out to read (`domain.description`), computed from `description_md`
+ * in code. `description_md` itself stays as it arrived, because the fit score's cache key
+ * (`fit.job_hash`) reads it, and re-flowing it would make every score look stale.
+ */
+export interface DescriptionView {
+  facts: JobFact[];
+  of: string;
+  sections: DescriptionSection[];
+  version: number;
+}
+/**
+ * One key fact about a job, in the post's own words: "Contract: Permanent", "Experience: 7+
+ * years of finance experience". Read off the post in code, never written by a model.
+ */
+export interface JobFact {
+  label: string;
+  value: string;
 }
 export interface Education {
   degree: string;
@@ -463,12 +614,14 @@ export interface IntakeRun {
   finishedAt?: string;
   id: string;
   localPages: number;
+  log: RunStep[];
   newJobs: number;
   phase: RunPhase;
   progress: number;
   queries: number;
   queued: number;
   results: number;
+  stageProgress: number;
   startedAt: string;
   status: "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
   total: number;
@@ -476,6 +629,15 @@ export interface IntakeRun {
 export interface RunError {
   code: string;
   message: string;
+}
+/**
+ * One finished step of a run, as the run panel lists it (UX-01, 17 Nov).
+ */
+export interface RunStep {
+  at: string;
+  message: string;
+  ms: number | null;
+  phase: RunPhase;
 }
 /**
  * What an international organisation's own system says about a post (SRCH-34).
@@ -495,6 +657,7 @@ export interface Job {
   dedupeKey: string;
   descriptionMd: string | null;
   descriptionStatus: "full" | "partial" | "missing";
+  descriptionView?: DescriptionView;
   firstSeen: string;
   foundBy?: FoundBy;
   hiddenReason?: string;
@@ -515,6 +678,7 @@ export interface Job {
   snoozedUntil?: string;
   sources: JobSource[];
   status: JobStatus;
+  summary?: JobSummary;
   title: string;
   via?: string;
 }
@@ -528,6 +692,21 @@ export interface JobSource {
   channel: Channel;
   detail: string;
   seenAt: string;
+}
+/**
+ * `job.summary` (18 Nov), written on click and kept until the post changes. Every item was
+ * checked against the post in code; the ones whose words or numbers aren't in it were dropped.
+ */
+export interface JobSummary {
+  createdAt: string;
+  duties: string[];
+  gist: string;
+  jobHash: string;
+  model: string;
+  mustHaves: string[];
+  niceToHaves: string[];
+  perks: string[];
+  watchOuts: string[];
 }
 export interface JobList {
   items: ScoredJob[];
@@ -543,6 +722,7 @@ export interface ScoredJob {
   dedupeKey: string;
   descriptionMd: string | null;
   descriptionStatus: "full" | "partial" | "missing";
+  descriptionView?: DescriptionView;
   evergreen: boolean;
   firstSeen: string;
   fit: FitReport;
@@ -568,6 +748,7 @@ export interface ScoredJob {
   snoozedUntil?: string;
   sources: JobSource[];
   status: JobStatus;
+  summary?: JobSummary;
   title: string;
   urgency: Urgency;
   via?: string;
@@ -665,8 +846,10 @@ export interface PlaceOption {
   boards: string[];
   code: string;
   feeds: string[];
+  main: boolean;
   name: string;
   region: string;
+  searched: boolean;
 }
 /**
  * One search the Strategist will send (SRCH-20, stage 1). Built in code from the parsed CV and
@@ -708,7 +891,6 @@ export interface SearchProfile {
   countries: string[];
   exclude: string[];
   generatedFromCvVersion: number;
-  international: boolean;
   locations: string[];
   recency: Recency;
   remote: "any" | "remote_only" | "no_remote";
@@ -723,6 +905,7 @@ export interface SearchProfile {
  * cheapest point on the ATS score (ATSC-07), and only the person can decide to claim it.
  */
 export interface QuickWin {
+  category?: KeywordCategory;
   jobs: number;
   line: string;
   share: number;
@@ -740,7 +923,6 @@ export interface SavedProfile {
   countries: string[];
   exclude: string[];
   generatedFromCvVersion: number;
-  international: boolean;
   locations: string[];
   recency: Recency;
   refiltered: WhereChange | null;
@@ -778,6 +960,7 @@ export interface SecretsStatus {
 export interface Settings {
   baseUrl: string;
   cvPages: 1 | 2;
+  dailyScoreLimit: boolean;
   demoMode: boolean;
   inbox: InboxSettings;
   learnedRanking: boolean;
@@ -799,11 +982,13 @@ export interface SettingsResponse {
   allowClearJobs: boolean;
   baseUrl: string;
   cvPages: 1 | 2;
+  dailyScoreLimit: boolean;
   demoMode: boolean;
   inbox: InboxSettings;
   learnedRanking: boolean;
   llmLastCheckedAt?: string;
   llmProvider: string;
+  maxScoredPerDay: number;
   models: TierModels;
   redactContact: boolean;
   scheduledIntake: boolean;
@@ -824,7 +1009,9 @@ export interface ShortlistMeta {
   hiddenTotal: number;
   nearMisses: number;
   rejected: number;
+  scoreCapMessage: string | null;
   snoozed: number;
+  staleScores: number;
 }
 export interface SiteOption {
   countries: string[];
@@ -838,6 +1025,17 @@ export interface SiteOption {
   region: string;
   reviewed: boolean;
   robotsOk?: boolean;
+}
+/**
+ * One skill the posts ask for, whatever the CV says about it — what the Upskills chart of
+ * the most-asked skills draws, coloured by `status` (17 Nov).
+ */
+export interface SkillDemand {
+  category?: KeywordCategory;
+  jobs: number;
+  share: number;
+  status: SkillStatus;
+  term: string;
 }
 /**
  * MATCH-13: a change to the search profile that the person's decisions point at. Nothing
@@ -891,8 +1089,21 @@ export interface UpskillJob {
   title: string;
 }
 export interface UpskillsReport {
+  byCategory: CategoryCoverage[];
+  coverage: Coverage1;
+  demand: SkillDemand[];
   jobsConsidered: number;
   missing: Upskill[];
   quickWins: QuickWin[];
   windowDays: number;
+}
+/**
+ * Skill asks — one job asking for one skill — by where the CV stands on them. Counted over
+ * asks rather than distinct skills, so a skill twenty jobs want weighs twenty times one that a
+ * single job mentions.
+ */
+export interface Coverage1 {
+  covered: number;
+  missing: number;
+  quickWins: number;
 }

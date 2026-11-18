@@ -63,13 +63,24 @@ tasks:
   # The job-description rubric, once per drafted pack (`nodes.analyse`). Short quotes and a few
   # labels; no thinking, because what it does is find sentences, not reason about them.
   job.analyse: { tier: fast, max_tokens: 900, reasoning: "off" }
+  # A job's summary, on click (18 Nov). Short phrases, each held to the post in code
+  # (`llm_outputs.JobSummaryOutput`); no thinking, because it is reading, not judging.
+  job.summary: { tier: fast, max_tokens: 700, reasoning: "off" }
+  # The company brief, on click (18 Nov): a few items, each carrying the quote it came from,
+  # checked against the post or the page in code (`llm_outputs.CompanyBriefOutput`).
+  company.brief: { tier: fast, max_tokens: 900, reasoning: "off" }
   # The CV rubric's judgement half, once per CV version (`Store.cv_profile`).
   cv.profile: { tier: fast, max_tokens: 900, reasoning: "off" }
   # The Strategist (`nodes.strategist`): which boards serve each target country for this field,
   # and the titles as local postings write them. Scoring tier with a little thinking, because
   # knowing that a German posting says "Softwareentwickler (m/w/d)" is recall, but choosing a
   # board for a trainee solicitor over a graduate board is judgement. Once per CV × profile.
-  strategist.plan: { tier: scoring, max_tokens: 2400, reasoning: low }
+  # `reasoning: off` since 17 Nov. With `low`, the thinking was most of every reply — 3,674 of
+  # 3,752 tokens on 16 Nov — and at five countries it overran even the 7,200-token retry, so every
+  # plan from 23:35 on 16 Nov failed twice and cost each search 37–115 seconds before its first
+  # query went out. A market's local terms are a lookup, not a judgement. `max_tokens` here is
+  # the floor; `strategist.plan_ceiling` raises it with the number of countries asked about.
+  strategist.plan: { tier: scoring, max_tokens: 2400, reasoning: "off" }
   # `reasoning: off` since 14 Nov, A/B on the golden set (`wera eval --set
   # fit.score.reasoning=…`, 20 ads): `low` agreed with the hand scores on 42.1% (one ad unscored:
   # its thinking overran even the 3,600-token retry, as it did on 3 calls of that run) for $0.079
@@ -170,6 +181,15 @@ max_serper_queries: 30
 # provider stands.
 guard:
   cache_minutes: 180 # 3h: the same query twice in an afternoon is free
+  # 18 Nov: longer where postings move slowly, so the shared answers (and the industry buckets
+  # they fill) do more of the work; within SRCH-24's 21-day window a day-old answer is still fresh.
+  cache_minutes_by:
+    serper: 360
+    reed: 1440
+    usajobs: 1440
+    adzuna: 1440
+    careerjet: 1440
+    reliefweb: 1440
   lock_seconds: 15 # one caller asks; the others wait up to this for its answer
   breaker:
     failures: 3 # inside window_seconds, each after its own retries; a final 429 opens it at once
@@ -177,6 +197,10 @@ guard:
     open_seconds: 60
   daily:
     serper: 150
+    # 17 Nov: the APIs are now asked in every ticked country, not the first three alphabetically,
+    # so each has a day's ceiling too. Set to your accounts' own limits; these are cautious guesses.
+    adzuna: 200
+    careerjet: 300
   stop_at: 0.8
 
 # SRCH-31/32: the job APIs, asked before Serper's first tier (they are "tier 0"). Keys go in
@@ -206,16 +230,19 @@ feeds:
     terms_reviewed_on: 2026-11-13
     max_searches: 3
     max_queued: 6
-  adzuna:
+  # 17 Nov: up from 3 and 2. They are asked title by title in every ticked country, in the
+  # profile's order, and their leads are taken best match first across all of them, so more
+  # searches widen where WERA looks rather than deepening one country.
+  adzuna: 
     enabled: true
     terms_reviewed_on: 2026-11-13
-    max_searches: 3
-    max_queued: 4
-  careerjet:
+    max_searches: 10
+    max_queued: 6
+  careerjet: 
     enabled: true
     terms_reviewed_on: 2026-11-13
-    max_searches: 2
-    max_queued: 4
+    max_searches: 6
+    max_queued: 6
   # SRCH-35: UN agencies, international organisations and NGOs, with each posting's full text.
   # Needs RELIEFWEB_APPNAME (an approved appname, from apidoc.reliefweb.int) and its terms read:
   # https://reliefweb.int/terms-conditions.
@@ -260,7 +287,22 @@ discovery_max_queries: 8
 
 # MATCH-05: how many jobs a day reach the scoring tier. The day's ceiling, across every run and
 # every "score more" — batching below changes *when* a job is paid for, never how many are.
-max_scored_per_day: 40
+# 70 since 18 Nov (was 40, about three searches a day): about $0.28 a day at most, inside the
+# weekly budget, which still stops everything first (COST-01).
+max_scored_per_day: 70
+
+# SRCH-26 (18 Nov): best match first, with each ticked country's share and no source above
+# `ceiling` of a search's reads; Firecrawl searches when Serper's day is spent.
+source_share:
+  ceiling: 0.4
+  firecrawl_searches: 6
+
+# "Learn about the company" on the review screen (18 Nov): one About page, read with plain HTTP
+# after robots.txt, and one Serper search at most to find the site. Off turns the button off.
+company_brief:
+  enabled: true
+  serper_queries: 1
+  max_chars: 4000
 
 # How many jobs are scored at once. Scoring sets a search's length — 12 s a job, one after
 # another, was 4 of a search's 11 minutes on 13 Nov — and it costs the same in parallel. Three,
@@ -358,7 +400,9 @@ cv_pages: 1
 # applications they have already sent. What stays either way is the money and the person: the
 # `llm_calls` ledger behind the weekly budget (COST-01), the CV itself, the contact details, the
 # search profile and the settings.
-reset_on_cv_upload: true
+# 18 Nov: **only the default for a CV upload's "start fresh" choice, never applied to an edit.**
+# It used to run on every CV save, so a skill-level edit cleared every job, score and pack.
+reset_on_cv_upload: false
 
 # SRCH-27: a "Clear jobs" control in Settings (and `wera jobs clear`) that deletes every job,
 # application and pack so the next search starts from an empty screen. Kept: the CV, the profile,

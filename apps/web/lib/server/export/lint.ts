@@ -13,6 +13,9 @@ const FILE_NAME = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*-(?:CV|Letter)-[A-Za-z0-9]+(?:
 
 const norm = (s: string) =>
   s
+    // Zero-width spaces and text-style selectors: the CV file breaks up `#name` and `$$` with the
+    // first so Typst prints them as text, and Typst writes the second after a literal asterisk.
+    .replace(/[\u200b\ufe0e\ufe0f]/g, "")
     .replace(/[‘’]/g, "'")
     .replace(/[“”]/g, '"')
     .replace(/[–—]/g, "-")
@@ -43,6 +46,7 @@ export async function lintPdf(bytes: Uint8Array, doc: ExportDoc, fileName: strin
       .join(" "),
   );
 
+  const embedded = raw.includes("/FontFile2") || raw.includes("/FontFile3");
   const missingHeadings = headings.filter((h) => !found.includes(norm(h)));
   // The name and contact line must come out whole, not merged into the line below — that is
   // what a parser reads first. Each has to end at whitespace or at the end of the text.
@@ -68,9 +72,10 @@ export async function lintPdf(bytes: Uint8Array, doc: ExportDoc, fileName: strin
     },
     {
       id: "embedded_fonts",
-      // A TrueType font stream is present and no standard-14 face is referenced.
-      pass: raw.includes("/FontFile2") && !/\/BaseFont\s*\/(?:Helvetica|Times|Courier)/.test(raw),
-      message: raw.includes("/FontFile2") ? "Fonts embedded" : "No embedded font stream",
+      // A TrueType or CFF font stream is present (RenderCV's themes embed both kinds), and no
+      // standard-14 face is referenced.
+      pass: embedded && !/\/BaseFont\s*\/(?:Helvetica|Times|Courier)/.test(raw),
+      message: embedded ? "Fonts embedded" : "No embedded font stream",
     },
     {
       id: "no_tables_or_images",

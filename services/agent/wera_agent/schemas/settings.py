@@ -107,6 +107,10 @@ class Settings(Model):
     # MATCH-12 (15 Nov): order the shortlist with what the person's decisions have taught, as well
     # as the fit total. On by default; the reason is shown on every job it moves.
     learned_ranking: bool = True
+    # MATCH-05 (17 Nov): the ceiling of `max_scored_per_day` jobs scored in any 24 hours. On by
+    # default. Off is for A/B testing: then the weekly model budget is the only thing that stops
+    # scoring, which is still a stop — `weekly_budget_usd` is checked before every call (COST-01).
+    daily_score_limit: bool = True
 
 
 class SecretsStatus(Model):
@@ -124,6 +128,8 @@ class SettingsResponse(Settings):
     # SRCH-27: whether Settings offers "Clear jobs". From `config/wera.yaml`, never settable here:
     # a control that deletes applications must not be one a request can switch on.
     allow_clear_jobs: bool = False
+    # MATCH-05: the jobs `daily_score_limit` allows in 24 hours, from `config/wera.yaml`.
+    max_scored_per_day: int = 70
 
 
 def _is_url(v: str) -> bool:
@@ -170,3 +176,4 @@ class SettingsPatch(Model):
     search_schedule: Opt[SearchSchedulePatch] = None
     scheduled_intake: Opt[bool] = None
     learned_ranking: Opt[bool] = None
+    daily_score_limit: Opt[bool] = None

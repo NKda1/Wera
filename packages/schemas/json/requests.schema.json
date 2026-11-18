@@ -38,6 +38,21 @@
       ],
       "type": "string"
     },
+    "CvFileIn": {
+      "description": "Save or preview the file. `reset` discards the person's rewrite and keeps their design.",
+      "properties": {
+        "reset": {
+          "default": false,
+          "type": "boolean"
+        },
+        "yaml": {
+          "maxLength": 64000,
+          "type": "string"
+        }
+      },
+      "title": "CvFileIn",
+      "type": "object"
+    },
     "CvImportIn": {
       "properties": {
         "yaml": {
@@ -230,6 +245,9 @@
             2
           ],
           "type": "integer"
+        },
+        "dailyScoreLimit": {
+          "type": "boolean"
         },
         "inbox": {
           "$ref": "#/$defs/InboxPatch"

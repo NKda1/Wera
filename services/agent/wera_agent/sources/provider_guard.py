@@ -84,7 +84,8 @@ class Guard:
             return None
 
     def remember(self, key: str, value: Any) -> None:
-        self._call("set", f"{ANSWERS}{key}", json.dumps(value), ex=self.config.cache_minutes * 60)
+        minutes = self.config.cache_minutes_by.get(self.provider, self.config.cache_minutes)
+        self._call("set", f"{ANSWERS}{key}", json.dumps(value), ex=minutes * 60)
 
     def lead(self, key: str) -> str | None:
         """Take the right to fetch `key`. A token while it's held; None when another caller has it.

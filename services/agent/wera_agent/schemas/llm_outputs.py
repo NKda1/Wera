@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import ValidationInfo, field_validator, model_validator
 
-from ..domain.verbatim import appears_in
+from ..domain.verbatim import appears_in, quoted_in, stems_of, supported
 from ..domain.vocab import in_post
 from .base import Model, Opt, check, count, fail, required
 from .jobs import Location, RemoteMode, Salary, SubScore
@@ -78,6 +78,17 @@ def _known_skills(cv: Any) -> set[str]:
         out.add(skill.name.casefold())
         out.update(a.casefold() for a in (skill.aliases or []))
     return out
+
+
+# 18 Nov: `cv_text` gives each skill its level ("Python (proficient)") for the fit scorer, and a
+# model asked to use "these spellings" copies the level too. A level isn't part of the name, so it
+# comes off before the check; left on, every skill failed it, and the pack eval that day came back
+# with an empty skills line on both packs where the same eval on 12 Nov had 13 skills each.
+_LEVEL = re.compile(r"\s*\((?:familiar|proficient|expert)\)\s*$", re.I)
+
+
+def _skill_term(term: str) -> str:
+    return _LEVEL.sub("", term).strip()
 
 
 class Cites(Model):
@@ -147,7 +158,7 @@ class ProfileProposal(Model):
         cv = _cv(info)
         if cv is not None:
             known = _known_skills(cv)
-            kept = [s for s in v if s.casefold() in known]
+            kept = [t for s in v if (t := _skill_term(s)).casefold() in known]
             if not kept:
                 raise fail("skills", f"None of the proposed skills is in the master CV's skills: {', '.join(v)}")
             v = kept
@@ -311,6 +322,78 @@ class QuotedContext(StrategicContext):
         for name in type(self).model_fields:
             if not appears_in(getattr(self, name), post):
                 setattr(self, name, None)
+        return self
+
+
+# ---- job.summary (18 Nov) ----
+
+SUMMARY_LIMITS = {"duties": 4, "must_haves": 5, "nice_to_haves": 4, "perks": 3, "watch_outs": 3}
+
+
+class JobSummaryOutput(Model):
+    """The post in a minute's reading. Held to the post in code: an item whose numbers aren't in
+    the post, or most of whose words aren't, is dropped (`verbatim.supported`), and so is a gist
+    that isn't — a summary the person can't trust is worse than reading the post."""
+
+    gist: str
+    duties: list[str]
+    must_haves: list[str]
+    nice_to_haves: list[str]
+    perks: list[str]
+    watch_outs: list[str]
+
+    @model_validator(mode="after")
+    def _held_to_the_post(self, info: ValidationInfo) -> "JobSummaryOutput":
+        post = (info.context or {}).get("post") if info.context else None
+        if post is None:
+            return self
+        stems = stems_of(post)
+        if not supported(self.gist, post, share=0.5, stems=stems):
+            self.gist = ""
+        for name, limit in SUMMARY_LIMITS.items():
+            kept = [" ".join(i.split()) for i in getattr(self, name) if supported(i, post, stems=stems)]
+            setattr(self, name, list(dict.fromkeys(kept))[:limit])
+        return self
+
+
+# ---- company.brief (18 Nov) ----
+
+BRIEF_PER_TOPIC = 2
+BRIEF_MAX = 8
+
+
+class BriefItemOutput(Model):
+    topic: Literal["what_they_do", "who_they_serve", "size_or_stage", "values", "why_the_role"]
+    text: str
+    source: Literal["post", "site"]
+    quote: str
+
+
+class CompanyBriefOutput(Model):
+    """What the post and the company's page say about it. Every item carries the words it came
+    from, and is dropped unless those words are in the source it names (`verbatim.appears_in`) and
+    the item says no more than they do (`verbatim.supported`): nothing unverified about an
+    employer can reach a letter (LTR-02)."""
+
+    items: list[BriefItemOutput]
+
+    @model_validator(mode="after")
+    def _quoted(self, info: ValidationInfo) -> "CompanyBriefOutput":
+        ctx = info.context or {}
+        if "post" not in ctx:
+            return self
+        sources = {"post": ctx.get("post") or "", "site": ctx.get("site") or ""}
+        kept: list[BriefItemOutput] = []
+        per: dict[str, int] = {}
+        for item in self.items:
+            text = sources[item.source]
+            if not (text and quoted_in(item.quote, text) and supported(item.text, item.quote, share=0.5)):
+                continue
+            if per.get(item.topic, 0) >= BRIEF_PER_TOPIC:
+                continue
+            per[item.topic] = per.get(item.topic, 0) + 1
+            kept.append(item)
+        self.items = kept[:BRIEF_MAX]
         return self
 
 
@@ -541,7 +624,7 @@ class TailorSelection(Model):
         cv = _cv(info)
         if cv is not None:
             known = _known_skills(cv)
-            return [s for s in v if s.casefold() in known]  # a skill it respelled or invented is left out
+            return [t for s in v if (t := _skill_term(s)).casefold() in known]  # a respelled or invented one is left out
         return v
 
     @field_validator("omitted_bullet_ids")
@@ -611,6 +694,9 @@ class LetterOutput(Model):
     # is common and is not a failure: an invented policy is far worse than a missing paragraph.
     # Verified by exact substring against the post, exactly like `company_quote`.
     policy_quote: str = ""
+    # 18 Nov: a fact from the company's own site, word for word from the page the company brief
+    # read. Empty without a brief. Checked against that page's stored text in `nodes.tailor`.
+    site_quote: str = ""
 
     @field_validator("greeting")
     @classmethod

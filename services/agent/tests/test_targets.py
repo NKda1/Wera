@@ -68,7 +68,7 @@ class TestANewPlan:
         new = TargetQueue(r, "5-abc")
         assert new.size() == 0
         new.push([target(2)])
-        assert new.retire_others() == 2  # the old queue and its set
+        assert new.retire_others() == 3  # the old pool, its set and its arrival counter
         assert old.size() == 0 and new.size() == 1
 
     def test_a_rejection_outlives_the_plan(self, r):
@@ -82,7 +82,7 @@ class TestANewPlan:
         q.push([target(0)])
         q.reject(target(1).url, "closed")
         r.set("someone-else:key", "kept")
-        assert targets.clear_all(r) == 3
+        assert targets.clear_all(r) == 4  # the pool, its set, its counter and the rejection
         assert r.get("someone-else:key") == "kept"  # only WERA's keys
 
 
@@ -98,3 +98,44 @@ class TestConnecting:
         with pytest.raises(ApiError) as exc:
             targets.connect()
         assert exc.value.code == "REDIS_DOWN"
+
+
+class TestThePool:
+    """17 Nov: the queue is a pool scored by how well each posting matches the CV, kept across a
+    change of where, and read best first among the places now ticked."""
+
+    def test_the_best_match_is_read_first_wherever_it_was_found(self, r):
+        scores = {"Graduate Software Engineer": 0.9, "Sales Manager": 0.1, "Junior Developer": 0.6}
+        q = TargetQueue(r, "5-abc", rank=lambda items: [scores.get(title, 0.0) for title, _ in items])
+        q.push([
+            Target("https://a.example/1", "a.example", "open", "q", 0, "Sales Manager", "", None, country="gb"),
+            Target("https://b.example/2", "b.example", "open", "q", 1, "Graduate Software Engineer", "", None, country="ch"),
+            Target("https://c.example/3", "c.example", "open", "q", 2, "Junior Developer", "", None, country="de"),
+        ])  # fmt: skip
+        assert [t.title for t in q.take(3)] == ["Graduate Software Engineer", "Junior Developer", "Sales Manager"]
+
+    def test_only_the_places_now_ticked_are_read_and_the_rest_wait(self, r):
+        q = TargetQueue(r, "5-abc-where1", pool="5-abc")
+        q.push([
+            Target("https://a.example/1", "a.example", "open", "q", 0, "A", "", None, country="ch"),
+            Target("https://b.example/2", "b.example", "open", "q", 1, "B", "", None, country="gb"),
+        ])  # fmt: skip
+        gb_only = lambda t: t.country == "gb"  # noqa: E731
+        assert [t.title for t in q.take(5, accept=gb_only)] == ["B"]
+        assert q.size() == 1 and q.size(accept=gb_only) == 0
+
+    def test_a_change_of_where_keeps_the_pool_and_starts_a_new_plan(self, r):
+        before = TargetQueue(r, "5-abc-gb", pool="5-abc")
+        before.push([target(0)])
+        before.mark_tier_sent(1)
+        after = TargetQueue(r, "5-abc-gb-ch", pool="5-abc")
+        after.retire_others()
+        assert after.size() == 1  # what was found is still there
+        assert after.tiers_sent() == set()  # but the new places' searches are still to send
+
+    def test_put_back_goes_to_the_front(self, r):
+        q = TargetQueue(r, "5-abc", rank=lambda items: [0.5 for _ in items])
+        q.push([target(0), target(1)])
+        first = q.take(1)
+        q.put_back(first)
+        assert q.take(1)[0].url == first[0].url

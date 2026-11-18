@@ -257,7 +257,10 @@ class TestKeywordsAreReadOncePerPost:
             job = store._job(store._job_row("job-fernhill-mle"))
             cv = store.cv()
             first, _, _ = fit.evidence_for(session, job, cv, model="demo", now=0)
-            newer = cv.model_copy(update={"version": cv.version + 1})
+            # A CV the scorer reads differently (18 Nov: the same content under a new version is
+            # the same CV to the scorer, and keeps its score).
+            newer = cv.model_copy(deep=True, update={"version": cv.version + 1})
+            newer.skills[0].level = "familiar" if newer.skills[0].level != "familiar" else "expert"
             second, scored_now, _ = fit.evidence_for(session, job, newer, model="demo", now=0)
         assert scored_now and calls in ([], [cv.version])  # read at most once, for the first CV
         assert [k.term for k in second.keywords] == [k.term for k in first.keywords]

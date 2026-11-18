@@ -1,0 +1,84 @@
+{
+  "jobId": "job-fernhill-mle",
+  "cvVersion": 4,
+  "summary": {
+    "text": "Computer Science graduate building production AI tooling: a FastAPI PII-detection gateway for LLM prompts, and a live TypeScript and Postgres platform with real users.",
+    "sourceIds": [
+      "sum-01"
+    ]
+  },
+  "sections": [
+    {
+      "kind": "experience",
+      "items": [
+        {
+          "roleId": "exp-idsu",
+          "bullets": [
+            {
+              "text": "Built a FastAPI API gateway that scans prompts for personal data (regex and Presidio) before they reach third-party LLMs.",
+              "sourceIds": [
+                "exp-idsu-01"
+              ]
+            },
+            {
+              "text": "Wrote prompt templates and evaluation notes for the gateway's redaction rules with the security team.",
+              "sourceIds": [
+                "exp-idsu-03"
+              ]
+            }
+          ]
+        },
+        {
+          "roleId": "exp-fm",
+          "bullets": [
+            {
+              "text": "Built and run a scouting platform for grassroots basketball clubs in Europe on Next.js, Supabase / Postgres and Stripe, with real users.",
+              "sourceIds": [
+                "exp-fm-01"
+              ]
+            },
+            {
+              "text": "Added a LangGraph agent in Python that drafts weekly scouting summaries from coach notes for review.",
+              "sourceIds": [
+                "exp-fm-03"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "projects",
+      "items": [
+        {
+          "roleId": "prj-oss",
+          "bullets": [
+            {
+              "text": "Added structured-output retries with schema validation to a LangChain community model integration in Python.",
+              "sourceIds": [
+                "prj-oss-01"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "skills": [
+    "Python",
+    "FastAPI",
+    "LangGraph",
+    "PostgreSQL",
+    "LLM guardrails",
+    "Presidio"
+  ],
+  "omittedBulletIds": [
+    "exp-idsu-02",
+    "exp-fm-02"
+  ],
+  "guard": {
+    "pass": true,
+    "violations": [],
+    "repaired": false
+  }
+}

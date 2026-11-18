@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiRequestError, type Decision, type ReasonCode } from "@/lib/api";
-import { formatDate, formatLocation, formatPostedAge, isNew, URGENCY_GROUPS } from "@/lib/format";
+import { formatDate, formatLocation, formatPostedAge, foundLabel, isNew, URGENCY_GROUPS } from "@/lib/format";
 import type { IntakeChannel, IntakeRun, PlaceOption, ScoredJob, SearchProfile, ShortlistMeta, SuggestionList } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { LearningCard } from "./LearningCard";
@@ -26,13 +26,14 @@ const ImportDialog = dynamic(() => import("./ImportDialog").then((m) => m.Import
 const SearchDialog = dynamic(() => import("./SearchRun").then((m) => m.SearchDialog));
 
 type Meta = ShortlistMeta;
-/** "urgency" groups rather than re-sorting; see the `groups` memo below. */
-type Sort = "score" | "date" | "urgency";
+/** "urgency" groups rather than re-sorting; see the `groups` memo below. "found" is when a search
+ *  found the job, newest first — "date" is when it was posted. */
+type Sort = "score" | "date" | "found" | "urgency";
 
 /** Which facet a chip belongs to. Chips in the same group are **or**-ed, different groups are
  *  and-ed — so London + Bristol means "either", which is the only reading anyone expects.
  *  All-and was the old behaviour and made any second location chip return nothing. */
-type FacetGroup = "place" | "level" | "work" | "source" | "score";
+type FacetGroup = "place" | "level" | "work" | "source" | "found" | "score";
 
 type Facet = { id: string; group: FacetGroup; label: string; count: number; test: (j: ScoredJob) => boolean };
 
@@ -41,8 +42,12 @@ const GROUP_LABELS: Record<FacetGroup, string> = {
   level: "Level",
   work: "Working",
   source: "Found by",
+  found: "Found in",
   score: "Fit",
 };
+
+// SRCH-25 (17 Nov): searches offered as chips, newest first; older ones are behind "+N".
+const MAX_SEARCHES = 6;
 
 // How many places to offer. Enough to cover a real shortlist's spread without a chip row that
 // wraps four times; the rest are reachable by sorting and reading.
@@ -100,6 +105,19 @@ function facetsFor(jobs: ScoredJob[]): Facet[] {
       // Any source, not just the first: a job found by two channels belongs under both.
       test: (j) => j.sources.some((s) => s.channel === channel),
     });
+  }
+  // SRCH-25 (17 Nov): one chip per run that found something here, newest first, so a person can
+  // see what this morning's search brought apart from last week's. Newest rather than biggest:
+  // the question is "what did that search find", not "which search found most".
+  const runs = new Map<string, { at: string; label: string; count: number }>();
+  for (const j of jobs) {
+    if (!j.foundBy?.runId) continue;
+    const run = runs.get(j.foundBy.runId) ?? { at: j.foundBy.at, label: foundLabel(j.foundBy), count: 0 };
+    run.count += 1;
+    runs.set(j.foundBy.runId, run);
+  }
+  for (const [runId, run] of [...runs].sort((a, b) => b[1].at.localeCompare(a[1].at)).slice(0, MAX_SEARCHES)) {
+    out.push({ id: `found:${runId}`, group: "found", label: run.label, count: run.count, test: (j) => j.foundBy?.runId === runId });
   }
   // Only offered when they'd divide the list. A "Fit 8+" chip that matches everything, or
   // nothing, is a button that does nothing.
@@ -208,7 +226,9 @@ export function JobsScreen({
     const list = live.filter(
       (j) => (!newOnly || (isNew(j) && !seen.has(j.id))) && [...chosen.values()].every((group) => group.some((f) => f.test(j))),
     );
-    return sort === "date" ? [...list].sort((a, b) => (b.postedAt ?? "").localeCompare(a.postedAt ?? "")) : list;
+    if (sort === "date") return [...list].sort((a, b) => (b.postedAt ?? "").localeCompare(a.postedAt ?? ""));
+    if (sort === "found") return [...list].sort((a, b) => (b.foundBy?.at ?? "").localeCompare(a.foundBy?.at ?? ""));
+    return list;
   }, [live, facets, filters, sort, newOnly, seen]);
   // "By urgency" groups rather than re-sorts: inside a group the new jobs come first (SRCH-25) and
   // then the best match, because once you've decided what to look at today you want what you
@@ -349,6 +369,21 @@ export function JobsScreen({
     }
   };
 
+  // CV-08 (18 Nov): after a CV edit the review list is re-scored at once; the rest of the board
+  // waits for the person to ask, because it may be most of the day's scoring limit.
+  const [rescoring, setRescoring] = useState(false);
+  const rescoreBoard = async () => {
+    setRescoring(true);
+    try {
+      const { runIds: ids } = await api.rescoreBoard();
+      setRunIds(ids);
+    } catch (err) {
+      toast({ tone: "error", message: err instanceof Error ? err.message : "Couldn't start re-scoring." });
+    } finally {
+      setRescoring(false);
+    }
+  };
+
   const onRunsFinished = (runs: IntakeRun[]) => {
     const added = runs.reduce((n, r) => n + (r.status === "succeeded" ? r.newJobs : 0), 0);
     const cancelled = runs.some((r) => r.status === "cancelled");
@@ -406,6 +441,20 @@ export function JobsScreen({
             scored. Without it the shortlist only changed when the whole run finished, so a
             search produced nothing to look at for its first several minutes. */}
         {runIds.length ? <RunPanel runIds={runIds} onFinished={onRunsFinished} onBatch={() => router.refresh()} /> : null}
+        {meta.staleScores > 0 && !runIds.length ? (
+          <Card className="flex flex-wrap items-center justify-between gap-3 border-amber-100 bg-amber-50 p-4">
+            <p className="text-small text-ink">
+              Your CV changed. The jobs you&apos;re applying to have been re-scored;{" "}
+              <strong>
+                {meta.staleScores} other {meta.staleScores === 1 ? "job" : "jobs"} on the board
+              </strong>{" "}
+              still {meta.staleScores === 1 ? "has a score" : "have scores"} from before.
+            </p>
+            <Button variant="secondary" onClick={rescoreBoard} busy={rescoring}>
+              Re-score {meta.staleScores === 1 ? "it" : `the other ${meta.staleScores}`}
+            </Button>
+          </Card>
+        ) : null}
         <ProfileCard profile={profile} channels={meta.channels} sites={sites} places={places} cvVersion={cvVersion} onPasteJob={() => setImporting(true)} />
         {suggestions ? <LearningCard suggestions={suggestions} /> : null}
         {/* LIFE-03: jobs nothing has shown open for a week wait here, off the main list. */}
@@ -540,11 +589,20 @@ export function JobsScreen({
         ) : null}
         {visible.length === 0 ? (
           <Card className="px-6 py-10 text-center">
-            <p className="text-h2">{live.length ? "No jobs match these filters" : "You're all caught up"}</p>
+            {/* 18 Nov: "all caught up" over sixteen jobs waiting on the scoring limit was untrue. */}
+            <p className="text-h2">
+              {live.length
+                ? "No jobs match these filters"
+                : meta.awaitingScore > 0
+                  ? `${meta.awaitingScore} ${meta.awaitingScore === 1 ? "job is" : "jobs are"} waiting to be scored`
+                  : "You're all caught up"}
+            </p>
             <p className="mx-auto mt-2 max-w-md text-ink-2">
               {live.length
                 ? "Clear a filter to see the rest of today's shortlist."
-                : "Every job on today's shortlist has a decision. Run a search, or check the packs waiting for you in Review."}
+                : meta.awaitingScore > 0
+                  ? (meta.scoreCapMessage ?? "Find more scores them before it searches.")
+                  : "Every job on today's shortlist has a decision. Run a search, or check the packs waiting for you in Review."}
             </p>
             <div className="mt-5 flex justify-center gap-2">
               {live.length ? (
@@ -557,6 +615,17 @@ export function JobsScreen({
                 >
                   Clear filters
                 </Button>
+              ) : meta.awaitingScore > 0 ? (
+                <>
+                  {meta.scoreCapMessage ? (
+                    <Button variant="secondary" onClick={() => router.push("/settings")}>
+                      Daily limit in Settings
+                    </Button>
+                  ) : null}
+                  <Button onClick={findMore} busy={scoringMore} disabled={runIds.length > 0 || Boolean(meta.scoreCapMessage)}>
+                    Score them now
+                  </Button>
+                </>
               ) : (
                 <>
                   <Button variant="secondary" onClick={() => setSearching(true)}>
@@ -773,6 +842,7 @@ const FACETS_SHOWN = 5;
 const SORTS: { id: Sort; label: string }[] = [
   { id: "score", label: "Best match" },
   { id: "date", label: "Newest" },
+  { id: "found", label: "Just found" },
   { id: "urgency", label: "By urgency" },
 ];
 
@@ -788,7 +858,8 @@ function SortSwitch({ value, onChange }: { value: Sort; onChange: (v: Sort) => v
           aria-checked={value === s.id}
           onClick={() => onChange(s.id)}
           className={cn(
-            "min-h-9 px-3.5 text-[13px] font-semibold transition-colors duration-150 pointer-coarse:min-h-11",
+            // Four fit a 343 px phone row at 10 px a side; 14 once there is room.
+            "min-h-9 px-2.5 text-[13px] font-semibold transition-colors duration-150 sm:px-3.5 pointer-coarse:min-h-11",
             value === s.id ? "bg-ink text-surface" : "text-ink-2 hover:bg-mint-50 hover:text-ink",
           )}
         >

@@ -132,7 +132,8 @@ def world(client, outbound, monkeypatch):
 
         def queue(self) -> TargetQueue:
             with transaction() as session:
-                return TargetQueue(redis, Store(session).plan_key())
+                store = Store(session)
+                return TargetQueue(redis, store.plan_key(), pool=store.pool_key(), reader=store.reader_key())
 
         def run(self, mode: str = "search"):
             return search_pipeline.run({}, now=1_762_850_000_000, caps=SearchCaps(), mode=mode)
@@ -335,3 +336,140 @@ def test_the_stages_keep_to_their_own_modules():
     for path in ("nodes/strategist.py", "sources/serper.py", "sources/targets.py", "sources/postings.py"):
         assert not [m for m in imports(path) if any(r in m for r in reading)], path
     assert not [m for m in imports("sources/harvest.py") if "serper" in m or "strategist" in m]
+
+
+class TestEachStepSaysWhatItIsDoing:
+    """UX-01, 17 Nov: the bar had no number, and "the job APIs" or "tier 1 · 15 searches" stood
+    for a minute at a time. Every heartbeat now names what it is doing, every finished step adds
+    a line saying what it found, and the bar only rises."""
+
+    def _watch(self, monkeypatch) -> list[dict]:
+        seen: list[dict] = []
+        real = intake.report
+
+        def spy(run_ids, **kw):
+            seen.append(kw)
+            return real(run_ids, **kw)
+
+        monkeypatch.setattr(intake, "report", spy)
+        return seen
+
+    def test_the_sentences_name_the_searches_postings_and_counts(self, world, monkeypatch):
+        seen = self._watch(monkeypatch)
+        world.answers({1: [posting(i) for i in range(12)]})
+        world.run()
+
+        details = [kw.get("detail") or "" for kw in seen]
+        notes = [kw["note"] for kw in seen if kw.get("note")]
+        assert any(d.startswith("Planning searches for 1 country with the Strategist") for d in details)
+        assert notes[0].startswith("The Strategist didn't answer, so the searches use your titles as written")
+        first = next(d for d in details if d.startswith("Search 1 of "))
+        assert first == 'Search 1 of 3 · "AI Engineer" graduate job in "London" (United Kingdom): 12 results, 12 postings'
+        assert "site:" not in " ".join(details)  # Google's operators are not the person's words
+        assert any(n.startswith("Google, tier 1: ") and "12 postings" in n for n in notes)
+        assert any(d.startswith("Reading Graduate Software Engineer on builtinlondon.uk") for d in details)
+        # The split by place and source first, inside the log's 200 characters (SRCH-26).
+        assert notes[-1].startswith("Read 12 postings (gb 12 · google 12): 12 kept"), notes[-1]
+        assert len(notes[-1]) <= intake.DETAIL_LIMIT
+
+    def test_each_step_has_a_percentage_and_the_bar_only_rises(self, world, monkeypatch):
+        seen = self._watch(monkeypatch)
+        world.answers({1: [posting(i) for i in range(12)]})
+        world.run()
+        progress = [kw["progress"] for kw in seen if kw.get("phase") != "scoring"]
+        assert progress == sorted(progress), progress
+        stages = [kw["stage"] for kw in seen if kw.get("phase") == "searching" and kw.get("stage") is not None]
+        assert stages and stages[-1] == 1.0 and all(0 <= s <= 1 for s in stages)
+
+    def test_a_long_plan_moves_its_bar_while_it_waits(self, world, monkeypatch):
+        import time as clock
+
+        monkeypatch.setattr(search_pipeline, "PACE_SECONDS", 0.01)
+        real = Store.search_queries
+
+        def slow(self, **kw):
+            clock.sleep(0.1)
+            return real(self, **kw)
+
+        monkeypatch.setattr(Store, "search_queries", slow)
+        monkeypatch.setattr(Store, "plan_seconds", lambda self: 0.05)
+        seen = self._watch(monkeypatch)
+        world.answers({1: [posting(i) for i in range(12)]})
+        world.run()
+        planning = [kw for kw in seen if kw.get("phase") == "planning" and not kw.get("note")]
+        assert len(planning) > 2, "the planning bar should move while the plan is awaited"
+        assert max(kw["stage"] for kw in planning) <= 0.95
+        assert any((kw.get("detail") or "").endswith(", usually 0 s") for kw in planning), (
+            "an overrun says how long it usually takes"
+        )
+
+
+class TestThePoolAcrossPlaces:
+    """17 Nov: a pooled posting found for a country no longer ticked is not read, and waits for it."""
+
+    def test_only_the_ticked_countries_postings_are_read(self, world):
+        world.answers({1: []})
+        world.queue().push([
+            Target(posting(300), "builtinlondon.uk", "open", "q", 0, "Graduate Software Engineer", "", None, country="de"),
+            Target(posting(301), "builtinlondon.uk", "open", "q", 1, "Graduate Software Engineer", "", None, country="gb"),
+        ])  # fmt: skip
+        world.run(mode="more")
+        assert posting(301) in world.read and posting(300) not in world.read
+        assert [t.url for t in world.queue().peek()] == [posting(300)]  # still pooled for Germany
+
+
+class TestFirecrawlTakesOver:
+    """SRCH-26, 18 Nov: when Serper's day is spent, the search goes on through Firecrawl's search,
+    within its own limit — and never past the run's own cap, which is the person's limit."""
+
+    def _stand_in(self, monkeypatch, asked):
+        class Stand:
+            def __init__(self, *, max_queries, spend, caps):
+                self.max_queries, self.sent, self.stopped, self.errors = max_queries, 0, None, []
+                self.cached = self.coalesced = self.answered = 0
+
+            @property
+            def credits_used(self):
+                return 0
+
+            def search(self, q, *, gl, hl, page=1):
+                asked.append(q)
+                self.sent += 1
+                return [
+                    Result(url=posting(500 + self.sent), title="Graduate Software Engineer", snippet="", date=None, position=1)
+                ]
+
+        monkeypatch.setattr(search_pipeline, "FirecrawlSearch", Stand)
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+        get_settings.cache_clear()
+
+    def test_a_spent_serper_day_hands_the_tier_to_firecrawl(self, world, monkeypatch):
+        asked: list[str] = []
+        self._stand_in(monkeypatch, asked)
+        world.answers({1: []})
+        real = search_pipeline.Serper
+
+        def resting(**kw):
+            client = real(**kw)
+            client.stopped = "daily_budget"
+            return client
+
+        monkeypatch.setattr(search_pipeline, "Serper", resting)
+        out = world.run()
+        assert asked, "Firecrawl should have searched in Serper's place"
+        assert any(t.query.startswith("firecrawl: ") for t in world.queue().peek()) or out.read > 0
+
+    def test_the_runs_own_cap_is_not_a_reason_to_switch(self, world, monkeypatch):
+        asked: list[str] = []
+        self._stand_in(monkeypatch, asked)
+        world.answers({1: []})
+        real = search_pipeline.Serper
+
+        def capped(**kw):
+            client = real(**kw)
+            client.stopped = "cap"
+            return client
+
+        monkeypatch.setattr(search_pipeline, "Serper", capped)
+        world.run()
+        assert asked == []

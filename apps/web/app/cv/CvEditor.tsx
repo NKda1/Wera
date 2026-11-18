@@ -48,6 +48,8 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState(false);
+  // A new CV from an import asks what happens to the jobs first (18 Nov); an edit never does.
+  const [choosing, setChoosing] = useState(false);
   const [profileStale, setProfileStale] = useState(false);
 
   const cvDirty = JSON.stringify(cv) !== JSON.stringify(saved);
@@ -66,12 +68,19 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
   const untagged = roles.flatMap((r) => r.bullets.filter((b) => b.tags.length === 0).map((b) => b.id));
 
   const save = async () => {
+    if (imported && cvDirty) return setChoosing(true);
+    await persist();
+  };
+
+  /** `fresh` only for an imported CV: keep the jobs and re-score them, or start over. */
+  const persist = async (fresh?: boolean) => {
+    setChoosing(false);
     setSaving(true);
     setErrors({});
     try {
       let cleared = 0;
       if (cvDirty) {
-        const { version, clearedJobs } = await api.putCv(cv);
+        const { version, clearedJobs } = await api.putCv(cv, imported ? { replace: true, fresh: fresh ?? false } : {});
         const next = { ...cv, version };
         setCv(next);
         setSaved(next);
@@ -87,8 +96,8 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
       // search profile is what the intake run actually uses. Saying so here is the difference
       // between "I uploaded my CV" and "WERA is now looking for the right thing".
       setProfileStale(cvDirty);
-      // `clearedJobs` is non-zero only when `reset_on_cv_upload` is on, and then the list the
-      // person left behind on the Jobs screen is simply gone. Naming the number is the whole
+      // `clearedJobs` is non-zero only when the person chose to start fresh with an imported CV,
+      // and then the list they left behind on the Jobs screen is simply gone. Naming the number is the whole
       // point: a shortlist that empties itself without a word reads as a bug, whoever asked
       // for it, and the next step ("search again") isn't obvious from an empty screen.
       const savedMsg = `Saved as version ${saved.version + 1}.`;
@@ -313,7 +322,7 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
               </li>
             ))}
           </ul>
-          <AddButton onClick={() => edit((d) => void d.skills.push({ name: "" }))}>Add skill</AddButton>
+          <AddButton onClick={() => edit((d) => void d.skills.push({ name: "", level: "proficient" }))}>Add skill</AddButton>
         </Card>
 
         <Card className="p-5 sm:p-6" aria-labelledby="lang-title">
@@ -356,6 +365,28 @@ export function CvEditor({ initialCv, initialContact }: { initialCv: MasterCV; i
           Save
         </Button>
       </div>
+
+      {choosing ? (
+        <Dialog
+          open
+          onClose={() => setChoosing(false)}
+          title="A new CV: what about your jobs?"
+          description="Your scores will be redone against this CV either way. Packs you've already drafted cite lines from the old one."
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => persist(true)}>
+                Start fresh
+              </Button>
+              <Button onClick={() => persist(false)}>Keep my jobs and re-score them</Button>
+            </>
+          }
+        >
+          <p className="text-[15px] text-ink-2">
+            <strong className="text-ink">Keep my jobs</strong> re-scores the jobs you are applying to first, then offers the rest of the board.{" "}
+            <strong className="text-ink">Start fresh</strong> deletes every job, score and pack so the next search starts from nothing.
+          </p>
+        </Dialog>
+      ) : null}
 
       {importing ? (
         <ImportCvDialog

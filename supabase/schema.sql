@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS intake_runs (
 	errors JSONB NOT NULL,
 	duration_ms INTEGER NOT NULL,
 	settled BOOLEAN NOT NULL,
+	stage_progress FLOAT NOT NULL,
+	log JSONB NOT NULL,
 	PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS ix_intake_runs_status ON intake_runs (status);
@@ -158,6 +160,7 @@ CREATE TABLE IF NOT EXISTS fit_reports (
 	evidence JSONB NOT NULL,
 	model VARCHAR(128) NOT NULL,
 	cv_version INTEGER,
+	cv_hash VARCHAR(32),
 	job_hash VARCHAR(32),
 	created_at VARCHAR(32) NOT NULL,
 	PRIMARY KEY (job_id),

@@ -290,6 +290,30 @@ class TestDiscoveringFromTheApis:
         assert queue.peek() == []
 
 
+class TestTheBestLeadsFirst:
+    """17 Nov: every API's leads are taken best match first, so `max_queued` and the searches for
+    originals go to the best of them — and each posting carries the country it was found for."""
+
+    @respx.mock(assert_all_called=False)
+    def test_a_ranked_search_queues_the_best_full_text_posting_first(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
+        monkeypatch.setitem(wera().feeds, "reed", FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=3, max_queued=1))
+        base = fixture("reed_search")["results"][0]
+        two = [
+            {**base, "jobId": 1, "jobTitle": "Java Developer", "date": "10/11/2026"},
+            {**base, "jobId": 2, "jobTitle": "Graduate Software Engineer", "date": "10/11/2026"},
+        ]
+        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": two, "totalResults": 2}))
+        respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json={"results": []}))
+        queue = TargetQueue(redis, "plan")
+        profile = TestDiscoveringFromTheApis()._profile(store)
+        prefer = lambda items: [1.0 if "Graduate" in title else 0.0 for title, _ in items]  # noqa: E731
+        strategist.discover_feeds(planned(), profile, queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=FakeSerper({}), rank=prefer)  # fmt: skip
+        taken = queue.peek()
+        # Reed answered the Java role first; with one place, the better match takes it.
+        assert [t.title for t in taken] == ["Graduate Software Engineer"]
+        assert taken[0].country == "gb"
+
+
 class TestOneSearchPerQuestion:
     @respx.mock(assert_all_called=False)
     def test_graduate_and_junior_are_one_reed_search_but_two_adzuna_ones(

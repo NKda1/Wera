@@ -4,7 +4,7 @@ browser never calls this service directly."""
 from collections.abc import Iterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Query, Request, status
+from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 
 from ..db.session import transaction
 from ..errors import ApiError
@@ -14,6 +14,7 @@ from ..llm.gateway import flush_unrecorded
 from ..schemas.api import (
     ApplicationList,
     ApplicationPatchIn,
+    CvFileSaved,
     CvImportIn,
     CvParseIn,
     CvVersion,
@@ -36,6 +37,7 @@ from ..schemas.api import (
 )
 from ..schemas.applications import ApplicationWithJob
 from ..schemas.cv import Contact, CvLine, MasterCV
+from ..schemas.cv_file import CvFile, CvFileIn, CvPreview
 from ..schemas.cv_profile import CvProfile
 from ..schemas.jobs import ScoredJob
 from ..schemas.learning import SuggestionList
@@ -173,6 +175,12 @@ def get_job(s: S, job_id: str) -> ScoredJob:
     return s.get_job(job_id)
 
 
+@router.post("/jobs/{job_id}/summary")
+def summarise_job(s: S, job_id: str) -> ScoredJob:
+    """The post in a minute's reading, written on click and kept until the post changes."""
+    return s.summarise_job(job_id)
+
+
 @router.post("/jobs/{job_id}/decision")
 def decide(s: S, job_id: str, body: DecisionIn) -> ScoredJob:
     """Gate 1: approve, snooze (1, 3 or 7 days) or reject (G1-02). Every decision is logged (MATCH-06).
@@ -244,8 +252,48 @@ def edit_document(s: S, doc_id: str, body: DocumentPatchIn) -> ApplicationWithJo
     return s.edit_document(doc_id, body)
 
 
-# Exports have no agent route: the web app renders PDF and DOCX from the pack, the master CV
-# and the contact details it fetches here (ARCHITECTURE §4, EXP-02).
+@router.post("/applications/{app_id}/company-brief")
+def company_brief(s: S, app_id: str) -> ApplicationWithJob:
+    """Learn about the company: its post and its own About page, each item quoted and checked."""
+    return s.company_brief(app_id)
+
+
+@router.post("/applications/{app_id}/letter/rewrite")
+def rewrite_letter(s: S, app_id: str) -> ApplicationWithJob:
+    """Redraft the letter alone, with the company brief. The review screen polls until it's back."""
+    return s.rewrite_letter(app_id)
+
+
+# ---- the CV file (EXP-01, 18 Nov) ----
+#
+# The CV PDF is rendered here, by RenderCV, from the pack's CV file; the web app renders the
+# cover letter and both Word files, and holds the approval gate for every download (G2-03).
+
+
+@router.get("/applications/{app_id}/cv-file")
+def get_cv_file(s: S, app_id: str) -> CvFile:
+    """The RenderCV file the CV PDF is made from, with what it prints. No contact details."""
+    return s.cv_file(app_id)
+
+
+@router.put("/applications/{app_id}/cv-file")
+def put_cv_file(s: S, app_id: str, body: CvFileIn) -> CvFileSaved:
+    """Save the person's file (or reset it to WERA's); the ATS report is measured against it."""
+    file, application = s.save_cv_file(app_id, body)
+    return CvFileSaved(file=file, application=application)
+
+
+@router.post("/applications/{app_id}/cv-file/preview")
+def preview_cv_file(s: S, app_id: str, body: CvFileIn) -> CvPreview:
+    """The file as page images, for the editor. Saves nothing."""
+    return s.preview_cv_file(app_id, body)
+
+
+@router.get("/applications/{app_id}/cv.pdf")
+def cv_pdf(s: S, app_id: str) -> Response:
+    """The CV PDF with contact details (EXP-02). Only the web app calls this, and it gates and
+    lints the file before a person receives it."""
+    return Response(s.cv_pdf(app_id), media_type="application/pdf", headers={"cache-control": "no-store"})
 
 
 # ---- intake ----
@@ -373,6 +421,16 @@ def score_more(s: S, request: Request) -> RunIds:
     return ids
 
 
+@router.post("/intake/rescore")
+def rescore_board(s: S, scope: str = "board") -> RunIds:
+    """CV-08 (18 Nov): re-score the board's stale scores, offered once the review list is done."""
+    ids = s.start_rescore("review" if scope == "review" else "board")
+    run_id, chosen = ids.run_ids[0], "review" if scope == "review" else "board"
+    if not environment().wera_demo_mode:
+        s.defer(lambda: run_rescore(run_id, "rescore", scope=chosen), name=f"rescore:{run_id}")
+    return ids
+
+
 @router.get("/intake/runs/{run_id}")
 def get_run(s: S, run_id: str) -> IntakeRun:
     return s.get_run(run_id)
@@ -393,8 +451,10 @@ def get_cv(s: S) -> MasterCV:
 
 
 @router.put("/cv")
-def put_cv(s: S, body: MasterCV) -> CvVersion:
-    version = s.put_cv(body)
+def put_cv(s: S, body: MasterCV, replace: bool = False, fresh: bool | None = None) -> CvVersion:
+    """An edit by default, which never deletes anything. `replace` is a new CV from an upload or
+    import, where `fresh` chooses between keeping the jobs (re-scored) and starting over (18 Nov)."""
+    version = s.put_cv(body, replace=replace, fresh=fresh)
     return CvVersion(version=version, cleared_jobs=s.cleared_jobs)
 
 

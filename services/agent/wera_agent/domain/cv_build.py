@@ -153,8 +153,10 @@ def to_master_cv(parsed: ParsedCv, *, version: int) -> MasterCV:
 
 
 def _skills(names: list[str]) -> list:
-    """De-duplicated, order kept. Levels are left unset — a CV rarely says, and a guessed
-    "expert" is a claim the person never made."""
+    """De-duplicated, order kept, each registered as proficient (18 Nov): a skill on a CV is one
+    the person claims, and leaving the level unset made an uploaded CV's skills count for nothing
+    in the editor. Never "expert" — a guessed expert is a claim the person never made; they can
+    raise or lower any of them."""
     from ..schemas.cv import Skill
 
     seen: set[str] = set()
@@ -163,5 +165,5 @@ def _skills(names: list[str]) -> list:
         clean = name.strip()
         if clean and clean.casefold() not in seen:
             seen.add(clean.casefold())
-            out.append(Skill(name=clean, aliases=None, level=None))
+            out.append(Skill(name=clean, aliases=None, level="proficient"))
     return out

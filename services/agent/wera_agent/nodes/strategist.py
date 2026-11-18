@@ -32,7 +32,7 @@ import logfire
 from sqlalchemy.orm import Session
 
 from ..clock import iso
-from ..config import Site, usable_sites
+from ..config import Site, usable_sites, wera
 from ..domain import filters, places
 from ..domain.dedupe import canonical_url
 from ..errors import ApiError
@@ -47,7 +47,7 @@ from ..sources import feeds, site_discovery
 from ..sources.postings import classify, posting_links
 from ..sources.robots import USER_AGENT, Robots, refusal
 from ..sources.serper import Serper
-from ..sources.targets import Target, TargetQueue
+from ..sources.targets import Ranker, Target, TargetQueue
 
 # What postings in a market are written in, for when the reply leaves `languages` empty. Only the
 # countries WERA's boards cover; anywhere else falls back to English, which is a weak default
@@ -81,7 +81,7 @@ def target_countries(profile: SearchProfile) -> list[str]:
     for not ticking a box as well would be a validation error about nothing. And a city outside
     the ticked countries is a request to search there: "Dubai" adds the UAE.
     """
-    return places.where(profile.countries, profile.locations).countries
+    return places.searched(places.where(profile.countries, profile.locations)).countries
 
 
 def candidate_text(cv: MasterCV, profile: CvProfile) -> str:
@@ -133,6 +133,20 @@ def boards_text(sites: list[Site]) -> str:
     return "\n".join(line(s) for s in sites) or "(none)"
 
 
+# The reply is one market per country, so its ceiling grows with them. Measured without thinking:
+# a market is 100–250 tokens (its local terms, its boards, at most two proposals). A fixed 2,400
+# was sized for two countries; at five, on 16–17 Nov, every plan was cut off — twice each.
+PLAN_TOKENS_BASE = 600
+PLAN_TOKENS_PER_MARKET = 350
+PLAN_TOKENS_MAX = 6000
+
+
+def plan_ceiling(markets: int) -> int:
+    """The configured ceiling, or more when the countries need it."""
+    grown = min(PLAN_TOKENS_BASE + PLAN_TOKENS_PER_MARKET * max(markets, 1), PLAN_TOKENS_MAX)
+    return max(wera().task("strategist.plan").max_tokens, grown)
+
+
 def plan(
     session: Session,
     *,
@@ -165,6 +179,7 @@ def plan(
             "boards": {s.domain.lower(): [c.upper() for c in s.countries] for s in known},
             "titles": profile.titles,
         },
+        max_tokens=plan_ceiling(len(countries)),
     )
     markets: list[Market] = []
     proposals: list[tuple[str, str, list[str], str]] = []
@@ -230,6 +245,13 @@ def profile_key(profile: SearchProfile) -> str:
     return hashlib.sha256(json.dumps(relevant).encode()).hexdigest()[:16]
 
 
+def pool_key(profile: SearchProfile) -> str:
+    """The profile as far as the search pool depends on it: what to look for, not where (17 Nov),
+    so a change of countries keeps what was already found."""
+    relevant = [profile.titles, profile.seniority, profile.remote, sorted(profile.sites)]
+    return hashlib.sha256(json.dumps(relevant).encode()).hexdigest()[:16]
+
+
 def is_current(matrix: TargetMatrix, *, cv_version: int, profile: SearchProfile, model: str) -> bool:
     return matrix.cv_version == cv_version and matrix.profile_key == profile_key(profile) and matrix.model == model
 
@@ -288,58 +310,82 @@ def queries(
         seen.add((q, gl, hl))
         out.append(PlannedQuery(q=q, gl=gl, hl=hl, source=source, domain=domain, tier=tier, title=title))
 
-    def both(title: str, term: str, tier: int, lang: str, *, place: list[str], gl: str, boards: list[Site]) -> None:
-        """An open search for `term`, and a `site:` search of each board that posts in `lang`."""
-        phrase = _phrase(term, level, place, lang)
-        add(f"{phrase} {NO_LINKEDIN}", gl=gl, hl=lang, source="open", tier=tier, title=title)
-        for board in boards:
-            if lang == "en" or not board.languages or lang in board.languages:
-                # Postings only, where the board's posting path is known: its search and category
-                # pages are most of what Google holds for it, and none of them is a job.
-                path = f" inurl:{board.posting_segment}" if board.posting_segment else ""
-                add(
-                    f"site:{board.domain}{path} {phrase}",
-                    gl=gl,
-                    hl=lang,
-                    source="board",
-                    tier=tier,
-                    title=title,
-                    domain=board.domain,
-                )
+    @dataclass
+    class Country:
+        gl: str
+        hl: str
+        boards: list[Site]
+        groups: list[list[str]]  # the places its searches name, most wanted first (`_places`)
 
-    wanted = places.where(profile.countries, profile.locations)
-    for country in wanted.countries or [""]:
-        gl = country.lower()
-        hl = _english_or_first(country, matrix)
-        boards = [b for b in usable_sites(profile, sites) if not country or b.serves([country])]
-        groups = _places(profile, wanted, country)
-        # The first group is the cities the person named, else the country; with `first`, the
-        # rest of the country follows a tier later, for the top titles (SRCH-11, 16 Nov).
-        where = {"place": groups[0], "gl": gl, "boards": boards}
+    def open_search(title: str, term: str, tier: int, c: Country, place: list[str], *, lang: str = "", also: str = "") -> None:
+        hl = lang or c.hl
+        add(f"{_phrase(term, level, place, hl, also=also)} {NO_LINKEDIN}", gl=c.gl, hl=hl, source="open", tier=tier, title=title)
 
-        for title in titles[:TIER_ONE_TITLES]:
-            both(title, title, 1, hl, **where)
-        for group in groups[1:]:
-            for title in titles[:TIER_ONE_TITLES]:
-                both(title, title, 2, hl, place=group, gl=gl, boards=boards)
-        for title in titles[TIER_ONE_TITLES:]:
-            both(title, title, 2, hl, **where)
-        for title in titles[:2]:
-            for word in [*skills, *extra]:
-                add(
-                    f"{_phrase(title, level, groups[0], hl, also=word)} {NO_LINKEDIN}",
-                    gl=gl,
-                    hl=hl,
-                    source="open",
-                    tier=2,
-                    title=title,
-                )
-        for market in matrix.markets if matrix else []:
-            if market.country != country:
-                continue
-            for term in market.search_terms:
-                if term.term.casefold() not in {t.casefold() for t in titles}:
-                    both(term.title, term.term, 3, term.language, **where)
+    def board_search(title: str, term: str, tier: int, c: Country, turn: int, *, lang: str = "") -> None:
+        """A `site:` search of one of this country's reviewed boards, the next in turn — one board a
+        title, not every board, so a country with five boards doesn't take five searches a title."""
+        hl = lang or c.hl
+        fits = [b for b in c.boards if hl == "en" or not b.languages or hl in b.languages]
+        if not fits:
+            return
+        board = fits[turn % len(fits)]
+        # Postings only, where the board's posting path is known: its search and category pages
+        # are most of what Google holds for it, and none of them is a job.
+        path = f" inurl:{board.posting_segment}" if board.posting_segment else ""
+        phrase = _phrase(term, level, c.groups[0], hl)
+        add(f"site:{board.domain}{path} {phrase}", gl=c.gl, hl=hl, source="board", tier=tier, title=title, domain=board.domain)
+
+    wanted = places.searched(places.where(profile.countries, profile.locations))
+    countries = [
+        Country(
+            gl=code.lower(),
+            hl=_english_or_first(code, matrix),
+            boards=[b for b in usable_sites(profile, sites) if not code or b.serves([code])],
+            groups=_places(profile, wanted, code),
+        )
+        for code in wanted.countries or [""]
+    ]
+    top = titles[:TIER_ONE_TITLES]
+
+    # Every tier is written title by title, each title in every country, so the run's Serper cap
+    # cuts the last titles and never the last countries (17 Nov: written country by country, with
+    # a search for each title on each of five UK-only boards, the UK had 15 of tier 1's 27 searches,
+    # every one of them "London").
+    #
+    # Tier 1: the top titles, one open search in each country, at the first place it names.
+    for title in top:
+        for c in countries:
+            open_search(title, title, 1, c, c.groups[0])
+    # Tier 2: the persona at more length. The rest of each country's places (with `city_scope:
+    # first`), the top titles with the CV's top skills, the remaining titles — and only then one
+    # reviewed board per country and title, taking turns.
+    for title in top:
+        for c in countries:
+            for group in c.groups[1:]:
+                open_search(title, title, 2, c, group)
+    for title in titles[:2]:
+        for word in [*skills, *extra]:
+            for c in countries:
+                open_search(title, title, 2, c, c.groups[0], also=word)
+    for title in titles[TIER_ONE_TITLES:]:
+        for c in countries:
+            open_search(title, title, 2, c, c.groups[0])
+    for turn, title in enumerate(top):
+        for c in countries:
+            board_search(title, title, 2, c, turn)
+    # Tier 3: the titles as each country's boards write them, in its language (the Strategist's
+    # local terms), the k-th term of every country before the next.
+    local = {
+        m.country.lower(): [t for t in m.search_terms if t.term.casefold() not in {x.casefold() for x in titles}]
+        for m in (matrix.markets if matrix else [])
+    }
+    for turn in range(max((len(v) for v in local.values()), default=0)):
+        for c in countries:
+            terms = local.get(c.gl, [])
+            if turn < len(terms):
+                term = terms[turn]
+                open_search(term.title, term.term, 3, c, c.groups[0], lang=term.language)
+                board_search(term.title, term.term, 3, c, turn, lang=term.language)
     # Tier 4: page 2 of tier 1. Google ranks a query the same way all day, so a second search the
     # same day finds page 1 already saved — measured live, 21 of 61 results on a repeat run. Sent
     # only for queries whose page 1 was rich in postings (`page_two_worth_asking`).
@@ -484,6 +530,7 @@ class Discovery:
     """What one discovery pass did, for the run's record and its Logfire span."""
 
     tiers: list[int] = field(default_factory=list)
+    asked: int = 0  # queries asked this pass, answered or not
     results: int = 0
     kinds: Counter = field(default_factory=Counter)
     # Postings each page-1 query returned, known or new: what decides whether its page 2 is sent.
@@ -503,6 +550,36 @@ class Discovery:
     errors: list[str] = field(default_factory=list)
 
 
+# How a stage reports into the run's bar: (fraction of the stage, sentence, done, total).
+type Step = Callable[[float, str, int, int], None]
+
+# The job APIs' stage: their answers are most of it, then finding snippet leads' originals.
+ANSWERS_SHARE = 0.6
+
+
+_OPERATOR = re.compile(r'-?(?:site|inurl|intitle):(?:"[^"]*"|\S+)')
+
+
+def shown(query: PlannedQuery) -> str:
+    """A query as a person would read it: the words, and the board when it is a board's, without
+    the operators that only Google reads (`-site:`, `site:`, `inurl:`, `-intitle:`)."""
+    text = " ".join(_OPERATOR.sub(" ", query.q).split())
+    place = places.country_name(query.gl) if query.gl else ""
+    where = f" on {query.domain}" if query.source == "board" and query.domain else ""
+    page = f", page {query.page}" if query.page > 1 else ""
+    return f"{text}{where}{f' ({place}{page})' if place else ''}"
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" + ("" if n == 1 else "s")
+
+
+def _asked_where(feed_id: str, query: feeds.FeedQuery) -> str:
+    if feed_id == "reliefweb":
+        return "every country"
+    return query.city or places.country_name(query.country)
+
+
 def discover(
     planned: list[PlannedQuery],
     tiers: Iterable[int],
@@ -514,6 +591,8 @@ def discover(
     profile: SearchProfile | None = None,
     robots: Robots | None = None,
     fetch: Callable[[str], str | None] | None = None,
+    on_step: Step | None = None,
+    engine: str = "google",
 ) -> Discovery:
     """Send the planned queries in `tiers`, sort what comes back, and queue the postings.
 
@@ -523,7 +602,9 @@ def discover(
     queue — nor does one whose title the profile excludes ("Senior", "Lead"): MATCH-01 would hide
     it after it was read, so reading it would spend a place in the 8–12 on a job nobody sees.
     Postings are queued after each query, so a pass that stops early keeps what it found.
+    `on_step` is told each query as it returns: its words, and what came back (UX-01).
     """
+    tell: Step = on_step or (lambda *_a: None)
     rules = robots or Robots()
     read = fetch or _listing_html
     known = {canonical_url(u) or u for u in known_urls}
@@ -546,12 +627,23 @@ def discover(
             out.known += 1
         elif key not in taken:
             taken.add(key)
-            found.append(Target(url, host, query.source, query.q, len(taken) - 1, title, snippet, when))
+            # Tagged with the engine that found it, for the share each source may take (SRCH-26).
+            asked = query.q if engine == "google" else f"{engine}: {query.q}"
+            found.append(Target(url, host, query.source, asked, len(taken) - 1, title, snippet, when, country=query.gl or None))
 
     with logfire.span("strategist discover", tiers=out.tiers) as span:
-        for query in [q for q in planned if q.tier in out.tiers]:
+        sending = [q for q in planned if q.tier in out.tiers]
+        # What this pass can actually send: the run's Serper cap stops a 108-query tier long before
+        # its end, and "Search 1 of 108" then never gets near 108.
+        room = getattr(serper, "max_queries", len(sending)) - getattr(serper, "sent", 0)
+        shown_total = max(min(len(sending), room), 1)
+        for number, query in enumerate(sending, 1):
             results = serper.search(query.q, gl=query.gl, hl=query.hl, page=query.page)
+            out.asked += 1
             if results is None:
+                tell(
+                    number / len(sending), f"Search {number} of {len(sending)} · {shown(query)}: no answer", number, len(sending)
+                )
                 if serper.stopped:
                     break
                 continue
@@ -571,6 +663,13 @@ def discover(
                 queue.note_postings(query.q, postings)
             out.queued += queue.push(found)
             found.clear()
+            tell(
+                min(number / shown_total, 1),
+                f"Search {number} of {shown_total} · {shown(query)}: "
+                f"{_count(len(results), 'result')}, {_count(postings, 'posting')}",
+                number,
+                shown_total,
+            )
 
         out.errors = list(serper.errors)
         span.set_attributes(
@@ -680,6 +779,8 @@ def discover_feeds(
     redis: object | None,
     person: feeds.Person | None = None,
     resource: Serper | None = None,
+    on_step: Step | None = None,
+    rank: Ranker | None = None,
 ) -> FeedDiscovery:
     """Ask every job API this search can use, all at once, and queue what they found.
 
@@ -689,8 +790,15 @@ def discover_feeds(
     so the open web and the reviewed boards still get their share of the 8–12. A full-text API's
     postings are queued to be read from the API; a snippet API's leads are looked for where the
     employer posted them (`feeds.resource`), with `resource` (a Serper client with its own cap).
+
+    `on_step(fraction, detail, done, total)` is told each answer as it lands and each original
+    looked for, in words naming the API, the title and the place (UX-01).
+
+    With `rank` (17 Nov), every API's leads are taken best match first across every place — so a
+    feed's `max_queued` and the searches for snippet leads' originals go to the best of them, not
+    to whichever country was asked first.
     """
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from ..domain.filters import RECENCY_MS
     from ..http import is_denied
@@ -699,10 +807,12 @@ def discover_feeds(
     from ..sources.provider_guard import Guard
 
     out = FeedDiscovery()
-    countries = sorted({q.gl for q in planned if q.gl} or {c.lower() for c in (profile.countries if profile else [])})
+    # In the plan's order — the profile's — not alphabetical: Adzuna's three searches went to
+    # Australia, Canada and Switzerland on 16 Nov because they sort first.
+    countries = list(dict.fromkeys(q.gl for q in planned if q.gl)) or [c.lower() for c in (profile.countries if profile else [])]
     titles = list(dict.fromkeys(q.title for q in sorted(planned, key=lambda q: q.tier)))
     levels = set(profile.seniority if profile else [])
-    wanted = places.where(profile.countries, profile.locations) if profile else places.Where([], {}, [])
+    wanted = places.searched(places.where(profile.countries, profile.locations)) if profile else places.Where([], {}, [])
     scope = profile.city_scope if profile else "first"
     queries = feeds.queries_for(titles, feeds.places_for(wanted, city_scope=scope, countries=countries))
     exclude = sorted(
@@ -740,62 +850,98 @@ def discover_feeds(
             return adzuna.search(query, guard)
         if feed_id == "reliefweb":
             early = bool(levels) and levels <= {"intern", "graduate", "junior", "entry"}
-            return reliefweb.search(
-                query, guard, countries=countries, international=bool(profile and profile.international), early=early
-            )
+            # Always with international organisations' posts anywhere (SRCH-35, 17 Nov).
+            return reliefweb.search(query, guard, countries=countries, international=True, early=early)
         return careerjet.search(query, guard, person=person)  # type: ignore[arg-type]
 
+    tell: Step = on_step or (lambda *_a: None)
     with logfire.span("strategist feeds", asks=len(asks)) as span:
+        # Told as each lands, then handled in the order asked: which lead is queued first, and so
+        # which one a duplicate keeps, must not depend on which API answered fastest.
+        results: dict[int, tuple[list[feeds.Lead], str]] = {}
         with ThreadPoolExecutor(max_workers=max(1, min(8, len(asks)))) as pool:
-            answers = list(pool.map(lambda a: (a, ask(*a)), asks))
+            futures = {pool.submit(ask, *a): i for i, a in enumerate(asks)}
+            for future in as_completed(futures):
+                i = futures[future]
+                results[i] = future.result()
+                feed_id, query = asks[i]
+                tell(
+                    ANSWERS_SHARE * len(results) / len(asks),
+                    f"{feeds.FEEDS[feed_id].name} · {query.title} in {_asked_where(feed_id, query)}: "
+                    f"{_count(len(results[i][0]), 'posting')} ({len(results)} of {len(asks)})",
+                    len(results),
+                    len(asks),
+                )
+        answers = [(asks[i], results[i]) for i in range(len(asks))]
+        # Leads with no full text, each needing a search for where the employer posted it.
+        to_find = sum(
+            min(len(leads), feeds.config(f).max_queued) for (f, _q), (leads, _h) in answers if not feeds.FEEDS[f].full_text
+        )
+        looked = 0
 
         known = {canonical_url(u) or u for u in known_urls}
         taken: set[str] = set()
         tried: set[str] = set()  # a lead two APIs (or one API twice) returned is looked for once
         oldest = now - RECENCY_MS["21d"]
         found: list[Target] = []
+        entries: list[tuple[str, feeds.FeedQuery, feeds.Lead]] = []
         for (feed_id, query), (leads, how) in answers:
             stats = out.by_feed[feed_id]
             stats["searches"] += 1  # type: ignore[operator]
             stats["leads"] += len(leads)  # type: ignore[operator]
             stats["how"][how] += 1  # type: ignore[index]
+            entries += [(feed_id, query, lead) for lead in leads]
+        if rank is not None and entries:
+            scores = rank([(lead.title, lead.snippet) for _f, _q, lead in entries])
+            order = sorted(range(len(entries)), key=lambda i: -scores[i])
+            entries = [entries[i] for i in order]
+        for feed_id, query, lead in entries:
+            stats = out.by_feed[feed_id]
             cfg, feed = feeds.config(feed_id), feeds.FEEDS[feed_id]
-            for lead in leads:
-                if stats["queued"] >= cfg.max_queued:  # type: ignore[operator]
-                    break
-                same = f"{lead.company.lower()}|{lead.title.lower()}"
-                if same in tried or is_denied(lead.url) or (profile is not None and _excluded(lead.title, profile)):
-                    continue
-                if lead.date and _ms(lead.date) is not None and _ms(lead.date) < oldest:  # type: ignore[operator]
-                    continue
-                tried.add(same)
-                if feed.full_text:
-                    url, title, snippet, source, payload = lead.url, lead.title, lead.snippet, "feed", lead.payload
-                else:
-                    hit = finding.original(lead, serper=resource, sites=sites, gl=query.country, hl="en", exclude=exclude)  # type: ignore[arg-type]
-                    if hit is None or (profile is not None and _excluded(hit.title, profile)):
-                        stats["no_original"] = int(stats.get("no_original", 0)) + 1  # type: ignore[call-overload]
-                        continue
-                    url, title, snippet, source, payload = hit.url, hit.title, hit.snippet, "open", None
-                if (canonical_url(url) or url) in known or (canonical_url(url) or url) in taken:
-                    continue
-                taken.add(canonical_url(url) or url)
-                q = f"{feed.name}: {query.title}" + (f" in {query.city}" if query.city else "")
-                found.append(
-                    Target(
-                        url,
-                        host_of(url).removeprefix("www."),
-                        source,
-                        q,
-                        len(found),
-                        title,
-                        snippet,
-                        lead.date,
-                        via=feed_id,
-                        payload=payload,
-                    )
+            if stats["queued"] >= cfg.max_queued:  # type: ignore[operator]
+                continue
+            same = f"{lead.company.lower()}|{lead.title.lower()}"
+            if same in tried or is_denied(lead.url) or (profile is not None and _excluded(lead.title, profile)):
+                continue
+            if lead.date and _ms(lead.date) is not None and _ms(lead.date) < oldest:  # type: ignore[operator]
+                continue
+            tried.add(same)
+            if feed.full_text:
+                url, title, snippet, source, payload = lead.url, lead.title, lead.snippet, "feed", lead.payload
+            else:
+                looked += 1
+                tell(
+                    ANSWERS_SHARE + (1 - ANSWERS_SHARE) * min(looked / max(to_find, 1), 1),
+                    f"Finding where the employer posted {feed.name}'s {lead.title} at {lead.company}",
+                    looked,
+                    to_find,
                 )
-                stats["queued"] += 1  # type: ignore[operator]
+                hit = finding.original(lead, serper=resource, sites=sites, gl=query.country, hl="en", exclude=exclude)  # type: ignore[arg-type]
+                if hit is None or (profile is not None and _excluded(hit.title, profile)):
+                    stats["no_original"] = int(stats.get("no_original", 0)) + 1  # type: ignore[call-overload]
+                    continue
+                url, title, snippet, source, payload = hit.url, hit.title, hit.snippet, "open", None
+            if (canonical_url(url) or url) in known or (canonical_url(url) or url) in taken:
+                continue
+            taken.add(canonical_url(url) or url)
+            q = f"{feed.name}: {query.title}" + (f" in {query.city}" if query.city else "")
+            found.append(
+                Target(
+                    url,
+                    host_of(url).removeprefix("www."),
+                    source,
+                    q,
+                    len(found),
+                    title,
+                    snippet,
+                    lead.date,
+                    via=feed_id,
+                    payload=payload,
+                    # ReliefWeb's one search covers every country, so its postings belong to none.
+                    country=None if feed_id == "reliefweb" else query.country,
+                )
+            )
+            stats["queued"] += 1  # type: ignore[operator]
 
         out.queued = queue.push(found)
         if resource is not None:

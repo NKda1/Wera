@@ -7,6 +7,11 @@
 // the countries a reviewed board covered — the UK and a handful of its neighbours — so anyone
 // looking further afield had no way to say so, although the open web search and the job APIs
 // reach every country listed here.
+//
+// Regions, then countries (17 Nov): WERA searches Europe and North America for now. Each region
+// can tick its main markets — the countries a job API covers — in one go, and any country can then
+// be unticked or added. A country saved before, outside those regions, stays listed and says it
+// isn't searched.
 
 import { X } from "lucide-react";
 import { useId, useMemo, useState } from "react";
@@ -16,7 +21,7 @@ import { ChipInput } from "@/lib/ui/ChipInput";
 import { cn } from "@/lib/ui/cn";
 import { Checkbox, Input, Label, Select } from "@/lib/ui/Field";
 
-type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope" | "international">;
+type Where = Pick<SearchProfile, "countries" | "locations" | "remote" | "cityScope">;
 
 /** What searches a country, in a few words: the thing that decides whether picking it is useful. */
 export function coverage(place: PlaceOption): string {
@@ -33,8 +38,7 @@ export function whereSummary(profile: Where, places: PlaceOption[]): string {
   const remote = profile.remote === "remote_only" ? "Remote only" : "";
   const named = cities.length ? `${cities.join(", ")} ${profile.cityScope === "only" ? "only" : "first"}` : "";
   const place = [named, names.join(", ")].filter(Boolean).join(" · ");
-  const orgs = profile.international ? "International organisations anywhere" : "";
-  return [place || (remote ? "" : "Anywhere"), orgs, remote].filter(Boolean).join(" · ");
+  return [place || (remote ? "" : "Anywhere"), remote].filter(Boolean).join(" · ");
 }
 
 /** What a named city does to its country (16 Nov). Picked before each search, in the Search dialog. */
@@ -80,18 +84,25 @@ export function WhereFields({
   const byCode = useMemo(() => new Map(places.map((p) => [p.code, p])), [places]);
 
   const toggle = (code: string, on: boolean) => onChange({ countries: on ? [...chosen, code] : chosen.filter((c) => c !== code) });
+  const searchable = places.filter((p) => p.searched);
+  const unsearched = chosen.filter((c) => byCode.get(c)?.searched === false);
+  /** A region's main markets ticked in one go, keeping what is already chosen. */
+  const tickMain = (region: string) =>
+    onChange({ countries: [...chosen, ...searchable.filter((p) => p.region === region && p.main && !chosen.includes(p.code)).map((p) => p.code)] });
+  const clearRegion = (region: string) => onChange({ countries: chosen.filter((c) => byCode.get(c)?.region !== region) });
 
   // Grouped by region, filtered by the box above. The chosen ones are always listed first, at the
   // top, so a long list never hides what is already picked.
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const shown = places.filter((p) => !q || p.name.toLowerCase().includes(q) || p.code.toLowerCase() === q);
+    const shown = searchable.filter((p) => !q || p.name.toLowerCase().includes(q) || p.code.toLowerCase() === q);
     const regions = new Map<string, PlaceOption[]>();
     for (const p of shown) regions.set(p.region, [...(regions.get(p.region) ?? []), p]);
+    // Main markets first in each region, then the rest, each alphabetical.
     return [...regions.entries()]
-      .map(([region, list]) => ({ region, list: list.sort((a, b) => a.name.localeCompare(b.name)) }))
+      .map(([region, list]) => ({ region, list: list.sort((a, b) => Number(b.main) - Number(a.main) || a.name.localeCompare(b.name)) }))
       .sort((a, b) => regionName(a.region).localeCompare(regionName(b.region)));
-  }, [places, query]);
+  }, [searchable, query]);
 
   return (
     <div className="grid gap-5">
@@ -100,8 +111,15 @@ export function WhereFields({
         {chosen.length ? (
           <ul className="mb-2.5 flex flex-wrap gap-1.5" aria-label="Countries chosen">
             {chosen.map((code) => (
-              <li key={code} className="inline-flex items-center gap-1 bg-mint-100 py-0.5 pr-1 pl-2.5 text-small text-ink">
+              <li
+                key={code}
+                className={cn(
+                  "inline-flex items-center gap-1 py-0.5 pr-1 pl-2.5 text-small",
+                  byCode.get(code)?.searched === false ? "bg-amber-50 text-amber-700" : "bg-mint-100 text-ink",
+                )}
+              >
                 {byCode.get(code)?.name ?? code}
+                {byCode.get(code)?.searched === false ? <span className="sr-only"> (not searched for now)</span> : null}
                 <button
                   type="button"
                   onClick={() => toggle(code, false)}
@@ -114,6 +132,12 @@ export function WhereFields({
             ))}
           </ul>
         ) : null}
+        {unsearched.length ? (
+          <p className="mb-2.5 text-small text-amber-700">
+            {unsearched.map((c) => byCode.get(c)?.name ?? c).join(", ")} {unsearched.length === 1 ? "isn't" : "aren't"} searched for now: WERA covers Europe, the US
+            and Canada. Remove {unsearched.length === 1 ? "it" : "them"}, or keep {unsearched.length === 1 ? "it" : "them"} for later.
+          </p>
+        ) : null}
         <Label htmlFor={filterId} className="sr-only">
           Find a country
         </Label>
@@ -122,24 +146,45 @@ export function WhereFields({
             dialog around it can still be scrolled past it. */}
         <div className="mt-2 max-h-[45dvh] overflow-y-auto border border-line px-3 py-2 sm:max-h-64">
           {groups.length ? (
-            groups.map(({ region, list }) => (
-              <div key={region} className="py-1.5">
-                <p className="mb-0.5 text-small font-semibold tracking-wide text-ink-2 uppercase">{regionName(region)}</p>
-                <div className="grid gap-x-4 sm:grid-cols-2">
-                  {list.map((p) => (
-                    <Checkbox
-                      key={p.code}
-                      label={p.name}
-                      description={coverage(p)}
-                      checked={chosen.includes(p.code)}
-                      onChange={(e) => toggle(p.code, e.target.checked)}
-                    />
-                  ))}
+            groups.map(({ region, list }) => {
+              const main = list.filter((p) => p.main);
+              const picked = chosen.filter((c) => byCode.get(c)?.region === region).length;
+              return (
+                <div key={region} className="py-1.5">
+                  <div className="mb-0.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                    <p className="text-small font-semibold tracking-wide text-ink-2 uppercase">
+                      {regionName(region)}
+                      {picked ? <span className="font-normal normal-case"> · {picked} ticked</span> : null}
+                    </p>
+                    <span className="flex gap-3 text-small">
+                      {main.some((p) => !chosen.includes(p.code)) ? (
+                        <button type="button" onClick={() => tickMain(region)} className="font-semibold text-forest-700 hover:underline">
+                          Tick the {main.length} main markets
+                        </button>
+                      ) : null}
+                      {picked ? (
+                        <button type="button" onClick={() => clearRegion(region)} className="font-semibold text-forest-700 hover:underline">
+                          Clear
+                        </button>
+                      ) : null}
+                    </span>
+                  </div>
+                  <div className="grid gap-x-4 sm:grid-cols-2">
+                    {list.map((p) => (
+                      <Checkbox
+                        key={p.code}
+                        label={p.name}
+                        description={coverage(p)}
+                        checked={chosen.includes(p.code)}
+                        onChange={(e) => toggle(p.code, e.target.checked)}
+                      />
+                    ))}
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           ) : (
-            <p className="py-2 text-small text-ink-2">No country called “{query}”. WERA can search the countries listed here.</p>
+            <p className="py-2 text-small text-ink-2">No country called “{query}” in Europe or North America, which WERA searches for now.</p>
           )}
         </div>
         <p className={cn("mt-1.5 text-small", !chosen.length && !value.locations.length ? "text-amber-700" : "text-ink-2")}>
@@ -164,12 +209,10 @@ export function WhereFields({
 
       {value.locations.length ? <CityScope value={value.cityScope} onChange={(cityScope) => onChange({ cityScope })} /> : null}
 
-      <Checkbox
-        label="International organisations, any duty station"
-        description="UN, WHO, WIPO, WTO, IMF and ITU posts open to any nationality show wherever they are; posts for residents or nationals still follow your countries. Read from the organisations whose terms you've reviewed in config/organisations.yaml."
-        checked={value.international}
-        onChange={(e) => onChange({ international: e.target.checked })}
-      />
+      <p className="text-small text-ink-2">
+        International organisations (UN, WHO, WIPO, WTO, IMF, ITU): posts open to any nationality show wherever they are, when they suit your titles and level;
+        posts for residents or nationals follow your countries.
+      </p>
 
       <div>
         <Label htmlFor={remoteId}>Remote</Label>

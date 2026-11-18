@@ -113,14 +113,24 @@ class TestTheMatrixOverTheApi:
             "GB",
             "DE",
         ]
-        # Busan is South Korea (the gazetteer knows it), not the United States by way of its "us".
-        assert strategist.target_countries(profile.model_copy(update={"countries": [], "locations": ["Busan"]})) == ["KR"]
         assert strategist.target_countries(profile.model_copy(update={"countries": [], "locations": ["Austin, TX"]})) == ["US"]
         assert strategist.target_countries(profile.model_copy(update={"countries": ["NL"], "locations": []})) == ["NL"]
-        # A city outside the ticked countries adds its own: "Dubai" is a search of the UAE.
-        assert strategist.target_countries(profile.model_copy(update={"countries": ["GB"], "locations": ["Dubai"]})) == [
+        # A city outside the ticked countries adds its own: "Toronto" is a search of Canada.
+        assert strategist.target_countries(profile.model_copy(update={"countries": ["GB"], "locations": ["Toronto"]})) == [
             "GB",
-            "AE",
+            "CA",
+        ]
+
+    def test_a_country_outside_the_markets_is_kept_but_not_planned_for(self, store):
+        """17 Nov: Europe and North America for now. Busan is South Korea and Dubai the UAE — the
+        gazetteer still knows them, and the profile keeps them — but no search goes there."""
+        from wera_agent.domain import places
+
+        profile = store.get_profile()
+        assert places.where([], ["Busan"]).countries == ["KR"]
+        assert strategist.target_countries(profile.model_copy(update={"countries": [], "locations": ["Busan"]})) == []
+        assert strategist.target_countries(profile.model_copy(update={"countries": ["GB", "AU"], "locations": ["Dubai"]})) == [
+            "GB"
         ]
 
     def test_a_refresh_is_kept_until_the_profile_changes(self, client):
@@ -173,3 +183,57 @@ def _real_sites_untouched():
     before = real.read_text()
     yield
     assert real.read_text() == before
+
+
+class TestAPlanThatCannotBeHad:
+    """16–17 Nov: at five countries every plan was cut off twice, and every search asked again —
+    37–115 seconds each before its first query, then the fallback queries anyway."""
+
+    def test_its_ceiling_grows_with_the_countries(self):
+        floor = config.wera().task("strategist.plan").max_tokens
+        assert strategist.plan_ceiling(1) == floor
+        assert strategist.plan_ceiling(10) > strategist.plan_ceiling(2) >= floor
+        assert strategist.plan_ceiling(500) == strategist.PLAN_TOKENS_MAX
+
+    def test_it_is_thought_about_without_thinking(self):
+        assert config.wera().task("strategist.plan").reasoning == "off"
+
+    def test_a_failure_is_not_asked_for_again_until_something_changes(self, client, monkeypatch):
+        from wera_agent.errors import ApiError
+
+        asked = []
+
+        def fails(self):
+            asked.append(1)
+            raise ApiError(424, "LLM_TRUNCATED", "cut off")
+
+        monkeypatch.setattr(Store, "strategy", lambda self, refusing=(): None)
+        monkeypatch.setattr(Store, "refresh_strategy", fails)
+        for _ in range(3):
+            with transaction() as session:
+                planned, matrix = Store(session).search_queries(refresh=True, probe=False)
+                assert planned and matrix is None  # still searches, in the person's own words
+        assert len(asked) == 1
+
+        with transaction() as session:  # a new profile is a new plan, and is asked
+            store = Store(session)
+            store.put_profile(store.get_profile().model_copy(update={"titles": ["Data Engineer"]}))
+        with transaction() as session:
+            Store(session).search_queries(refresh=True, probe=False)
+        assert len(asked) == 2
+
+    def test_a_failure_older_than_the_window_is_asked_again(self, client, monkeypatch):
+        from wera_agent.errors import ApiError
+        from wera_agent.services import store as store_module
+
+        asked = []
+        monkeypatch.setattr(Store, "strategy", lambda self, refusing=(): None)
+        monkeypatch.setattr(
+            Store, "refresh_strategy", lambda self: asked.append(1) or (_ for _ in ()).throw(ApiError(424, "X", "x"))
+        )
+        now = 1_762_850_000_000
+        with transaction() as session:
+            Store(session, now).search_queries(refresh=True, probe=False)
+        with transaction() as session:
+            Store(session, now + store_module.PLAN_RETRY_MS + 1).search_queries(refresh=True, probe=False)
+        assert len(asked) == 2

@@ -222,9 +222,20 @@ def _coverage(body_lines: list[str], skills: list[str], evidence: FitEvidence) -
 
 
 def build_ats(
-    doc: TailoredCV, *, cv: MasterCV, evidence: FitEvidence, cv_pages: int, job: Job, letter: CoverLetter | None = None
+    doc: TailoredCV,
+    *,
+    cv: MasterCV,
+    evidence: FitEvidence,
+    cv_pages: int,
+    job: Job,
+    letter: CoverLetter | None = None,
+    text: str | None = None,
+    pages: int | None = None,
 ) -> AtsReport:
-    text = tailored_text(doc, cv)
+    """`text` and `pages` are the CV file's when it has been rendered (EXP-01): everything it
+    prints, and the page count of the PDF itself. Without them the text is the tailored CV's and
+    the page count an estimate from line lengths, which is what a pack has while it is drafted."""
+    text = text if text is not None else tailored_text(doc, cv)
     master = master_cv_text(cv)
     letter_text = "\n".join(p.text for p in letter.paragraphs) if letter else None
     keywords = [
@@ -238,15 +249,21 @@ def build_ats(
         )
         for k in evidence.keywords
     ]
-    pages = estimate_pages(doc, cv)
-    fits = pages <= cv_pages
-    page_msg = (
-        f"About {cv_pages} page{'s' if cv_pages > 1 else ''}, estimated"
-        if fits
-        else f"About {_num(pages)} pages, estimated — trim to {cv_pages}"
-    )
+    if pages is not None:
+        # `export/lint.ts`'s wording, since it is the same count of the same file.
+        fits = pages <= cv_pages
+        page_msg = f"{pages} page{'' if pages == 1 else 's'}" if fits else f"{pages} pages, over the {cv_pages}-page limit"
+        measured = float(pages)
+    else:
+        measured = estimate_pages(doc, cv)
+        fits = measured <= cv_pages
+        page_msg = (
+            f"About {cv_pages} page{'s' if cv_pages > 1 else ''}, estimated"
+            if fits
+            else f"About {_num(measured)} pages, estimated — trim to {cv_pages}"
+        )
     file_name = cv_file_name(cv, job.company)
-    score, best, parts = ats_score(doc, cv, keywords, job=job, fits=fits, file_ok=bool(FILE_NAME.fullmatch(file_name)))
+    score, best, parts = ats_score(doc, cv, keywords, job=job, fits=fits, file_ok=bool(FILE_NAME.fullmatch(file_name)), text=text)
     return AtsReport(
         keywords=keywords,
         coverage=ats_coverage(keywords),
@@ -259,7 +276,7 @@ def build_ats(
             if letter_text is not None and any(k.in_master_cv for k in keywords)
             else None
         ),
-        pages=pages,
+        pages=measured,
         # Only what this module can actually measure. It used to also report a single column, an
         # extractable file and no tables as passed — written as `pass_=True`, for a PDF that did
         # not exist yet. The rendered file is linted where it is rendered (`export/lint.ts`), and
@@ -325,7 +342,7 @@ def _occurrences(text: str, term: str) -> int:
 
 
 def ats_score(
-    doc: TailoredCV, cv: MasterCV, keywords: list[AtsKeyword], *, job: Job, fits: bool, file_ok: bool
+    doc: TailoredCV, cv: MasterCV, keywords: list[AtsKeyword], *, job: Job, fits: bool, file_ok: bool, text: str | None = None
 ) -> tuple[float, float, list[AtsPart]]:
     """The score, the best this CV could score with every keyword it backs placed, and the parts."""
     bullets = {i.role_id: [b.text for b in i.bullets] for s in doc.sections for i in s.items}
@@ -364,7 +381,7 @@ def ats_score(
         "" if file_ok else "; file name not First-Last-CV-Company"
     )
 
-    text = tailored_text(doc, cv)
+    text = text if text is not None else tailored_text(doc, cv)
     stuffed = [k.term for k in keywords if _occurrences(text, k.term) > MAX_REPEATS]
     length = ((5 if fits else 0) + (3 if not stuffed else 0) + (2 if len(doc.skills) <= MAX_SKILLS else 0)) / 10
     length_why = ", ".join(

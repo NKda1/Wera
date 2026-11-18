@@ -93,8 +93,10 @@ def harvest(
     fetch_html: "Fetcher | None" = None,
     parse: Callable[[str], dict[str, Any] | None] | None = None,
     redis: Any | None = None,
+    on_read: Callable[[Target], None] | None = None,
 ) -> HarvestOutcome:
-    """Read and check each target. `spend` carries the run's Firecrawl accounting across rounds."""
+    """Read and check each target. `spend` carries the run's Firecrawl accounting across rounds.
+    `on_read` is told each posting as it is about to be read, for the run's progress (UX-01)."""
     rules = robots or Robots()
     declined = {s.domain.lower().removeprefix("www.") for s in sites if s.declined_on is not None}
     out = HarvestOutcome()
@@ -103,6 +105,8 @@ def harvest(
     for target in targets:
         reason = _gate(target, rules, declined, sites)
         if reason is None:
+            if on_read is not None:
+                on_read(target)
             if target.source == "feed":
                 card, how = _from_feed(target, redis)
             else:

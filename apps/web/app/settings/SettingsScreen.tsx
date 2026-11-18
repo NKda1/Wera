@@ -35,7 +35,10 @@ const WEIGHT_LABELS: { key: keyof FitWeights; label: string; hint: string }[] = 
 
 type Schedule = { enabled: boolean; cron: string };
 
-type Draft = Pick<SettingsResponse, "redactContact" | "weeklyBudgetUsd" | "cvPages" | "baseUrl" | "models" | "weights" | "scheduledIntake" | "learnedRanking"> & {
+type Draft = Pick<
+  SettingsResponse,
+  "redactContact" | "weeklyBudgetUsd" | "cvPages" | "baseUrl" | "models" | "weights" | "scheduledIntake" | "learnedRanking" | "dailyScoreLimit"
+> & {
   senders: string[];
   searchSchedule: Schedule;
 };
@@ -52,6 +55,7 @@ const toDraft = (s: SettingsResponse): Draft => ({
   searchSchedule: { enabled: s.searchSchedule.enabled, cron: s.searchSchedule.cron },
   scheduledIntake: s.scheduledIntake,
   learnedRanking: s.learnedRanking,
+  dailyScoreLimit: s.dailyScoreLimit,
 });
 
 // Schedules a person can pick without knowing cron. Each is at least six hours apart, which the
@@ -113,6 +117,7 @@ export function SettingsScreen({ initial }: { initial: SettingsResponse }) {
         <ScheduleCard settings={settings} value={draft.searchSchedule} onChange={(v) => set("searchSchedule", v)} error={errors["searchSchedule.cron"]} />
         <DailyIntakeCard settings={settings} value={draft.scheduledIntake} onChange={(v) => set("scheduledIntake", v)} />
         <LearnedRankingCard value={draft.learnedRanking} onChange={(v) => set("learnedRanking", v)} />
+        <DailyLimitCard settings={settings} value={draft.dailyScoreLimit} onChange={(v) => set("dailyScoreLimit", v)} />
 
         <Card className="p-5 sm:p-6" aria-labelledby="models-title">
           <CardHeader id="models-title" title="Models" description="Any OpenAI-compatible endpoint. Pin dated model ids so results stay stable." />
@@ -579,6 +584,23 @@ function LearnedRankingCard({ value, onChange }: { value: boolean; onChange: (v:
       />
       <div className="mt-4">
         <Checkbox label="Order my shortlist with what I've approved and rejected" checked={value} onChange={(e) => onChange(e.target.checked)} />
+      </div>
+    </Card>
+  );
+}
+
+/** MATCH-05's 24-hour scoring ceiling, switchable for A/B testing (17 Nov). Off, the weekly
+ *  budget is what stops spending — said here, so turning it off isn't read as "no limit". */
+function DailyLimitCard({ settings, value, onChange }: { settings: SettingsResponse; value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <Card className="p-5 sm:p-6" aria-labelledby="daily-limit-title">
+      <CardHeader
+        id="daily-limit-title"
+        title="Daily scoring limit"
+        description={`WERA scores at most ${settings.maxScoredPerDay} jobs against your CV in any 24 hours. Turn it off to keep scoring, for example while A/B testing; your weekly budget of $${settings.weeklyBudgetUsd.toFixed(2)} still stops it.`}
+      />
+      <div className="mt-4">
+        <Checkbox label={`Stop after ${settings.maxScoredPerDay} jobs in 24 hours`} checked={value} onChange={(e) => onChange(e.target.checked)} />
       </div>
     </Card>
   );

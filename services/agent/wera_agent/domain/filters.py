@@ -307,11 +307,13 @@ def location_verdict(job: Job, profile: SearchProfile) -> tuple[str | None, bool
         return "remote", False
     if job.remote == "remote":
         return None, False  # `remote: any`, and this one is remote — where it nominally sits is moot
-    # SRCH-34: "International organisations, any duty station". An internationally recruited post
-    # moves the person who takes it, so its duty station is no reason to hide it; a locally
-    # recruited one (G and NO grades) is for residents or nationals, and follows the countries.
+    # SRCH-34: an internationally recruited post moves the person who takes it, so its duty station
+    # is no reason to hide it; a locally recruited one (G and NO grades) is for residents or
+    # nationals, and follows the countries. Automatic since 17 Nov, with no switch: whether one is
+    # relevant is the title and grade rules' to say (`organisation_role_fits`, `grade_outside`),
+    # and the CV's to rank — not where it is.
     post = job.international
-    if profile.international and post is not None and post.recruitment != "local":
+    if post is not None and post.recruitment != "local":
         return None, False
     place = " ".join(filter(None, [job.location.city, job.location.country, job.location.raw])).lower()
     # "Hybrid", "Flexible", "Multiple locations": a working pattern, not a place, and nothing to

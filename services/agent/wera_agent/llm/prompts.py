@@ -89,7 +89,9 @@ def cv_text(cv: Any, *, home: bool = True) -> str:
         lines += ["", "Education:"]
         lines += [f"- {e.degree}, {e.institution} ({e.start or '?'} to {e.end or '?'})" for e in cv.education]
     if cv.skills:
-        lines += ["", "Skills (use these spellings): " + ", ".join(s.name for s in cv.skills)]
+        # With the person's level (18 Nov), proficient when they haven't said: a skill on a CV is
+        # one they claim, and the fit scorer reads the level.
+        lines += ["", "Skills (use these spellings): " + ", ".join(f"{s.name} ({s.level or 'proficient'})" for s in cv.skills)]
     if cv.languages:
         lines.append("Languages: " + ", ".join(f"{lang.name} ({lang.level})" for lang in cv.languages))
     return "\n".join(lines)
@@ -252,6 +254,55 @@ JOB_ANALYSE = ChatPromptTemplate.from_messages(
     ]
 )
 
+JOB_SUMMARY = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "Summarise one job post for someone deciding whether to apply. It can be any kind of "
+            "job, in any field. Use the post's own words wherever you can: every item is checked "
+            "against the post, and one whose words or numbers aren't in it is thrown away.\n\n"
+            "- `gist` — one sentence: what the job is and who it is with.\n"
+            "- `duties` — up to 4: what the person will actually do.\n"
+            "- `must_haves` — up to 5: what the post says is required (qualifications, "
+            "registrations, licences, experience, skills).\n"
+            "- `nice_to_haves` — up to 4: what it says is preferred or a plus.\n"
+            "- `perks` — up to 3: pay, benefits, training or flexibility the post offers.\n"
+            "- `watch_outs` — up to 3: things a candidate should know before applying that the "
+            "post states, such as shifts or unsocial hours, on-call, travel, a fixed term, no visa "
+            "sponsorship, vetting or clearance, relocation, or pay that depends on commission.\n\n"
+            "Each item is a short phrase, not a sentence about the applicant. Never judge the "
+            "applicant, and never add anything the post doesn't say: an empty list is the right "
+            "answer when the post says nothing of that kind. Numbers exactly as the post writes "
+            "them.\n\n" + _DATA_RULE,
+        ),
+        ("human", "{job}"),
+    ]
+)
+
+COMPANY_BRIEF = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "Tell an applicant what this employer is, from two sources: the job post, and (when "
+            "there is one) a page from the company's own website. It can be any kind of employer — "
+            "a hospital trust, a law firm, a school, a charity, a shop, a start-up.\n\n"
+            "Return `items`, each with:\n"
+            "- `topic` — one of `what_they_do`, `who_they_serve`, `size_or_stage` (headcount, "
+            "locations, founding, funding or growth as stated), `values` (what they say they "
+            "stand for or how they work), `why_the_role` (why they are hiring for this job).\n"
+            "- `text` — one short sentence in plain words.\n"
+            "- `source` — `post` or `site`: where you read it.\n"
+            "- `quote` — **the words from that source it rests on, copied exactly**: a phrase or "
+            "a sentence, never stitched together from two places.\n\n"
+            "Every item is checked in code: one whose quote isn't in the source it names, or whose "
+            "text says more than its quote, is thrown away. So say only what a quote shows, at "
+            "most two items a topic and eight in all, and leave a topic out when neither source "
+            "says anything about it. Never add what you know about the company from elsewhere.\n\n" + _DATA_RULE,
+        ),
+        ("human", "{job}\n\n{site}"),
+    ]
+)
+
 STRATEGIST_PLAN = ChatPromptTemplate.from_messages(
     [
         (
@@ -332,6 +383,12 @@ FIT_SCORE = ChatPromptTemplate.from_messages(
             "Where the job is has already been checked against where the applicant is looking for "
             "work. Never mark a job down for its location, or for how far it is from any place "
             "the CV mentions.\n\n"
+            # 18 Nov: the levels are the person's own claim, set in the CV editor (proficient
+            # unless they say otherwise). Read so `core` can tell "used it" from "knows it well".
+            "Each skill in the CV carries the applicant's own level: familiar, proficient or "
+            "expert. Proficient is a full match for a skill the post asks for; never mark it down "
+            "for not being expert. A skill the post treats as essential that the applicant marks "
+            "only familiar is a partial match in `core`.\n\n"
             # The rubric below exists because of a measured failure, not a hunch. On the golden
             # set, every posting titled "Graduate" agreed with the hand scores and every posting
             # titled "Junior" came back 2.2 to 5.7 points low — the model was reading
@@ -613,7 +670,10 @@ LETTER_WRITE = ChatPromptTemplate.from_messages(
             "Two rules on the company half, because it is where letters invent things. Quote the "
             "company facts **word for word from the post** — `companyQuote` for the first and "
             "`policyQuote` for the policy or working-practice one if the post states one, else an "
-            "empty string. Say nothing about the company that the post does not say: no guesses about "
+            "empty string. When verified facts from the company's own site are listed below, you may "
+            "use one of them, in the alignment paragraph, quoting its words exactly as `siteQuote` "
+            "(else an empty string) and joining it to a CV line that shows why it suits the "
+            "applicant. Say nothing about the company that the post or those facts do not say: no guesses about "
             "its culture, funding, reputation or plans, and no praise of it. Why it suits *this* "
             "applicant must come from their CV or from what they told you they want.\n\n" + _DATA_RULE,
         ),
@@ -689,6 +749,8 @@ TEMPLATES: dict[str, ChatPromptTemplate] = {
     "guard.claims": GUARD_CLAIMS,
     "keywords.extract": KEYWORDS_EXTRACT,
     "job.analyse": JOB_ANALYSE,
+    "job.summary": JOB_SUMMARY,
+    "company.brief": COMPANY_BRIEF,
     "cv.profile": CV_PROFILE,
     "strategist.plan": STRATEGIST_PLAN,
     "fit.score": FIT_SCORE,

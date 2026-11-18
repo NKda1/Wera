@@ -139,13 +139,7 @@ class TestReScoringAfterACvChange:
 
     def test_nothing_to_score_means_no_run(self, client, monkeypatch):
         """A progress bar for no work is worse than no progress bar — a fresh install shouldn't
-        get one just for saving its first CV.
-
-        Note what this does *not* claim: that re-saving an unedited CV is free. `put_cv` is
-        append-only and bumps the version whatever the content, so pressing Save without editing
-        really does invalidate every score and start a pass. Comparing content before bumping
-        would change what a CV version means, so it isn't done here.
-        """
+        get one just for saving its first CV."""
         monkeypatch.setattr(Store, "jobs_needing_score", lambda *_a, **_k: [])
         with transaction() as session:
             self.new_cv(Store(session))
@@ -166,9 +160,36 @@ class TestClearingTheBacklog:
         cv_upload_mode("reset")
 
     def new_cv(self, store) -> None:
+        """A new CV from an upload or import (`replace`): the only save that may start fresh."""
         cv = store.cv()
         cv.summary.text = f"{cv.summary.text} And a line that changes the document."
-        store.put_cv(cv)
+        store.put_cv(cv, replace=True)
+
+    def test_an_edit_never_clears_anything_even_with_the_reset_on(self, client):
+        """18 Nov: a skill-level edit cleared every job, score and pack, because the reset ran on
+        every save. An edit is never a fresh start."""
+        from wera_agent.db.models import ApplicationRow
+
+        with transaction() as session:
+            jobs = len(session.scalars(select(JobRow)).all())
+            apps = len(session.scalars(select(ApplicationRow)).all())
+            store = Store(session)
+            cv = store.cv()
+            cv.skills[0].level = "expert"
+            store.put_cv(cv)
+        with transaction() as session:
+            assert len(session.scalars(select(JobRow)).all()) == jobs
+            assert len(session.scalars(select(ApplicationRow)).all()) == apps
+
+    def test_a_replacement_can_keep_the_jobs(self, client):
+        from wera_agent.db.models import ApplicationRow
+
+        with transaction() as session:
+            apps = len(session.scalars(select(ApplicationRow)).all())
+            store = Store(session)
+            store.put_cv(store.cv(), replace=True, fresh=False)
+        with transaction() as session:
+            assert len(session.scalars(select(ApplicationRow)).all()) == apps
 
     def test_it_clears_the_jobs_and_starts_no_rescore(self, client):
         with transaction() as session:
@@ -262,7 +283,7 @@ class TestClearingTheBacklog:
         before = len(api.ok("GET", "/jobs?status=new")["items"])
         assert before, "the demo seed should have left a backlog"
 
-        result = api.ok("PUT", "/cv", cv)
+        result = api.ok("PUT", "/cv?replace=true", cv)
 
         assert result["clearedJobs"] >= before
         assert api.ok("GET", "/jobs?status=new")["items"] == []
@@ -780,6 +801,49 @@ class TestProgress:
         monkeypatch.setattr(intake, "transaction", explode, raising=False)
         # `judge` needs real transactions, so only the reporter is broken here.
         intake.report({"board_search": "run-missing"}, phase="scoring", progress=0.5, done=1, total=2)
+
+
+class TestTheRunLog:
+    """UX-01, 17 Nov: "we need the users to understand the process that is happening and the
+    percentage of the task completion through each process". A run says how far through its
+    current step it is, and keeps a line for every step it finishes."""
+
+    def test_a_step_reports_its_own_percentage_and_a_new_phase_starts_at_none(self, client, runs):
+        run_id = runs(["board_search"])["board_search"]
+        intake.report({"board_search": run_id}, phase="searching", progress=0.2, stage=0.5, detail="Search 3 of 6")
+        assert row_for(run_id).stage_progress == 0.5
+        intake.report({"board_search": run_id}, phase="harvesting", progress=0.5)
+        assert row_for(run_id).stage_progress == 0
+
+    def test_the_bar_never_goes_back(self, client, runs):
+        """A channel reporting late used to pull a finished board search from 97% to 25%."""
+        run_id = runs(["board_search"])["board_search"]
+        intake.report({"board_search": run_id}, phase="harvesting", progress=0.9)
+        intake.report({"board_search": run_id}, phase="collapsing", progress=0.25)
+        assert row_for(run_id).progress == 0.9
+
+    def test_finished_steps_are_kept_in_order_and_the_oldest_go_first(self, client, runs):
+        run_id = runs(["board_search"])["board_search"]
+        for n in range(intake.LOG_LIMIT + 3):
+            intake.report({"board_search": run_id}, phase="searching", progress=0.3, note=f"step {n}", took_ms=n)
+        with transaction() as session:
+            log = Store(session).get_run(run_id).log
+        assert len(log) == intake.LOG_LIMIT
+        assert log[0].message == "step 3" and log[-1].message == f"step {intake.LOG_LIMIT + 2}"
+        assert log[-1].ms == intake.LOG_LIMIT + 2 and log[-1].phase == "searching"
+
+    def test_the_watchlist_logs_its_employer_feeds(self, client, runs, monkeypatch):
+        from wera_agent.config import Company
+
+        monkeypatch.setattr(intake, "companies", lambda: [Company(name="Acme", vendor="greenhouse", token="acme")])
+        monkeypatch.setattr(intake, "organisations", list)
+        monkeypatch.setattr(intake, "_from_direct_sites", lambda *a, **k: [])
+        monkeypatch.setattr(intake.ats_feeds, "fetch_company", lambda c: ([], None))
+        ids = runs(["watchlist"])
+        intake.run(["watchlist"], ids)
+        with transaction() as session:
+            log = Store(session).get_run(ids["watchlist"]).log
+        assert any(step.message.startswith("Employer feeds: 1 read, 0 open jobs") for step in log), log
 
 
 class TestScoringSeveralAtOnce:

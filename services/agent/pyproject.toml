@@ -25,6 +25,7 @@ dependencies = [
   "pyyaml==6.0.3",
   "rapidfuzz==3.14.6",
   "redis==8.1.0",
+  "rendercv[full]==2.8",
   "selectolax==1.0.1",
   "sqlalchemy==2.1.4",
   "uvicorn==0.54.0",
@@ -51,6 +52,8 @@ dev = [
   # with it — and `wera db import-sqlite` reads an old install's gate threads through it.
   "langgraph-checkpoint-sqlite==3.1.2",
   "httpx==0.28.1",
+  # Reads the text back out of a rendered CV PDF, the way a parser would (EXP-01, ATSC-06).
+  "pypdf==7.1.1",
   "pytest==9.1.1",
   "pytest-socket==0.8.1",
   "respx==0.23.1",

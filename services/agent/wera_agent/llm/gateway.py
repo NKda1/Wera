@@ -189,6 +189,7 @@ def make_chat(
     reasoning: Effort,
     headroom: int | None = None,
     trace: dict[str, str] | None = None,
+    ignore: tuple[str, ...] = (),
 ) -> BaseChatModel:
     """One configured model, through `ChatOpenAI` (ARCHITECTURE §3.3).
 
@@ -208,7 +209,7 @@ def make_chat(
         # PRIV: never routed to a provider that trains on prompts. `require_parameters` is
         # deliberately not set — with it, OpenRouter finds no endpoint for these models at all
         # (404) because no provider advertises support for every option WERA sends.
-        "provider": {"data_collection": "deny"},
+        "provider": {"data_collection": "deny", **({"ignore": list(ignore)} if ignore else {})},
         "reasoning": _REASONING[reasoning],
     }
     if trace:
@@ -239,12 +240,15 @@ def _chain[Out: BaseModel](
     reasoning: Effort,
     headroom: int | None = None,
     trace: dict[str, str] | None = None,
+    ignore: tuple[str, ...] = (),
 ) -> Runnable:
     """The tier's model with the configured fallbacks behind it. Each one is asked for the same
     schema, so a fallback answer is as usable as the first."""
 
     def one(model: str) -> Runnable:
-        chat = make_chat(model, base_url=base_url, max_tokens=max_tokens, reasoning=reasoning, headroom=headroom, trace=trace)
+        chat = make_chat(
+            model, base_url=base_url, max_tokens=max_tokens, reasoning=reasoning, headroom=headroom, trace=trace, ignore=ignore
+        )
         # strict=True sends the schema to the provider; `include_raw` keeps the token counts and
         # turns a parse failure into a value we can retry on instead of an exception.
         return chat.with_structured_output(Output, method="json_schema", strict=True, include_raw=True)
@@ -282,6 +286,14 @@ def _usage_from(exc: BaseException) -> dict[str, Any] | None:
     if prompt is None and completion_tokens is None:
         return None
     return {"input_tokens": prompt or 0, "output_tokens": completion_tokens or 0}
+
+
+def _provider_from(exc: BaseException) -> str | None:
+    """The upstream host that served a cut-off reply, when OpenRouter named it in the body."""
+    completion = getattr(exc, "completion", None)
+    extra = getattr(completion, "model_extra", None) or {}
+    name = extra.get("provider") if isinstance(extra, dict) else None
+    return name.strip() if isinstance(name, str) and name.strip() else None
 
 
 @cache
@@ -385,11 +397,10 @@ def _record(
     """Records the call and returns what it cost (PRIV-03: metadata only).
 
     The row goes in the caller's session, so it commits with the work it paid for. A *failed*
-    call is also buffered: the failure raises, the caller's unit of work rolls back, and the row
-    would go with it — losing the record of tokens the provider has already charged for. SQLite
-    takes one writer at a time, so it can't be written here either; `flush_unrecorded` writes it
-    once the caller's transaction has closed. Spend is recorded whether or not the work it was
-    for succeeded (COST-01).
+    call whose unit of work then ends without committing — the failure raised, and it rolled back
+    — would lose the record of tokens the provider has already charged for, so `_end_pending_calls`
+    hands it to `flush_unrecorded`, which writes it once that transaction has closed. Spend is
+    recorded whether or not the work it was for succeeded (COST-01).
 
     `reported_cost` is the provider's own figure, preferred over the local price table whenever
     it is sent: the table is a copy of a published price and goes stale silently, and measured
@@ -427,9 +438,12 @@ def _record(
     # it as "database is locked" on drafts, intake runs and the startup sweep. Written at commit
     # instead (`_write_pending_calls`), so the lock is held for milliseconds.
     session.info.setdefault(PENDING, []).append(row)
-    if not ok:
-        _unrecorded.append(row)
     return cost
+
+
+# The rows `_write_pending_calls` added to a commit that hasn't finished yet. Kept until it has,
+# so a commit that fails still hands its failed calls to `flush_unrecorded`.
+_COMMITTING = "wera_llm_calls_committing"
 
 
 @event.listens_for(Session, "before_commit")
@@ -438,13 +452,28 @@ def _write_pending_calls(session: Session) -> None:
     rows = session.info.pop(PENDING, None)
     if rows:
         session.add_all(LlmCallRow(**r) for r in rows)
+        session.info.setdefault(_COMMITTING, []).extend(rows)
 
 
-@event.listens_for(Session, "after_soft_rollback")
-def _drop_pending_calls(session: Session, _previous: Any) -> None:
-    """Rolled back with the work they were for, as a flushed row would have been. A failed call is
-    also in `_unrecorded`, so its cost is still written by `flush_unrecorded`."""
-    session.info.pop(PENDING, None)
+@event.listens_for(Session, "after_commit")
+def _committed_calls(session: Session) -> None:
+    session.info.pop(_COMMITTING, None)
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _end_pending_calls(session: Session, transaction: Any) -> None:
+    """A unit of work that ended without committing: rolled back, closed, or a commit that failed.
+
+    Its successful calls go with it, as a flushed row would have. Its failed ones are handed to
+    `flush_unrecorded`, so their cost is still written. Only here, once the transaction is over:
+    they used to be buffered the moment they were recorded, and a `flush_unrecorded` run by some
+    other request while this one was still going wrote them first — then this commit wrote them
+    again. On 16–17 Nov that doubled 3 of the 12 failures and made the error rate read high.
+    """
+    if transaction.parent is not None:
+        return  # a savepoint ending, not the unit of work
+    left = [*session.info.pop(PENDING, []), *session.info.pop(_COMMITTING, [])]
+    _unrecorded.extend(r for r in left if not r["ok"])
 
 
 def write_pending(session: Session) -> None:
@@ -454,8 +483,8 @@ def write_pending(session: Session) -> None:
     session.flush()
 
 
-# Failed calls whose row may be rolled back with the work they were for. Written by
-# `flush_unrecorded` after the transaction closes; single process, so a plain list is enough.
+# Failed calls whose unit of work ended without committing them. Written by `flush_unrecorded`;
+# single process, so a plain list is enough.
 _unrecorded: list[dict[str, Any]] = []
 
 
@@ -470,7 +499,11 @@ def flush_unrecorded() -> int:
         with transaction() as session:
             for row in rows:
                 exists = session.scalar(
-                    select(LlmCallRow.id).where(LlmCallRow.task == row["task"], LlmCallRow.called_at == row["called_at"])
+                    select(LlmCallRow.id).where(
+                        LlmCallRow.task == row["task"],
+                        LlmCallRow.called_at == row["called_at"],
+                        LlmCallRow.attempt == row["attempt"],
+                    )
                 )
                 if exists is None:
                     session.add(LlmCallRow(**row))
@@ -530,6 +563,7 @@ def structured[Out: BaseModel](
     context: dict[str, Any] | None = None,
     demo_input: Any = None,
     redact: bool = True,
+    max_tokens: int | None = None,
 ) -> Out:
     """One §9.3 task, as one span.
 
@@ -540,10 +574,15 @@ def structured[Out: BaseModel](
 
     Retries live inside this span rather than beside it: one task is one unit of work to the
     caller, however many attempts it took, and `llm.attempts` says when it took more than one.
+
+    `max_tokens` replaces the task's configured ceiling for this call, for a task whose answer
+    grows with its input — the Strategist writes one market per country it is asked about.
     """
     with logfire.span("llm {task}", task=task, tier=wera().task(task).tier) as span:
         try:
-            return _structured(session, task, Output, variables, context=context, demo_input=demo_input, redact=redact)
+            return _structured(
+                session, task, Output, variables, context=context, demo_input=demo_input, redact=redact, max_tokens=max_tokens
+            )
         except ApiError as exc:
             # The code is already on the span from `_publish` for a call that reached a model;
             # this also catches the ones that never did, like a refused budget (COST-01).
@@ -560,6 +599,7 @@ def _structured[Out: BaseModel](
     context: dict[str, Any] | None = None,
     demo_input: Any = None,
     redact: bool = True,
+    max_tokens: int | None = None,
 ) -> Out:
     """Runs one §9.3 task and returns a validated object, or raises `ApiError` with a §9.4 code.
 
@@ -613,7 +653,7 @@ def _structured[Out: BaseModel](
 
     # `settings_data` backfills a tier the stored blob predates, so this can't KeyError.
     models = [saved["models"][spec.tier], *cfg.fallbacks.get(spec.tier, [])]
-    ceiling = spec.max_tokens
+    ceiling = max_tokens or spec.max_tokens
     reasoning: Effort = spec.reasoning
     headroom = _HEADROOM[reasoning]
     trace = _openrouter_trace(task)
@@ -623,14 +663,18 @@ def _structured[Out: BaseModel](
     messages = template(task).format_messages(**prompt_vars)
     errors: str | None = None
 
-    def cut_off(*, model: str, usage: Any, reported: float | None, started: float, attempt: int) -> bool:
+    ignore: tuple[str, ...] = ()
+
+    def cut_off(
+        *, model: str, usage: Any, reported: float | None, started: float, attempt: int, provider: str | None = None
+    ) -> bool:
         """Records a cut-off reply and says whether to try again with more room.
 
         Both the SDK's `LengthFinishReasonError` and a `finish_reason` of "length" mean the same
         thing, and which one arrives depends on the provider and the structured-output method,
         so they share this.
         """
-        nonlocal ceiling, headroom, reasoning, chain, errors
+        nonlocal ceiling, headroom, reasoning, chain, errors, models, ignore
         _record(
             session,
             task=task,
@@ -656,13 +700,34 @@ def _structured[Out: BaseModel](
             # letter the guard has checked beats a failed pack that cost three times as much.
             reasoning, headroom = "off", 0
             logfire.warn("{task} ran out of room thinking; retrying without thinking", task=task)
+        elif reasoning == "off":
+            # No thinking to blame, so the reply itself ran on: it never closed its JSON. Measured on
+            # 17 Nov: two letters from qwen3.8-27b on one upstream host (Modal) ran to 1,500 and then
+            # 3,000 tokens with no reasoning at all, where a letter is about 600 — and the same letter
+            # three minutes later, on another host, came back first time. More room on the same host
+            # only buys a longer runaway. So the retry goes elsewhere: away from the host that ran on
+            # when the reply named it, else to the tier's next model.
+            ceiling *= TRUNCATION_RETRY_FACTOR
+            if provider:
+                ignore = (*ignore, provider)
+                logfire.warn("{task} ran on at {host}; retrying on another host", task=task, host=provider)
+            elif len(models) > 1:
+                models = models[1:]
+                logfire.warn("{task} ran on; retrying on {model}", task=task, model=models[0])
         else:
             # Both, not just the ceiling: a reply cut off because the *thinking* ran long is not
             # helped by more room for the answer.
             ceiling *= TRUNCATION_RETRY_FACTOR
             headroom *= TRUNCATION_RETRY_FACTOR
         chain = _chain(
-            models, Output, base_url=saved["baseUrl"], max_tokens=ceiling, reasoning=reasoning, headroom=headroom, trace=trace
+            models,
+            Output,
+            base_url=saved["baseUrl"],
+            max_tokens=ceiling,
+            reasoning=reasoning,
+            headroom=headroom,
+            trace=trace,
+            ignore=ignore,
         )
         errors = None  # nothing was wrong with the shape; the reply never got as far as a shape
         return True
@@ -681,7 +746,10 @@ def _structured[Out: BaseModel](
         except openai.LengthFinishReasonError as exc:
             # Cut off mid-answer, but generated and billed in full — so its tokens are recorded,
             # and it gets one more pass with a bigger ceiling.
-            if cut_off(model=models[0], usage=_usage_from(exc), reported=None, started=started, attempt=attempt):
+            served_by = _provider_from(exc)
+            if cut_off(
+                model=models[0], usage=_usage_from(exc), reported=None, started=started, attempt=attempt, provider=served_by
+            ):
                 continue
             raise _fail(TRUNCATED) from None
         except (OutputParserException, ValidationError, JSONDecodeError) as exc:

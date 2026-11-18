@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..clock import iso
 from ..config import companies, wera
 from ..db.models import ContactRow, MasterCvRow, ProfileRow, SettingsRow
+from ..nodes.fit import scoring_fingerprint
 from ..schemas.cv import MasterCV
 from ..settings import get_settings
 from . import store as st
@@ -88,7 +89,7 @@ def seed(session: Session, now: int) -> None:
     # a real database starts with an empty list and fills it on the first run. The CV and profile
     # above are different: they are a starting point the person edits, not a claimed finding.
     for s in [*jobs["shortlist"], *jobs["hidden"]] if settings.wera_demo_mode else []:
-        st.save_job(session, *seed_to_job(s, now), created_at=iso(now), cv_version=cv.version)
+        st.save_job(session, *seed_to_job(s, now), created_at=iso(now), cv_version=cv.version, cv_hash=scoring_fingerprint(cv))
 
     store = st.Store(session, now)
     # Demo applications come with drafted packs, and drafting goes through the gateway — which
@@ -96,7 +97,9 @@ def seed(session: Session, now: int) -> None:
     # the first time they start WERA for real. So these belong to demo mode only.
     for a in jobs["applications"] if settings.wera_demo_mode else []:
         job, evidence, questions = seed_to_job(a["job"], now, "closed" if a["status"] == "rejected" else "in_application")
-        st.save_job(session, job, evidence, questions, created_at=iso(now), cv_version=cv.version)
+        st.save_job(
+            session, job, evidence, questions, created_at=iso(now), cv_version=cv.version, cv_hash=scoring_fingerprint(cv)
+        )
         created = now - a["daysAgo"] * DAY
         app_id = f"app-{job.id[4:]}"
         submitted = a.get("submittedDaysAgo")

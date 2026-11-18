@@ -45,9 +45,6 @@ class SearchProfile(Model):
     # country; `only` keeps the country to the cities named in it. A profile saved before the
     # choice existed reads as `first`, the wider of the two.
     city_scope: Literal["first", "only"] = "first"
-    # SRCH-34: an international organisation's internationally recruited posts at any duty
-    # station, not only in `countries`. Locally recruited posts still follow `countries`.
-    international: bool = False
     remote: Literal["any", "remote_only", "no_remote"]
     seniority: list[Seniority]
     exclude: list[Term]  # title terms

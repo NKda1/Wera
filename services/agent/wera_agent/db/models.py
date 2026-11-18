@@ -113,8 +113,12 @@ class FitReportRow(Base):
     evidence: Mapped[dict[str, Any]]
     model: Mapped[str] = mapped_column(String(128))
     cv_version: Mapped[int | None] = mapped_column(Integer)
-    # COST-04: with the CV version and the model, this is the whole cache key. A job whose
-    # description changed is a different job to score.
+    # 18 Nov: what the scorer read of the CV (`fit.scoring_fingerprint`). The cache key when both
+    # sides have one, so a CV save that changes nothing the scorer reads keeps the score; the
+    # version is the key only for scores written before this existed. Migration 0016.
+    cv_hash: Mapped[str | None] = mapped_column(String(32))
+    # COST-04: with the CV and the model, this is the whole cache key. A job whose description
+    # changed is a different job to score.
     job_hash: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[str] = mapped_column(Iso)
 
@@ -205,6 +209,10 @@ class IntakeRunRow(Base):
     errors: Mapped[list[Any]]
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)  # demo runs progress over time
     settled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # UX-01 (17 Nov): how far through its current step the run is, 0–1, beside `progress` for the
+    # whole run; and the steps it has finished, each `{at, phase, message, ms}` — migration 0015.
+    stage_progress: Mapped[float] = mapped_column(Float, default=0)
+    log: Mapped[list[Any]] = mapped_column(default=list)
 
 
 class LlmCallRow(Base):

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, isNew, upskillAnchor } from "./format";
+import { formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, formatTime, isNew, upskillAnchor } from "./format";
 
 describe("new jobs (SRCH-25)", () => {
   const foundBy = { runId: "run-7", channel: "board_search" as const, at: "2026-11-11T08:00:00Z" };
@@ -13,16 +13,19 @@ describe("new jobs (SRCH-25)", () => {
     expect(isNew({})).toBe(false);
   });
 
-  it("names where it came from and when", () => {
-    expect(formatOrigin({ foundBy })).toBe("Search 11 Nov");
-    expect(formatOrigin({ foundBy: { ...foundBy, channel: "email_alert" } })).toBe("Email 11 Nov");
-    expect(formatOrigin({ foundBy: { ...foundBy, channel: "watchlist" } })).toBe("Employer feed 11 Nov");
+  // In the reader's own time zone, as the card shows it.
+  const at = formatTime(foundBy.at);
+
+  it("names where it came from and when, to the minute", () => {
+    expect(formatOrigin({ foundBy })).toBe(`Search 11 Nov, ${at}`);
+    expect(formatOrigin({ foundBy: { ...foundBy, channel: "email_alert" } })).toBe(`Email 11 Nov, ${at}`);
+    expect(formatOrigin({ foundBy: { ...foundBy, channel: "watchlist" } })).toBe(`Employer feed 11 Nov, ${at}`);
     expect(formatOrigin({})).toBe("");
   });
 
   it("names the job API that found it (SRCH-31)", () => {
-    expect(formatOrigin({ foundBy, via: "reed" })).toBe("Search 11 Nov · via Reed");
-    expect(formatOrigin({ foundBy, via: "adzuna" })).toBe("Search 11 Nov · via Adzuna");
+    expect(formatOrigin({ foundBy, via: "reed" })).toBe(`Search 11 Nov, ${at} · via Reed`);
+    expect(formatOrigin({ foundBy, via: "adzuna" })).toBe(`Search 11 Nov, ${at} · via Adzuna`);
   });
 });
 

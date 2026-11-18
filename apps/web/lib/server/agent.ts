@@ -8,6 +8,7 @@ import type {
   ApplicationList,
   ApplicationWithJob,
   Contact,
+  CvFile,
   CvLine,
   JobList,
   MasterCV,
@@ -40,7 +41,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 // uploaded document on the writing tier, synchronously, inside the request. The agent's own
 // ceiling for one task is 300s (`gateway.TASK_DEADLINE_SECONDS`), so this sits above it — the
 // agent should be the thing that gives up and says why, not this fetch.
-const SLOW_ROUTES = [/^\/cv\/(parse|import)\b/];
+// The company brief too (18 Nov): a Serper search, up to three page reads with robots.txt first,
+// then a model call, all inside the request.
+const SLOW_ROUTES = [/^\/cv\/(parse|import)\b/, /^\/applications\/[^/]+\/company-brief$/];
 const SLOW_TIMEOUT_MS = 330_000;
 
 function timeoutFor(path: string): number {
@@ -78,6 +81,16 @@ async function json<T>(path: string): Promise<T> {
     throw new ApiError(res.status, err?.code ?? `HTTP_${res.status}`, err?.message ?? "The agent service returned an error.", err?.fields);
   }
   return data as T;
+}
+
+/** A file the agent renders (the CV PDF), as bytes. Errors arrive as JSON, as for any route. */
+async function bytes(path: string): Promise<Uint8Array> {
+  const res = await call(path);
+  if (!res.ok) {
+    const err = (await res.json().catch(() => null))?.error;
+    throw new ApiError(res.status, err?.code ?? `HTTP_${res.status}`, err?.message ?? "The agent couldn't render that file.", err?.fields);
+  }
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 /** Encodes one path segment, so an id can never reach a different agent route. */
@@ -122,6 +135,10 @@ export const agent = {
   shortlistMeta: () => json<ShortlistMeta>("/jobs/meta"),
   listApplications: () => json<ApplicationList>("/applications").then((r) => r.items),
   getApplication: (id: string) => json<ApplicationWithJob>(`/applications/${seg(id)}`),
+  /** EXP-01: the RenderCV file a pack's CV PDF is made from, with what it prints. No contact details. */
+  cvFile: (appId: string) => json<CvFile>(`/applications/${seg(appId)}/cv-file`),
+  /** The CV PDF, rendered by the agent with the contact details in it. Callers hold the approval gate (G2-03). */
+  cvPdf: (appId: string) => bytes(`/applications/${seg(appId)}/cv.pdf`),
   getCv: () => json<MasterCV>("/cv"),
   cvLines: () => json<Record<string, CvLine>>("/cv/lines"),
   getContact: () => json<Contact>("/cv/contact"),

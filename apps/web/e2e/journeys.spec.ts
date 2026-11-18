@@ -110,13 +110,19 @@ test("J3: review the drafted pack, approve it and track it", async ({ page }) =>
     ["Cover letter as PDF", "Jordan-Ellery-Letter-Fernhill-AI.pdf"],
     ["Cover letter as DOCX", "Jordan-Ellery-Letter-Fernhill-AI.docx"],
   ] as const) {
-    const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("link", { name: `Download ${label}` }).click()]);
+    const link = page.getByRole("link", { name: `Download ${label}` });
+    const [download] = await Promise.all([page.waitForEvent("download"), link.click()]);
     expect(download.suggestedFilename()).toBe(expected);
     const file = await download.path();
     const bytes = await readFile(file);
     expect(bytes.byteLength).toBeGreaterThan(5_000);
     // A real PDF or a real zip (.docx), not an error page.
     expect(bytes.subarray(0, 4).toString("latin1")).toBe(expected.endsWith(".pdf") ? "%PDF" : "PK\x03\x04");
+    if (expected.endsWith(".pdf")) {
+      // ATSC-05/06 on the file itself — for the CV, the agent's RenderCV render (EXP-01, 18 Nov).
+      const res = await page.request.get((await link.getAttribute("href"))!);
+      expect(res.headers()["x-wera-format-lint"]).toBe("pass");
+    }
   }
 
   await page.getByRole("button", { name: "I've submitted it" }).click();
@@ -124,6 +130,93 @@ test("J3: review the drafted pack, approve it and track it", async ({ page }) =>
 
   await page.goto("/tracker");
   await expect(page.getByRole("region", { name: "Submitted" })).toContainText("ML Engineer, Graduate");
+});
+
+test("The CV file: a theme, a rewrite that locks line editing, and back (EXP-01)", async ({ page }) => {
+  await page.goto("/review");
+  await page.getByRole("link", { name: "Graduate AI Engineer" }).click();
+  await expect(page.getByText("Gate 2 · needs your approval")).toBeVisible();
+  await page.getByRole("button", { name: "CV file and design" }).click();
+
+  const file = page.getByRole("textbox", { name: "CV file (RenderCV YAML)" });
+  await expect(file).toHaveValue(/theme: engineeringresumes/);
+  // No contact details in the file: they are added when the PDF is made (EXP-02).
+  expect(await file.inputValue()).not.toContain("jordan.ellery@example.com");
+  await expect(page.getByRole("img", { name: "Page 1 of the CV" })).toBeVisible();
+  await expect(page.getByText("1 page, as the PDF will download.")).toBeVisible();
+
+  // A theme is a design, and a design alone keeps the CV WERA's.
+  await page.getByLabel("CV theme").selectOption("harvard");
+  await expect(file).toHaveValue(/theme: harvard/);
+  await expect(page.getByText("1 page, as the PDF will download.")).toBeVisible();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved. The PDF uses this design.")).toBeVisible();
+
+  // What the file can't hold says so, at its line, and can't be saved.
+  const saved = await file.inputValue();
+  await file.fill(saved.replace("  name: Jordan Ellery\n", "  name: Jordan Ellery\n  email: me@example.com\n"));
+  await expect(page.getByText("Your email address is added when the PDF is made, from your contact details. Remove it here.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Undo changes" }).click();
+
+  // A rewrite is the person's CV: the downloads use it and line editing waits.
+  await file.fill(saved.replace("  sections:\n", "  sections:\n    Awards:\n      - Rewritten by me in the file editor\n"));
+  await expect(page.getByText("1 page, as the PDF will download.")).toBeVisible();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Saved. The PDF and Word files use your version of the CV.")).toBeVisible();
+  await page.getByRole("button", { name: "Lines and sources" }).click();
+  await expect(page.getByText(/You rewrote this CV in its file/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit summary" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Open the CV file" }).click();
+  await page.getByRole("button", { name: "Discard my edits" }).click();
+  await page.getByRole("dialog", { name: "Discard your edits to the CV file?" }).getByRole("button", { name: "Discard" }).click();
+  await expect(page.getByText("Back to WERA's version. Your design stays.")).toBeVisible();
+  await expect(file).not.toHaveValue(/Rewritten by me/);
+  await expect(page.getByLabel("CV theme")).toHaveValue("harvard");
+  await page.getByRole("button", { name: "Lines and sources" }).click();
+  await expect(page.getByRole("button", { name: "Edit summary" })).toBeVisible();
+});
+
+test("Learn about the company, then rewrite the letter with it (18 Nov)", async ({ page }) => {
+  await page.goto("/review");
+  await page.getByRole("link", { name: "Graduate AI Engineer" }).click();
+  await page.getByRole("tab", { name: "Company" }).click();
+  await page.getByRole("button", { name: "Learn about Saltmarsh Analytics" }).click();
+
+  // Demo mode reads no web pages: the brief is the post's, says so, and every item shows its words.
+  await expect(page.getByRole("heading", { name: "What WERA learned about Saltmarsh Analytics" })).toBeVisible();
+  await expect(page.getByText("From the job post alone.")).toBeVisible();
+  await expect(page.getByText("Demo mode reads no web pages, so this brief is from the post alone.")).toBeVisible();
+  await expect(page.getByText(/— the job post/).first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Rewrite the letter with this brief" }).click();
+  await expect(page.getByText("Gate 2 · needs your approval")).toBeVisible({ timeout: 30_000 });
+  await page.getByRole("tab", { name: "Cover letter" }).click();
+  await expect(page.getByText("Dear Hiring Team,")).toBeVisible();
+  await page.getByRole("tab", { name: "Company" }).click();
+  await expect(page.getByRole("heading", { name: "What WERA learned about Saltmarsh Analytics" })).toBeVisible();
+});
+
+test("A job's post reads in sections, with its blurb folded, and summarises on click (18 Nov)", async ({ page }) => {
+  await page.goto("/jobs");
+  const card = page.getByRole("region", { name: "Junior AI Engineer" });
+  await card.getByRole("button", { name: "Show details" }).click();
+
+  // Laid out from the post: its sections in order, the company's own blurb one click away.
+  await expect(card.getByRole("heading", { name: "Requirements", level: 4 })).toBeVisible();
+  const blurb = card.locator("details").filter({ hasText: "About Kestrel Health" });
+  await expect(blurb).toBeVisible();
+  await expect(blurb).not.toHaveAttribute("open", "");
+
+  await card.getByRole("button", { name: "Summary" }).click();
+  await expect(card.getByRole("heading", { name: "Must have", level: 4 })).toBeVisible();
+  await expect(card.getByText("checked against it: anything the post doesn't say was left out", { exact: false })).toBeVisible();
+  // Kept: back to the post and to the summary again, with no second request.
+  await card.getByRole("button", { name: "Full post" }).click();
+  await expect(card.getByRole("heading", { name: "Requirements", level: 4 })).toBeVisible();
+  await card.getByRole("button", { name: "Summary" }).click();
+  await expect(card.getByRole("heading", { name: "Must have", level: 4 })).toBeVisible();
 });
 
 test("A LinkedIn link is never fetched; the description is asked for instead", async ({ page }) => {

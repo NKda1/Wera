@@ -21,8 +21,8 @@ from ..schemas.cv import Bullet, MasterCV, Role
 from ..schemas.jobs import FitEvidence, Job
 from ..schemas.pack import (
     AnswerItem,
-    AtsReport,
     Cited,
+    CompanyBrief,
     CompanyFact,
     CoverLetter,
     CvItem,
@@ -54,6 +54,8 @@ class PackInput:
     # The job-description rubric (`nodes.analyse`), once the draft has one: what the post says
     # about why the role exists, which the letter's company half is written from.
     analysis: JobAnalysis | None = None
+    # 18 Nov: the company brief, when the person asked for one before this draft.
+    brief: CompanyBrief | None = None
 
 
 def lc_first(s: str) -> str:
@@ -427,11 +429,6 @@ def generate_pack(inp: PackInput) -> Pack:
     return Pack(cv=doc, letter=letter, ats=ats, answers=_build_answers(inp, doc), analysis=inp.analysis)
 
 
-def refresh_ats(pack: Pack, *, cv: MasterCV, evidence: FitEvidence, cv_pages: int, job: Job) -> AtsReport:
-    """Recompute the ATS report after the user edits a document (format and coverage only)."""
-    return build_ats(pack.cv, cv=cv, evidence=evidence, cv_pages=cv_pages, job=job, letter=pack.letter)
-
-
 # ---------------------------------------------------------------------------
 # Task responders (DEMO-02)
 #
@@ -623,6 +620,53 @@ def _demo_keywords(job_text: str, cv: MasterCV) -> list[dict]:
             found.append({"term": term, "weight": weight, "category": DEMO_CATEGORY.get(term, "hard_skill")})
     culture = [{"term": c, "weight": "nice", "category": "soft_skill"} for c in DEMO_CULTURE if text_has_term(job_text, c)]
     return found[:25] + culture[:8]
+
+
+def _demo_brief(context: dict[str, object]) -> dict[str, object]:
+    """`company.brief`, deterministically: the post's own sentences about the company and the role.
+    Demo mode reads no web pages, so every item is from the post."""
+    from ..domain.description import describe
+
+    post = str(context.get("post") or "")
+    view = describe(post, company=str(context.get("company") or ""))
+    items: list[dict[str, str]] = []
+    if view is not None:
+        for kind, topic in (("company", "what_they_do"), ("role", "why_the_role")):
+            text = next((b.text for sec in view.sections if sec.kind == kind for b in sec.blocks if b.t == "p" and b.text), None)
+            if text:
+                sentence = re.split(r"(?<=[.!?])\s", text)[0]
+                items.append({"topic": topic, "text": sentence, "source": "post", "quote": sentence})
+    return {"items": items}
+
+
+def _demo_summary(context: dict[str, object]) -> dict[str, object]:
+    """`job.summary`, deterministically: the post's own lines, picked by the section they sit in.
+
+    Built from the same layout the card shows (`domain.description`), so every item is a line of
+    the post and passes the check a real summary is held to.
+    """
+    from ..domain.description import describe
+
+    view = describe(
+        str(context.get("post") or ""), title=str(context.get("title") or ""), company=str(context.get("company") or "")
+    )
+    if view is None:
+        return {"gist": "", "duties": [], "must_haves": [], "nice_to_haves": [], "perks": [], "watch_outs": []}
+
+    def items(*kinds: str) -> list[str]:
+        return [i for sec in view.sections if sec.kind in kinds for b in sec.blocks for i in (b.items or [])]
+
+    paragraphs = [b.text for sec in view.sections if sec.kind in ("intro", "role") for b in sec.blocks if b.t == "p" and b.text]
+    gist = re.split(r"(?<=[.!?])\s", paragraphs[0])[0] if paragraphs else ""
+    watch = [f.value for f in view.facts if f.label in ("Visa", "Vetting", "Working pattern", "Duration")]
+    return {
+        "gist": gist,
+        "duties": items("role")[:4],
+        "must_haves": items("requirements")[:5],
+        "nice_to_haves": items("nice")[:4],
+        "perks": items("benefits")[:3],
+        "watch_outs": watch[:3],
+    }
 
 
 def _demo_analysis(post: str) -> dict:
@@ -870,6 +914,10 @@ def respond(task: str, variables: dict, context: dict | None, demo_input: PackIn
         return _fit_score_output(variables, cv)
     if task == "job.analyse":
         return _demo_analysis(str((context or {}).get("post") or ""))
+    if task == "job.summary":
+        return _demo_summary(context or {})
+    if task == "company.brief":
+        return _demo_brief(context or {})
     if task == "cv.profile":
         if cv is None:
             raise KeyError("cv.profile needs the master CV in validation context")

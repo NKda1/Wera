@@ -74,16 +74,28 @@ class TestWhatRobotsTxtLeavesOut:
 
 
 class TestTheQueries:
-    def test_tier_one_is_the_top_titles_open_and_on_every_reviewed_board(self, store):
+    def test_tier_one_is_the_top_titles_as_open_searches(self, store):
+        """17 Nov: a search for each title on each of five UK-only boards gave the UK 15 of tier 1's
+        27 searches. Tier 1 is the open web, one search a title; boards wait for tier 2."""
         planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
-        tier1 = [(q.source, q.domain, q.q) for q in planned if q.tier == 1]
-        assert tier1[:3] == [
-            ("open", None, '"Graduate Software Engineer" job in "London" -site:linkedin.com'),
-            ("board", "builtinlondon.uk", 'site:builtinlondon.uk "Graduate Software Engineer" job in "London"'),
-            ("board", "gradcracker.com", 'site:gradcracker.com "Graduate Software Engineer" job in "London"'),
-        ]
-        assert {q.title for q in planned if q.tier == 1} == set(TITLES[:3])
+        tier1 = [(q.source, q.title) for q in planned if q.tier == 1]
+        assert tier1 == [("open", t) for t in TITLES[:3]]
         assert all((q.gl, q.hl) == ("gb", "en") for q in planned)
+
+    def test_each_title_asks_one_board_taking_turns(self, store):
+        planned = strategist.queries(profile(store), store.cv_profile_cached(), BOARDS)
+        boards = [(q.title, q.domain) for q in planned if q.source == "board" and q.tier == 2]
+        assert [t for t, _ in boards] == TITLES[:3]  # one board each, not every board
+        assert boards[0][1] != boards[1][1]  # the next board in turn (two of the fixtures serve the UK)
+
+    def test_every_country_is_in_tier_one_title_by_title(self, store):
+        """The run's cap cuts titles, never countries: title 1 in every country, then title 2."""
+        planned = strategist.queries(
+            profile(store, countries=["CH", "DE", "GB"], locations=[]), store.cv_profile_cached(), BOARDS
+        )
+        tier1 = [(q.title, q.gl) for q in planned if q.tier == 1]
+        assert tier1[:3] == [(TITLES[0], "ch"), (TITLES[0], "de"), (TITLES[0], "gb")]
+        assert {gl for _, gl in tier1} == {"ch", "de", "gb"}
 
     def test_the_profiles_whole_place_is_never_an_exact_phrase(self, store):
         """`"London, UK"` as a phrase is why 11 of the last 12 Firecrawl searches came back empty.
@@ -146,7 +158,7 @@ class TestTheQueries:
             posting_pattern=r"^/job/[^/]+/\d+",
         )
         planned = strategist.queries(profile(store, sites=["builtinlondon.uk"]), None, [board])
-        boards = {q.q for q in planned if q.source == "board" and q.tier == 1}
+        boards = {q.q for q in planned if q.source == "board"}
         assert 'site:builtinlondon.uk inurl:job "Graduate Software Engineer" job in "London"' in boards
 
     def test_a_title_without_a_level_asks_for_the_persons_level(self, store):

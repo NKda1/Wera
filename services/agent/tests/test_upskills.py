@@ -99,3 +99,34 @@ def test_the_route_answers(api, store):
     store.s.commit()
     body = api.ok("GET", "/upskills?days=60")
     assert body["jobsConsidered"] >= 1 and any(u["term"] == "Kafka" for u in body["missing"])
+
+
+class TestTheMarketAgainstTheCv:
+    """17 Nov: the page charts what the posts ask for against the CV as a whole — covered, in a
+    line but not the skills list, or missing — so it needs every skill asked, not only the gaps."""
+
+    def test_every_asked_skill_is_counted_where_the_cv_stands_on_it(self, store):
+        before = upskills.report(store.s, store.cv(), now=NOW)
+        asked = {d.term: d.jobs for d in before.demand}
+        scored(store, job(20), ("Python", "required"), ("Terraform", "required"))
+        scored(store, job(21), ("Python", "required"), ("Kafka", "nice"))
+        report = upskills.report(store.s, store.cv(), now=NOW)
+
+        by_term = {d.term: d for d in report.demand}
+        assert by_term["Python"].status == "covered" and by_term["Python"].jobs == asked.get("Python", 0) + 2
+        # One job each: perhaps below the top of the demo seed's demand, but missing all the same.
+        assert find(report, "Terraform") is not None and find(report, "Kafka") is not None
+        assert all(d.status == "missing" for d in report.demand if d.term in ("Terraform", "Kafka"))
+        assert [d.jobs for d in report.demand] == sorted((d.jobs for d in report.demand), reverse=True)  # most asked first
+        grew = {
+            field: getattr(report.coverage, field) - getattr(before.coverage, field)
+            for field in ("covered", "quick_wins", "missing")
+        }
+        assert grew["covered"] + grew["quick_wins"] == 2 and grew["missing"] == 2
+
+    def test_categories_add_up_to_the_whole(self, store):
+        scored(store, job(22), ("Python", "required"), ("Terraform", "required"), ("Kafka", "nice"))
+        report = upskills.report(store.s, store.cv(), now=NOW)
+        total = report.coverage.covered + report.coverage.quick_wins + report.coverage.missing
+        assert sum(c.covered + c.quick_wins + c.missing for c in report.by_category) == total
+        assert "tool" in {c.category for c in report.by_category}

@@ -247,14 +247,16 @@ def post(title: str, where: str, *, grade: str | None = "P-2", recruitment: str 
 
 
 class TestTheRulesForTheirPosts:
-    def test_the_switch_shows_internationally_recruited_posts_anywhere(self):
+    def test_an_internationally_recruited_post_shows_anywhere_with_no_switch(self):
+        """17 Nov: by relevance, not region — the title and grade rules decide, not the duty station."""
         geneva = post("Associate Information Systems Officer", "Geneva")
-        assert filters.hidden_reason(geneva, profile(), NOW).startswith(filters.ELSEWHERE)
-        assert filters.hidden_reason(geneva, profile(international=True), NOW) is None
+        assert filters.hidden_reason(geneva, profile(), NOW) is None
+        legal = post("Associate Legal Officer", "Geneva", family="Legal")
+        assert filters.hidden_reason(legal, profile(), NOW) is not None  # anywhere, but only relevant ones
 
     def test_a_locally_recruited_post_still_follows_the_countries(self):
         nairobi = post("Information Systems Assistant", "Nairobi", grade="G-5", recruitment="local")
-        assert filters.hidden_reason(nairobi, profile(international=True), NOW).startswith(filters.ELSEWHERE)
+        assert filters.hidden_reason(nairobi, profile(), NOW).startswith(filters.ELSEWHERE)
 
     def test_the_grade_decides_the_level(self):
         """ "Associate" and "Officer" say little; P-4 says seven years."""
@@ -366,3 +368,34 @@ class TestOnTheWatchlist:
         assert job.international is not None and job.international.grade == "P-2" and job.closes_at == "2026-11-19"
         assert job.sources[0].channel == "watchlist" and job.description_status == "full"
         assert out.feed is not None and len(out.feed.listed) == 17
+
+
+class TestTheBestMatchesAreReadFirst:
+    """17 Nov: of the postings that pass the profile, the ones read in full (at most `max_details`)
+    are the best matches to the CV, not the newest."""
+
+    def test_a_rank_decides_which_are_read(self, monkeypatch):
+        from wera_agent.sources import organisations as org_feeds
+
+        class Allow:
+            def verdict(self, _url):
+                return "allowed"
+
+            def allows(self, _url):
+                return True
+
+        listed = [
+            org_feeds.Listed(job_id="1", title="Associate Legal Officer", url="https://careers.un.org/1", location="Geneva, Switzerland", posted_at="2026-11-16"),
+            org_feeds.Listed(job_id="2", title="Associate Data Scientist", url="https://careers.un.org/2", location="Vienna, Austria", posted_at="2026-11-01"),
+        ]  # fmt: skip
+        monkeypatch.setitem(org_feeds.LISTS, "un_careers", lambda _org: listed)
+        read: list[str] = []
+        monkeypatch.setitem(org_feeds.DETAILS, "un_careers", lambda _org, item: read.append(item.title) or "x" * 300)
+        prefer_data = lambda items: [1.0 if "Data" in title else 0.0 for title, _ in items]  # noqa: E731
+
+        org_feeds.fetch_all([UN], wanted=lambda _f: True, max_details=1, robots=Allow(), rank=prefer_data)
+        assert read == ["Associate Data Scientist"]  # the older one, because it is the better match
+
+        read.clear()
+        org_feeds.fetch_all([UN], wanted=lambda _f: True, max_details=1, robots=Allow())
+        assert read == ["Associate Legal Officer"]  # unranked: the newest, as before

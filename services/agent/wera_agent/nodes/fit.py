@@ -29,7 +29,7 @@ from ..schemas.llm_outputs import CULTURE_LIMIT, KEYWORD_LIMIT, FitScoreOutput, 
 # The scoring rubric's version (MATCH-04). Bump it when `FIT_SCORE` changes what a score means, and
 # every stored score is re-scored by the next rescore run — keywords are still reused, since what a
 # post asks for doesn't change with the rubric. 2026-11-16: location left `eligibility`.
-RUBRIC = "2026-11-16"
+RUBRIC = "2026-11-18"  # 18 Nov: skill levels reach the scorer (MATCH-04)
 
 
 def job_hash(job: Job) -> str:
@@ -48,10 +48,30 @@ def job_hash(job: Job) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()[:32]
 
 
-def cached_evidence(session: Session, job: Job, *, cv_version: int, model: str) -> FitEvidence | None:
-    """A score already paid for, if it is still the right score (COST-04, SCH-02)."""
+def scoring_fingerprint(cv: MasterCV) -> str:
+    """What the scorer reads of the CV, with the rubric it reads it by (18 Nov).
+
+    A score is stale when this changes, not when the CV version does: a save that changes no
+    skill, bullet or level (a renamed alias, a note) keeps every score, and a level edit changes
+    the one thing the scorer now reads. Built from `cv_text(home=False)`, which is what the prompt
+    is given, so the two can't disagree.
+    """
+    return hashlib.sha256(f"{RUBRIC}\n{cv_text(cv, home=False)}".encode()).hexdigest()[:32]
+
+
+def cached_evidence(session: Session, job: Job, *, cv_version: int, model: str, cv_hash: str | None = None) -> FitEvidence | None:
+    """A score already paid for, if it is still the right score (COST-04, SCH-02).
+
+    Judged by the CV's scoring fingerprint when both the score and the caller have one, else by
+    the CV version — the rule for scores written before fingerprints existed (18 Nov).
+    """
     row = session.get(FitReportRow, job.id)
-    if row is None or row.cv_version != cv_version or row.model != model:
+    if row is None or row.model != model:
+        return None
+    if cv_hash is not None and row.cv_hash is not None:
+        if row.cv_hash != cv_hash:
+            return None
+    elif row.cv_version != cv_version:
         return None
     if (row.job_hash or "") != job_hash(job) or not current_rubric(row.evidence):
         return None
@@ -74,7 +94,9 @@ def with_posted_keywords(evidence: FitEvidence, job: Job) -> FitEvidence:
     return evidence
 
 
-def save_evidence(session: Session, job: Job, evidence: FitEvidence, *, cv_version: int, now: int) -> None:
+def save_evidence(
+    session: Session, job: Job, evidence: FitEvidence, *, cv_version: int, now: int, cv_hash: str | None = None
+) -> None:
     row = session.get(FitReportRow, job.id)
     data = evidence.model_dump(mode="json")
     if row is None:
@@ -84,12 +106,14 @@ def save_evidence(session: Session, job: Job, evidence: FitEvidence, *, cv_versi
                 evidence=data,
                 model=evidence.model,
                 cv_version=cv_version,
+                cv_hash=cv_hash,
                 job_hash=job_hash(job),
                 created_at=iso(now),
             )
         )
     else:
         row.evidence, row.model, row.cv_version, row.job_hash = data, evidence.model, cv_version, job_hash(job)
+        row.cv_hash = cv_hash
     session.flush()
 
 
@@ -172,7 +196,8 @@ def evidence_for(
     Returns `(evidence, scored_now, error_code)`. A job that couldn't be scored comes back with
     no evidence rather than a guess — it stays on the list unranked instead of claiming a fit.
     """
-    cached = cached_evidence(session, job, cv_version=cv.version, model=model)
+    fingerprint = scoring_fingerprint(cv)
+    cached = cached_evidence(session, job, cv_version=cv.version, model=model, cv_hash=fingerprint)
     if cached is not None:
         return cached, False, None
     try:
@@ -180,7 +205,7 @@ def evidence_for(
     except ApiError as exc:
         logfire.warn("Couldn't score {job_id}: {code}", job_id=job.id, code=exc.code)
         return None, False, exc.code
-    save_evidence(session, job, evidence, cv_version=cv.version, now=now)
+    save_evidence(session, job, evidence, cv_version=cv.version, now=now, cv_hash=fingerprint)
     return evidence, True, None
 
 

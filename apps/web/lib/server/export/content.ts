@@ -1,14 +1,15 @@
 import "server-only";
 
-// One content model behind all four exports (EXP-01). The PDF and DOCX renderers walk these
-// blocks, and lint.ts checks the rendered PDF against the same blocks (ATSC-06) — so a heading
-// or bullet can never be in one file and missing from the other.
+// One content model behind all four exports (EXP-01). The DOCX renderer and the letter's PDF walk
+// these blocks, and lint.ts checks each rendered PDF against the same blocks (ATSC-06) — so a
+// heading or bullet can never be in one file and missing from the other.
 //
-// TAIL-02: role headers, dates and education come from the master CV, never from the pack.
-// EXP-02: contact details are read here, at render time, and nowhere else in the app.
+// The CV's blocks are its RenderCV file's (18 Nov), read out by the agent, which renders the CV
+// PDF from that same file: whatever the person wrote there is in the Word file too. TAIL-02 holds
+// in the file: role headers, dates and education come from the master CV, never from the pack.
+// EXP-02: contact details are read here, at render time, and in the agent's `export/cv_pdf.py`.
 
-import { roleDates, year } from "../../format";
-import type { ApplicationWithJob, Contact, MasterCV, Role } from "../../types";
+import type { ApplicationWithJob, Contact, CvFile, MasterCV } from "../../types";
 
 export type ExportKind = "cv" | "letter";
 
@@ -23,6 +24,8 @@ export type ExportDoc = {
   /** Name and contact lines, printed above the rule. */
   name: string;
   header: string[];
+  /** The same details one by one, for the lint: RenderCV sets them on one line with its own separators. */
+  headerItems?: string[];
   blocks: Block[];
   /** `First-Last-CV-Company`, without the extension (ATSC-05). */
   fileBase: string;
@@ -32,8 +35,6 @@ export type ExportDoc = {
   /** Roles the pack cites that the master CV no longer has; lint reports them. */
   unresolvedRoleIds: string[];
 };
-
-const SECTION_HEADINGS: Record<"experience" | "projects", string> = { experience: "Experience", projects: "Projects" };
 
 /** `Jordan Ellery` + `Fernhill Analytics` → `Jordan-Ellery-CV-Fernhill-Analytics` (ATSC-05). */
 function fileBase(name: string, kind: ExportKind, company: string): string {
@@ -48,51 +49,17 @@ function fileBase(name: string, kind: ExportKind, company: string): string {
   return [part(name) || "CV", kind === "cv" ? "CV" : "Letter", part(company) || "Company"].join("-");
 }
 
-/** EXP-02. The one place contact details enter a document. */
-function contactLines(cv: MasterCV, contact: Contact): string[] {
-  const place = contact.address ?? cv.person.location;
+/** EXP-02. Where contact details enter a document in the web app. */
+function contactLines(contact: Contact, place: string | undefined, links: string[]): string[] {
   const first = [contact.email, contact.phone, place].filter(Boolean).join(" · ");
-  const links = cv.person.links.map((l) => l.url.replace(/^https?:\/\//, "").replace(/\/$/, ""));
   return links.length ? [first, links.join(" · ")] : [first];
 }
 
-function cvBlocks(app: ApplicationWithJob, cv: MasterCV): { blocks: Block[]; unresolvedRoleIds: string[] } {
-  const doc = app.pack!.cv;
-  const roles = new Map<string, Role>([...cv.experience, ...cv.projects].map((r) => [r.id, r]));
-  const blocks: Block[] = [];
-  const unresolvedRoleIds: string[] = [];
+const shortUrl = (url: string) => url.replace(/^https?:\/\//, "").replace(/\/$/, "");
 
-  if (doc.summary.text.trim()) {
-    blocks.push({ t: "heading", text: "Summary" }, { t: "body", text: doc.summary.text });
-  }
-
-  for (const section of doc.sections) {
-    if (!section.items.length) continue;
-    blocks.push({ t: "heading", text: SECTION_HEADINGS[section.kind] });
-    for (const item of section.items) {
-      const role = roles.get(item.roleId);
-      if (!role) unresolvedRoleIds.push(item.roleId);
-      blocks.push({
-        t: "row",
-        text: role ? `${role.title} — ${role.org}${role.location ? `, ${role.location}` : ""}` : item.roleId,
-        right: role ? roleDates(role) : "",
-      });
-      for (const bullet of item.bullets) blocks.push({ t: "bullet", text: bullet.text });
-    }
-  }
-
-  if (cv.education.length) {
-    blocks.push({ t: "heading", text: "Education" });
-    for (const ed of cv.education) {
-      blocks.push({ t: "row", text: `${ed.degree} — ${ed.institution}`, right: year(ed.end) });
-    }
-  }
-
-  if (doc.skills.length) {
-    blocks.push({ t: "heading", text: "Skills" }, { t: "body", text: doc.skills.join(" · ") });
-  }
-
-  return { blocks, unresolvedRoleIds };
+/** The CV file's blocks as export blocks. A row always has a right-hand side, if only empty. */
+function cvBlocks(file: CvFile): Block[] {
+  return file.blocks.map((b) => (b.t === "row" ? { t: "row", text: b.text, right: b.right ?? "" } : { t: b.t, text: b.text }));
 }
 
 /** `2026-11-01` → `1 November 2026`. The date a letter is dated, not a timestamp. */
@@ -126,20 +93,30 @@ function letterBlocks(app: ApplicationWithJob, cv: MasterCV): Block[] {
 
 /**
  * Builds the content for one export. `app.pack` must be present and the pack approved —
- * the route checks that first.
+ * the route checks that first. The CV needs its file (`agent.cvFile`); the letter doesn't.
  */
-export function exportDoc(kind: ExportKind, app: ApplicationWithJob, cv: MasterCV, contact: Contact): ExportDoc {
-  const { blocks, unresolvedRoleIds } = kind === "cv" ? cvBlocks(app, cv) : { blocks: letterBlocks(app, cv), unresolvedRoleIds: [] };
-  return {
+export function exportDoc(kind: ExportKind, app: ApplicationWithJob, cv: MasterCV, contact: Contact, file?: CvFile): ExportDoc {
+  const common = {
     kind,
-    name: cv.person.name,
-    header: contactLines(cv, contact),
-    blocks,
     fileBase: fileBase(cv.person.name, kind, app.job.company),
     title: `${cv.person.name} — ${kind === "cv" ? "CV" : "Cover letter"} — ${app.job.title}, ${app.job.company}`,
     // EXP-03: the approval time never changes, and a pack can't be edited once approved.
     date: new Date(app.approvedAt ?? app.createdAt),
-    unresolvedRoleIds,
+  };
+  if (kind === "letter") {
+    const links = cv.person.links.map((l) => shortUrl(l.url));
+    return { ...common, name: cv.person.name, header: contactLines(contact, contact.address ?? cv.person.location, links), blocks: letterBlocks(app, cv), unresolvedRoleIds: [] };
+  }
+  if (!file) throw new Error("The CV is exported from its RenderCV file: fetch it with agent.cvFile first.");
+  // The agent adds the same details in the same order: place, email, phone, then the file's links.
+  const place = contact.address ?? file.location;
+  return {
+    ...common,
+    name: file.name,
+    header: contactLines(contact, place, file.links),
+    headerItems: [place, contact.email, contact.phone, ...file.links].filter((x): x is string => Boolean(x)),
+    blocks: cvBlocks(file),
+    unresolvedRoleIds: file.unresolvedRoleIds,
   };
 }
 
@@ -149,6 +126,6 @@ export function expectedText(doc: ExportDoc): { headings: string[]; bodies: stri
     headings: doc.blocks.filter((b) => b.t === "heading").map((b) => b.text),
     bodies: doc.blocks.filter((b) => b.t === "bullet" || b.t === "body").map((b) => b.text),
     // The name and contact line are what a parser reads first, so they are checked exactly.
-    header: [doc.name, ...doc.header],
+    header: [doc.name, ...(doc.headerItems ?? doc.header)],
   };
 }

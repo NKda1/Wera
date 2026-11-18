@@ -103,7 +103,7 @@ flowchart TD
 
 **How it fits together**
 
-- **Python owns all the data and all the logic.** The Next.js route handlers are a backend-for-frontend: they forward to the agent over `127.0.0.1` with a shared `AGENT_TOKEN` and hold no provider keys (SEC-04). The one thing that stays in TypeScript is document rendering, because that is where the PDF and DOCX libraries are.
+- **Python owns all the data and all the logic.** The Next.js route handlers are a backend-for-frontend: they forward to the agent over `127.0.0.1` with a shared `AGENT_TOKEN` and hold no provider keys (SEC-04). Document rendering is split. The agent renders the CV PDF with RenderCV, from the pack's CV file (EXP-04, 18 Nov). The cover letter and both Word files are rendered in TypeScript, because that is where the DOCX library is, and the web app lints every PDF before handing it over.
 - **Every model call goes through one function.** `llm/gateway.py:structured()` is the only way to reach a model, so the weekly budget check, the contact redaction, the untrusted-data wrapping, the Pydantic validation and the `llm_calls` accounting cannot be forgotten by a node that was written in a hurry.
 - **Pydantic is the canonical schema.** The models export JSON Schema to `packages/schemas/json/`, and the web app's TypeScript types are generated from it (SCH-03). There is one definition of a `Job`, and it is in Python.
 - **The cheap checks run before the expensive ones.** Hard filters, then local embeddings, then a model — so by the time anything is paid for, the list is short (MATCH-01, MATCH-05).
@@ -276,7 +276,7 @@ those rather than from the eighty-eight.
 | LLM client | OpenAI SDK pointed at OpenRouter | **LangChain `ChatOpenAI`** → OpenRouter, `with_structured_output` + `with_fallbacks` | + PII gateway via `LLM_PROXY_URL` |
 | Storage | in-memory demo store | **SQLAlchemy 2 + Alembic on Postgres 17** (local; pgvector installed) since 12 Nov 2026 — SQLite only under the unit tests (REL-04) | Postgres with row-level security |
 | Embeddings | — | **fastembed** `bge-small-en-v1.5`, local; hash embedder in demo mode | pgvector-backed |
-| Documents | `@react-pdf/renderer` (PDF), `docx` (DOCX) | same — the one piece of logic still in TypeScript | same |
+| Documents | `@react-pdf/renderer` (PDF), `docx` (DOCX) | **RenderCV 2.8** (Typst) renders the CV PDF in the agent from each pack's CV file (18 Nov); the letter's PDF and both DOCX files stay in TypeScript | same |
 | Validation | hand-written contracts + Zod | **Pydantic 2 is canonical**; JSON Schema exported to `packages/schemas/json/`, TS types generated from it (SCH-03) | same |
 | Search & scraping | Firecrawl JS SDK | **firecrawl-py** `/search` + `/scrape`, with per-run credit caps | + `/interact` (MAY) |
 | Email | `imapflow` (IMAP), read-only | **imapclient** + **dkimpy**, `BODY.PEEK` only, on a schedule | inbound webhook for hosted |

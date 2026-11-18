@@ -15,6 +15,7 @@ Cancellation is checked between steps (UX-01): a person who changes their mind s
 to wait for a model call they no longer want.
 """
 
+import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -114,7 +115,16 @@ class Progress(Protocol):
     """
 
     def __call__(
-        self, fraction: float, *, phase: str, detail: str | None = None, done: int, total: int, results: int
+        self,
+        fraction: float,
+        *,
+        phase: str,
+        detail: str | None = None,
+        done: int,
+        total: int,
+        results: int,
+        note: str | None = None,
+        took_ms: int | None = None,
     ) -> None: ...
 
 
@@ -199,7 +209,26 @@ def from_watchlist(profile: SearchProfile, now: int, *, discover: bool = False, 
             total=len(watched),
             results=0,
         )
-    result = ats_feeds.fetch_all(watched)
+    started = time.monotonic()
+
+    def employer(done: int, total: int, said: str) -> None:
+        if tick is not None:
+            tick(0.3 + 0.3 * done / max(total, 1), phase="feeds", detail=said, done=done, total=total, results=0)
+
+    result = ats_feeds.fetch_all(watched, on_read=employer)
+    if tick is not None and watched:
+        missed = len(watched) - len(result.answered)
+        tick(
+            0.6,
+            phase="feeds",
+            detail=None,
+            done=len(watched),
+            total=len(watched),
+            results=len(result.jobs),
+            note=f"Employer feeds: {len(watched)} read, {len(result.jobs)} open jobs"
+            + (f", {missed} didn't answer" if missed else ""),
+            took_ms=int((time.monotonic() - started) * 1000),
+        )
     if orgs:
         _from_organisations(orgs, profile, now, into=result, tick=tick)
     out.errors += [("WATCHLIST_FEED", message) for message in result.errors]
@@ -221,14 +250,40 @@ def _from_organisations(
     """
     from ..sources import organisations as org_feeds
 
+    started = time.monotonic()
     if tick is not None:
         names = ", ".join(o.name for o in orgs[:3]) + ("…" if len(orgs) > 3 else "")
-        tick(0.6, phase="feeds", detail=names, done=0, total=len(orgs), results=len(into.jobs))
+        tick(0.6, phase="feeds", detail=f"Reading the vacancy lists of {names}", done=0, total=len(orgs), results=len(into.jobs))
 
     def wanted(feed: ats_feeds.FeedJob) -> bool:
         return filters.hidden_reason(normalise.from_feed(feed, now), profile, now) is None
 
-    found = org_feeds.fetch_all(orgs, wanted=wanted, max_details=organisations_file().max_details)
+    def step(fraction: float, said: str) -> None:
+        if tick is not None:
+            tick(0.6 + 0.35 * fraction, phase="feeds", detail=said, done=0, total=0, results=len(into.jobs))
+
+    # Which of the postings that pass are read in full: the best matches to the CV (17 Nov).
+    from ..services.store import Store
+
+    try:
+        with transaction() as session:
+            cv = Store(session, now).cv()
+        rank = prefilter.lead_ranker(cv, profile.titles, demo_mode=get_settings().wera_demo_mode)
+    except Exception:  # noqa: BLE001 — without a CV to rank by, the newest are read first, as before
+        rank = None
+    found = org_feeds.fetch_all(orgs, wanted=wanted, max_details=organisations_file().max_details, on_step=step, rank=rank)
+    if tick is not None:
+        tick(
+            0.95,
+            phase="feeds",
+            detail=None,
+            done=len(orgs),
+            total=len(orgs),
+            results=len(into.jobs) + len(found.jobs),
+            note=f"International organisations: {len(found.listed)} listed, {len(found.jobs)} matching read in full"
+            + (f", {len(found.errors)} not read" if found.errors else ""),
+            took_ms=int((time.monotonic() - started) * 1000),
+        )
     into.jobs += found.jobs
     into.errors += found.errors
     into.answered |= found.answered
@@ -472,6 +527,9 @@ QUERY_SHARE = 0.6
 # anything longer is truncated rather than refused, because a heartbeat must never be the thing
 # that fails a run.
 DETAIL_LIMIT = 200
+# The finished steps a run keeps (`intake_runs.log`). A search is a dozen or so; the oldest go
+# first, so a long one still shows how it ended.
+LOG_LIMIT = 20
 
 
 def report(
@@ -483,6 +541,9 @@ def report(
     done: int | None = None,
     total: int | None = None,
     results: int | None = None,
+    stage: float | None = None,
+    note: str | None = None,
+    took_ms: int | None = None,
 ) -> None:
     """Publish a progress heartbeat, in its own committed transaction.
 
@@ -490,6 +551,11 @@ def report(
     number was unreadable until the work it described had finished, and — on SQLite — that no
     other request could write for the duration either. Each heartbeat ends the transaction,
     which both publishes the figure and lets the API back in.
+
+    `progress` is the whole run and never goes back: a channel that reports late used to pull a
+    finished board search's bar from 97% to 25%. `stage` is how far through the current step,
+    0–1, reset when the phase changes. `note` adds a finished step to the run's log (UX-01): what
+    it did, in a sentence naming what it found, and `took_ms`, how long it took.
 
     A heartbeat is never worth failing a run over, so this swallows its own errors.
     """
@@ -500,7 +566,11 @@ def report(
             for run_id in run_ids.values():
                 row = session.get(IntakeRunRow, run_id)
                 if row is not None and row.status == "running":
-                    row.phase, row.progress = phase, round(progress, 4)
+                    if stage is not None:
+                        row.stage_progress = round(min(max(stage, 0.0), 1.0), 4)
+                    elif phase != row.phase:
+                        row.stage_progress = 0.0
+                    row.phase, row.progress = phase, round(max(progress, row.progress or 0.0), 4)
                     # `detail` is cleared when not given, unlike the counters below. A phase has
                     # moved on by the time the next heartbeat lands, and a sentence left behind
                     # from the previous one is worse than no sentence: it says WERA is reading a
@@ -518,6 +588,9 @@ def report(
                         # So "found 12 so far" is readable while the crawl is still going. The
                         # final tally is written once at the end of the run either way.
                         row.results = results
+                    if note:
+                        step = {"at": iso(now_ms()), "phase": phase, "message": note[:DETAIL_LIMIT], "ms": took_ms}
+                        row.log = [*(row.log or []), step][-LOG_LIMIT:]
     except Exception:  # noqa: BLE001 — telling someone how far along we are is not load-bearing
         logfire.warn("Could not record run progress")
 
@@ -545,6 +618,7 @@ def judge(
     progress_to: float = 1.0,
     limit: int | None = None,
     only_these: bool = False,
+    scope: str = "board",
 ) -> Judged:
     """Filter, save, pre-filter, score, rank — in that order, and the order matters.
 
@@ -583,7 +657,14 @@ def judge(
     # one — against 15 boards carrying 3,913 vacancies the filters alone are seconds, and the
     # pre-filter embeds every survivor locally — so it gets its own named stage rather than
     # looking like the first job taking an unexplained minute to score.
-    report(runs, phase="filtering", progress=progress_from, detail=f"{len(jobs)} found" if jobs else "checking the shortlist")
+    report(
+        runs,
+        phase="filtering",
+        progress=progress_from,
+        detail=f"Checking {len(jobs)} found against your profile's filters"
+        if jobs
+        else "Checking the shortlist for jobs still to score",
+    )
 
     # Everything that is free, in one transaction: filter, store, pre-filter.
     with transaction() as session:
@@ -607,17 +688,22 @@ def judge(
         # more correct: `upsert_jobs` has already written this run's finds, so these rows *are*
         # the merged jobs, and asking with `cached_evidence`'s own predicate means a re-sighting
         # whose score is still valid can't take a slot under the day's cap from one that has none.
-        scoreable = store.jobs_needing_score(cv_version=cv.version, model=model)
+        # `scope="review"` (18 Nov): after a CV edit, the jobs the person is acting on go first.
+        scoreable = store.jobs_needing_score(cv_version=cv.version, model=model, scope=scope)
         if only_these:
             mine = [j.id for j in saved_jobs[: len(kept)]]
             waiting = {j.id: j for j in scoreable}
             scoreable = [waiting[i] for i in dict.fromkeys(mine) if i in waiting]
         cfg = wera()
-        # MATCH-05's day ceiling, minus what today has already spent. Counted here rather than
-        # left to the batch arithmetic, because batching hands the cap out in instalments and
-        # three "score more" clicks must not add up to more than one old run was allowed.
-        remaining_today = max(cfg.max_scored_per_day - store.scored_today(), 0)
-        take = min(limit if limit is not None else cfg.scored_per_run, remaining_today)
+        # MATCH-05's 24-hour ceiling, minus what that window has already spent. Counted here rather
+        # than left to the batch arithmetic, because batching hands the cap out in instalments and
+        # three "score more" clicks must not add up to more than one old run was allowed. None when
+        # the person switched the limit off in Settings; the weekly budget still stops a call.
+        allowance = store.score_allowance()
+        per_run = cfg.scored_per_run if allowance is not None else cfg.surface.max
+        take = limit if limit is not None else per_run
+        if allowance is not None:
+            take = min(take, allowance)
         # Ranked over the *whole* pool, then sliced. Ranking only the slice would mean each batch
         # was the best of an arbitrary subset rather than the best of what's left.
         ranked = (
@@ -625,10 +711,8 @@ def judge(
         )
         chosen = ranked[:take]
         out.pool = max(len(scoreable) - len(chosen), 0)
-        if scoreable and not chosen:
-            out.errors.append(
-                ("DAILY_CAP", f"Today's scoring limit of {cfg.max_scored_per_day} jobs is used up. The rest are waiting.")
-            )
+        if scoreable and not chosen and allowance == 0:
+            out.errors.append(("DAILY_CAP", store.score_cap_message()))
 
     scored: list[tuple[Job, Any]] = []
 
@@ -659,9 +743,10 @@ def judge(
                 # `progress_from` is where searching left off: a quarter of the bar for an intake
                 # run, and zero for a re-score, which never searched for anything.
                 progress=progress_from + (progress_to - progress_from) * (done / max(len(chosen), 1)),
-                detail=f"{job.title} · {job.company}",
+                detail=f"Scoring {done + 1} of {len(chosen)} against your CV · {job.title} at {job.company}",
                 done=done,
                 total=len(chosen),
+                stage=done / max(len(chosen), 1),
             )
             pending[pool.submit(score_one, job)] = job
 
@@ -706,19 +791,19 @@ def judge(
     return out
 
 
-async def run_rescore(run_id: str, channel: str = "rescore") -> dict[str, Any]:
+async def run_rescore(run_id: str, channel: str = "rescore", scope: str = "board") -> dict[str, Any]:
     """A scoring-only pass on a worker thread, so the request that asked for it can return."""
     import asyncio
 
     try:
-        return await asyncio.to_thread(rescore, run_id, channel)
+        return await asyncio.to_thread(rescore, run_id, channel, scope)
     finally:
         from ..llm.gateway import flush_unrecorded
 
         flush_unrecorded()
 
 
-def rescore(run_id: str, channel: str = "rescore") -> dict[str, Any]:
+def rescore(run_id: str, channel: str = "rescore", scope: str = "board") -> dict[str, Any]:
     """Judge jobs WERA already has, with no fetching at all (CV-08, SCH-02, MATCH-05).
 
     `rescore` recomputes what a CV change invalidated. (`score_more` — "Find more" — used to be the
@@ -738,7 +823,7 @@ def rescore(run_id: str, channel: str = "rescore") -> dict[str, Any]:
         return find_more(run_id)
 
     try:
-        judged = judge([], now=now, run_ids=run_ids, progress_from=0.0)
+        judged = judge([], now=now, run_ids=run_ids, progress_from=0.0, scope=scope)
     except Cancelled:
         logfire.info("{channel} cancelled", channel=channel)
         return summary
@@ -872,7 +957,17 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
         hi = SEARCH_SHARE * (index + 1) / max(len(channels), 1)
         mine = {channel: run_ids[channel]} if channel in run_ids else {}
 
-        def tick(fraction: float, *, phase: str, detail: str | None = None, done: int, total: int, results: int) -> None:
+        def tick(
+            fraction: float,
+            *,
+            phase: str,
+            detail: str | None = None,
+            done: int,
+            total: int,
+            results: int,
+            note: str | None = None,
+            took_ms: int | None = None,
+        ) -> None:
             progress = lo + (hi - lo) * min(max(fraction, 0.0), 1.0)
             report(
                 mine,
@@ -882,6 +977,9 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
                 done=done,
                 total=total,
                 results=results,
+                stage=done / total if total else None,
+                note=note,
+                took_ms=took_ms,
             )
 
         return tick
@@ -918,11 +1016,12 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
     # found a few hundred sightings this is seconds of silence between two long phases, and
     # silence between stages is what a frozen bar is made of.
     total_found = sum(len(o.jobs) for o in outcomes)
+    merging = {o.channel: run_ids[o.channel] for o in outcomes if not o.judged and o.channel in run_ids}
     report(
-        run_ids,
+        merging,
         phase="collapsing",
         progress=SEARCH_SHARE,
-        detail=f"{total_found} {'sighting' if total_found == 1 else 'sightings'}",
+        detail=f"Merging duplicates across {total_found} {'sighting' if total_found == 1 else 'sightings'}",
     )
     found = dedupe.collapse([job for outcome in outcomes for job in outcome.jobs])
 
@@ -943,7 +1042,7 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
     # ATS-03's sweep walks every job the watchlist can speak for, so it is the last thing between
     # the final score and a finished run. Named for the same reason as `collapsing`: an unnamed
     # pause at 99% is where someone reloads the page.
-    report(run_ids, phase="closing", progress=0.99, detail="checking which jobs are still open")
+    report(run_ids, phase="closing", progress=0.99, detail="Checking which saved jobs are still open")
 
     with transaction() as session:
         store = Store(session, now)

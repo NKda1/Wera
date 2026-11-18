@@ -302,16 +302,15 @@ def master_summary(cv: MasterCV) -> Cited:
 def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
     """LTR-01…05: 3–4 paragraphs, one company fact quoted from the post, every claim cited.
 
-    The guard can drop a paragraph the CV doesn't back, and dropping one from a four-paragraph
-    letter leaves three — but dropping two leaves a letter too short to send (LTR-01). So a
-    letter that comes back under the minimum is asked for once more, told what was left out and
-    why. If the second one is no better, the fuller of the two is kept with its violations
-    showing, because a short letter the person can see the problem with beats a silent one.
+    The guard can drop a paragraph the CV doesn't back. A letter it leaves with fewer than three
+    paragraphs, or under LTR-01's 150 words, is asked for once more, told what was cut and why.
+    If the second one is no better, the fuller of the two is kept with its violations showing,
+    because a short letter the person can see the problem with beats a silent one.
     """
     cv = inp.cv
     tailored = "\n".join(f"- {b.text}" for _, b in cv_locations(doc))
     keywords = keywords_text(plan(inp.evidence, cv))
-    context = context_text(inp.analysis)
+    context = context_text(inp.analysis, inp.brief)
     best: CoverLetter | None = None
     feedback: str | None = None
 
@@ -334,9 +333,13 @@ def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
         )
         candidate = _guard_letter(session, out, inp)
         filler = banned_phrases(candidate)
-        dropped = len(candidate.paragraphs) < MIN_PARAGRAPHS
-        # What the model wrote, not what the guard left: a paragraph cut for an unbacked claim is
-        # the guard working (and shown to the person), and asking again would pay twice for it.
+        # Too few paragraphs left, or a paragraph cut and the letter left under LTR-01's floor.
+        # The second used to pass: three paragraphs was "enough", and the word count read what the
+        # model *wrote* rather than what the guard *left*. Measured on the 15 letters to 17 Nov: the
+        # 6 that lost a paragraph — usually the proof — came out at 124–148 words and none was
+        # asked for again, while every four-paragraph letter landed at 153–214.
+        cut = any(v.rule == "dropped" for v in candidate.guard.violations)
+        dropped = len(candidate.paragraphs) < MIN_PARAGRAPHS or (cut and candidate.word_count < TARGET_MIN_WORDS)
         written = sum(len(p.text.split()) for p in out.paragraphs)
         short = not dropped and written < TARGET_MIN_WORDS
         if not dropped and not filler and not short:
@@ -453,12 +456,26 @@ def _short_feedback(candidate: CoverLetter) -> str:
 
 def _dropped_feedback(candidate: CoverLetter) -> str:
     """What to tell the model about its last attempt, in terms of its own output."""
-    reasons = [v.detail for v in candidate.guard.violations] or ["a claim the CV doesn't carry"]
-    return (
-        f"Your last letter lost {len(reasons)} paragraph(s) to WERA's citation check, leaving "
-        f"{len(candidate.paragraphs)} — too few. Reasons given: {' '.join(reasons)} "
-        f"Write {MIN_PARAGRAPHS} or 4 paragraphs where every claim is carried by the CV lines you cite."
+    cuts = [v for v in candidate.guard.violations if v.rule == "dropped"] or candidate.guard.violations
+    reasons = [f"paragraph {_paragraph_number(v.location)}: {v.detail}" for v in cuts] or ["a claim the CV doesn't carry"]
+    left = (
+        f"{len(candidate.paragraphs)} — too few"
+        if len(candidate.paragraphs) < MIN_PARAGRAPHS
+        else f"{len(candidate.paragraphs)} paragraphs and {candidate.word_count} words, under the {TARGET_MIN_WORDS} a letter needs"
     )
+    return (
+        f"Your last letter lost {len(cuts) or 1} paragraph(s) to WERA's citation check, leaving {left}. "
+        f"Reasons given: {' '.join(reasons)} "
+        "Write all 4 paragraphs again, each to its budget, where every claim is carried by the CV lines you cite: "
+        "for a paragraph that was cut, cite different lines that do say it, or say less."
+    )
+
+
+def _paragraph_number(location: str | None) -> str:
+    """`p1` as the person counts it, "2"."""
+    if location and location.startswith("p") and location[1:].isdigit():
+        return str(int(location[1:]) + 1)
+    return "?"
 
 
 def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverLetter:
@@ -473,6 +490,10 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
     post = inp.job.description_md or ""
     quote = out.company_quote if out.company_quote and out.company_quote in post else ""
     policy = out.policy_quote if out.policy_quote and out.policy_quote in post else ""
+    # 18 Nov: a fact from the company's own site counts only if it is word for word in the page
+    # the brief read and stored — the same rule as the post's, against the page instead.
+    site_text = inp.brief.site.text if inp.brief and inp.brief.site else ""
+    site = out.site_quote if out.site_quote and site_text and out.site_quote in site_text else ""
     # The guard checks what the letter claims about the applicant. Words quoted from the post —
     # the company fact, the role, the company name — are the employer's, not a claim about the
     # applicant, so they are taken out before checking. Otherwise a number inside a quoted
@@ -483,8 +504,10 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
         inp.evidence.job_quote,
         inp.job.title,
         inp.job.company,
+        site,
         *_context_quotes(inp),
         *(q for p in paragraphs for q in post_quotes(p.text, post)),
+        *(q for p in paragraphs for q in (post_quotes(p.text, site_text) if site_text else [])),
     ]
     result, decisions = guard_and_repair(
         session,
@@ -523,7 +546,7 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
         greeting=out.greeting,
         paragraphs=paragraphs,
         signoff=out.signoff,
-        company_fact=CompanyFact(quote=quote, policy_quote=policy),
+        company_fact=CompanyFact(quote=quote, policy_quote=policy, site_quote=site),
         word_count=words(text),
         guard=result,
         hook_type=out.hook_type,

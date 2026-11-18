@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     refilter = jobs_sub.add_parser("refilter", help="re-apply your filters to hidden jobs and bring back what they now keep")
     refilter.add_argument("--apply", action="store_true", help="bring them back (default: only list them)")
     jobs_sub.add_parser("rescore", help="re-score the shortlist's stale scores (a new CV, model or rubric)")
+    jobs_sub.add_parser("reformat", help="lay out every saved job's description with today's formatter (no model calls)")
     tg = sub.add_parser("targets", help="the Strategist's job discovery: Serper searches into the Redis queue (SRCH-20)")
     tg_sub = tg.add_subparsers(dest="targets_cmd", required=True)
     tg_disc = tg_sub.add_parser("discover", help="send the planned queries and queue the postings they find")
@@ -203,6 +204,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _tidy(args.apply)
         if args.jobs_cmd == "rescore":
             return _rescore()
+        if args.jobs_cmd == "reformat":
+            return _reformat()
         return _refilter(args.apply) if args.jobs_cmd == "refilter" else _audit_listings(args.apply)
     if args.cmd == "eval":
         try:
@@ -340,6 +343,7 @@ def _targets(cmd: str, *, tiers: list[int] | None, plan: bool) -> int:
             profile = store.get_profile()
             known = store.known_apply_urls()
             key = store.plan_key()
+            pool, reader = store.pool_key(), store.reader_key()
     except ApiError as exc:
         print(exc.message, file=sys.stderr)
         return 1
@@ -354,7 +358,7 @@ def _targets(cmd: str, *, tiers: list[int] | None, plan: bool) -> int:
         return 0
 
     try:
-        queue = targets.TargetQueue(targets.connect(), key)
+        queue = targets.TargetQueue(targets.connect(), key, pool=pool, reader=reader)
     except ApiError as exc:
         print(exc.message, file=sys.stderr)
         return 1
@@ -505,6 +509,17 @@ def _tidy(apply: bool) -> int:
     print(f"\n{len(found)} saved job(s) {'tidied' if apply else 'to tidy'}.")
     if not apply and found:
         print("Run again with --apply to change them. Statuses and scores are kept.")
+    return 0
+
+
+def _reformat() -> int:
+    """Stores the description view of every saved job (18 Nov). Free, and safe to run again."""
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        changed, total = Store(session).reformat_saved()
+    print(f"Laid out {changed} of {total} saved job(s); the rest were already current.")
     return 0
 
 

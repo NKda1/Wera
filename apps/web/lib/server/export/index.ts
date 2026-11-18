@@ -1,11 +1,15 @@
 import "server-only";
 
 // EXP-01: the CV and the letter, as PDF and DOCX, from the same structured content.
+//
+// The CV PDF is the one file not drawn here (18 Nov): the agent renders it with RenderCV from the
+// pack's CV file, and this module gates it, names it and lints it like the others. The CV's DOCX
+// is written here from the same file's blocks.
 
 import { renderToBuffer } from "@react-pdf/renderer";
 import { ApiError } from "../http";
-import type { ApplicationWithJob, Contact, MasterCV } from "../../types";
-import { exportDoc, type ExportKind } from "./content";
+import type { ApplicationWithJob, Contact, CvFile, MasterCV } from "../../types";
+import { exportDoc, type ExportDoc, type ExportKind } from "./content";
 import { renderDocx } from "./docx";
 import { type FormatCheck, lintPdf } from "./lint";
 import { paper } from "./paper";
@@ -45,6 +49,15 @@ export function parseFormat(value: string | null): Format {
   return value ?? "pdf";
 }
 
+/** The CV's file, and its PDF as the agent renders it. Only fetched once the gate has passed. */
+export type CvSource = { file: CvFile; pdf: () => Promise<Uint8Array> };
+
+async function pdfBytes(doc: ExportDoc, source?: CvSource): Promise<Uint8Array> {
+  if (doc.kind === "letter") return new Uint8Array(await renderToBuffer(paper(doc)));
+  if (!source) throw new Error("The CV PDF is rendered by the agent: pass its CV file and PDF.");
+  return source.pdf();
+}
+
 export async function renderExport(
   kind: ExportKind,
   format: Format,
@@ -52,16 +65,17 @@ export async function renderExport(
   cv: MasterCV,
   contact: Contact,
   maxPages: number,
+  source?: CvSource,
 ): Promise<Export> {
   if (!DOWNLOADABLE.includes(app.status) || !app.pack) {
     throw new ApiError(403, "PACK_NOT_APPROVED", "Approve the pack to unlock downloads.");
   }
-  const doc = exportDoc(kind, app, cv, contact);
+  const doc = exportDoc(kind, app, cv, contact, source?.file);
   const fileName = `${doc.fileBase}.${format}`;
   if (format === "docx") {
     return { bytes: await renderDocx(doc), fileName, contentType: TYPES.docx, checks: [] };
   }
-  const bytes = new Uint8Array(await renderToBuffer(paper(doc)));
+  const bytes = await pdfBytes(doc, source);
   return { bytes, fileName, contentType: TYPES.pdf, checks: await lintPdf(bytes, doc, fileName, maxPages) };
 }
 
@@ -74,11 +88,17 @@ export async function renderExport(
  * checks the agent asserted (`pass: true`, for a PDF that hadn't been rendered); this is what
  * replaces them.
  */
-export async function lintExport(kind: ExportKind, app: ApplicationWithJob, cv: MasterCV, contact: Contact, maxPages: number): Promise<FormatCheck[]> {
+export async function lintExport(
+  kind: ExportKind,
+  app: ApplicationWithJob,
+  cv: MasterCV,
+  contact: Contact,
+  maxPages: number,
+  source?: CvSource,
+): Promise<FormatCheck[]> {
   if (!app.pack) {
     throw new ApiError(409, "NO_PACK", "This application has no drafted pack to check yet.");
   }
-  const doc = exportDoc(kind, app, cv, contact);
-  const bytes = new Uint8Array(await renderToBuffer(paper(doc)));
-  return lintPdf(bytes, doc, `${doc.fileBase}.pdf`, maxPages);
+  const doc = exportDoc(kind, app, cv, contact, source?.file);
+  return lintPdf(await pdfBytes(doc, source), doc, `${doc.fileBase}.pdf`, maxPages);
 }

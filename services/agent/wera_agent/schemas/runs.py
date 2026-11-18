@@ -38,6 +38,7 @@ type RunPhase = Literal[
     # Finding *boards* rather than jobs: ATS-05 weekly, and SRCH-12's site proposals.
     "discovering",
     "planning",  # SRCH-20 stage 1: the Strategist's plan and its queries
+    "apis",  # SRCH-31 "tier 0": the job APIs (Reed, Adzuna, USAJOBS, Careerjet, ReliefWeb)
     "harvesting",  # SRCH-20 stage 3: the Harvester reading queued postings, free rungs first
     "searching",  # SRCH-20 stage 2: Serper queries, and reading pages of results for their links
     "scraping",  # reading pages a search found — no longer a board-search stage, kept for old rows
@@ -56,6 +57,7 @@ PHASE_ORDER: tuple[str, ...] = (
     "queued",
     "discovering",
     "planning",
+    "apis",
     "searching",
     "harvesting",
     "scraping",
@@ -72,6 +74,16 @@ PHASE_ORDER: tuple[str, ...] = (
 class RunError(Model):
     code: str
     message: str  # sanitised, §9.4
+
+
+class RunStep(Model):
+    """One finished step of a run, as the run panel lists it (UX-01, 17 Nov)."""
+
+    at: str
+    phase: RunPhase
+    # What it did, naming what it found: "Plan ready: 27 searches in 5 countries".
+    message: str
+    ms: int | None = None  # how long it took, when it was timed
 
 
 class IntakeRun(Model):
@@ -111,6 +123,10 @@ class IntakeRun(Model):
     # travels with the run rather than being a constant the UI repeats.
     batch_size: int = 0
     errors: list[RunError]
+    # UX-01 (17 Nov): how far through its current step, 0–1 — `progress` is the whole run — and
+    # the steps it has finished, oldest first.
+    stage_progress: float = 0
+    log: list[RunStep] = []
 
 
 class ChannelSummary(Model):

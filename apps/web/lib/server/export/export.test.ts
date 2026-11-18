@@ -3,14 +3,19 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../http";
-import type { ApplicationWithJob, Cited, Contact, MasterCV, Pack } from "../../types";
+import type { ApplicationWithJob, Contact, CvFile, MasterCV, Pack, TailoredCV } from "../../types";
 import { exportDoc } from "./content";
-import { lintExport, renderExport } from "./index";
+import { type CvSource, lintExport, renderExport } from "./index";
 
-const fixture = <T>(name: string): T => JSON.parse(readFileSync(fileURLToPath(new URL(`../../../../../fixtures/demo/${name}`, import.meta.url)), "utf8")) as T;
+const fixturePath = (name: string) => fileURLToPath(new URL(`../../../../../fixtures/demo/${name}`, import.meta.url));
+const fixture = <T>(name: string): T => JSON.parse(readFileSync(fixturePath(name), "utf8")) as T;
 
 const CV = fixture<MasterCV>("cv.json");
 const CONTACT = fixture<Contact>("contact.json");
+// The CV file and PDF the agent renders for this pack (`tests/test_cv_file.py` keeps them current):
+// RenderCV runs in the agent, so these tests read its real output rather than a stand-in.
+const FILE = fixture<CvFile>("rendercv/cv-file.json");
+const CV_PDF = readFileSync(fixturePath("rendercv/cv.pdf"));
 
 const BULLETS: Record<string, string> = {
   "exp-idsu-01": "Built a FastAPI API gateway that scans prompts for personal data (regex and Presidio) before they reach third-party LLMs.",
@@ -20,26 +25,11 @@ const BULLETS: Record<string, string> = {
   "prj-oss-01": "Added structured-output retries with schema validation to a LangChain community model integration in Python.",
 };
 
-const cited = (id: string): Cited => ({ text: BULLETS[id], sourceIds: [id] });
-
 const clean = { pass: true, violations: [], repaired: false };
 
 const PACK: Pack = {
-  cv: {
-    jobId: "job-fernhill-mle",
-    cvVersion: CV.version,
-    summary: {
-      text: "Computer Science graduate building production AI tooling: a FastAPI PII-detection gateway for LLM prompts, and a live TypeScript and Postgres platform with real users.",
-      sourceIds: ["sum-01"],
-    },
-    sections: [
-      { kind: "experience", items: [{ roleId: "exp-idsu", bullets: [cited("exp-idsu-01"), cited("exp-idsu-03")] }, { roleId: "exp-fm", bullets: [cited("exp-fm-01"), cited("exp-fm-03")] }] },
-      { kind: "projects", items: [{ roleId: "prj-oss", bullets: [cited("prj-oss-01")] }] },
-    ],
-    skills: ["Python", "FastAPI", "LangGraph", "PostgreSQL", "LLM guardrails", "Presidio"],
-    omittedBulletIds: ["exp-idsu-02", "exp-fm-02"],
-    guard: clean,
-  },
+  // Shared with the agent's test that renders the fixture above.
+  cv: fixture<TailoredCV>("tailored-cv.json"),
   letter: {
     jobId: "job-fernhill-mle",
     greeting: "Dear Hiring Team,",
@@ -49,7 +39,7 @@ const PACK: Pack = {
       { text: "I would welcome the chance to talk about the agent evaluation work you mention.", sourceIds: ["exp-fm-03"] },
     ],
     signoff: "Kind regards,\nJordan Ellery",
-    companyFact: { quote: "ships guardrails as product", policyQuote: "We are remote-first across the EU." },
+    companyFact: { quote: "ships guardrails as product", policyQuote: "We are remote-first across the EU.", siteQuote: "" },
     wordCount: 268,
     guard: clean,
   },
@@ -74,7 +64,13 @@ const APP: ApplicationWithJob = {
   },
 };
 
-const render = (kind: "cv" | "letter", format: "pdf" | "docx", app: ApplicationWithJob = APP) => renderExport(kind, format, app, CV, CONTACT, 1);
+const source = (file: CvFile = FILE, pdf: Uint8Array = CV_PDF): CvSource & { asked: number } => {
+  const out = { file, asked: 0, pdf: async () => (out.asked++, new Uint8Array(pdf)) };
+  return out;
+};
+
+const render = (kind: "cv" | "letter", format: "pdf" | "docx", app: ApplicationWithJob = APP, from: CvSource = source()) =>
+  renderExport(kind, format, app, CV, CONTACT, 1, kind === "cv" ? from : undefined);
 
 /** Reads one entry out of a zip (a .docx) without pulling in a dependency. */
 function unzip(bytes: Uint8Array, entry: string): string {
@@ -97,29 +93,31 @@ function unzip(bytes: Uint8Array, entry: string): string {
 const checks = (list: { id: string; pass: boolean; message: string }[]) => Object.fromEntries(list.map((c) => [c.id, c]));
 
 describe("CV PDF", () => {
-  it("passes the format lint (T-09: ATSC-05 and ATSC-06)", async () => {
+  it("passes the format lint on RenderCV's output (T-09: ATSC-05 and ATSC-06)", async () => {
     const out = await render("cv", "pdf");
     const failed = out.checks.filter((c) => !c.pass);
     expect(failed.map((c) => `${c.id}: ${c.message}`)).toEqual([]);
   });
 
-  it("is one page and named First-Last-CV-Company.pdf (ATSC-05)", async () => {
+  it("is the agent's file, one page, named First-Last-CV-Company.pdf (ATSC-05)", async () => {
     const out = await render("cv", "pdf");
+    expect(Buffer.from(out.bytes).equals(CV_PDF)).toBe(true);
     expect(out.fileName).toBe("Jordan-Ellery-CV-Fernhill-Analytics.pdf");
     expect(checks(out.checks).pages.message).toBe("1 page");
     expect(out.contentType).toBe("application/pdf");
   });
 
-  it("inserts the real contact details at render time (EXP-02)", async () => {
-    const doc = exportDoc("cv", APP, CV, CONTACT);
+  it("adds the real contact details at render time, and the file never holds them (EXP-02)", () => {
+    const doc = exportDoc("cv", APP, CV, CONTACT, FILE);
     expect(doc.header[0]).toContain(CONTACT.email);
     expect(doc.header[0]).toContain(CONTACT.phone!);
-    // The review screen shows placeholders; the file must not.
-    expect(doc.header.join(" ")).not.toContain("[email]");
+    expect(doc.headerItems).toEqual([CONTACT.address, CONTACT.email, CONTACT.phone, ...FILE.links]);
+    expect(FILE.yaml).not.toContain(CONTACT.email);
+    expect(FILE.yaml).not.toContain("7700");
   });
 
-  it("takes role headers, dates and education from the master CV (TAIL-02)", () => {
-    const rows = exportDoc("cv", APP, CV, CONTACT).blocks.filter((b) => b.t === "row");
+  it("takes role headers, dates and education from the master CV, through the file (TAIL-02)", () => {
+    const rows = exportDoc("cv", APP, CV, CONTACT, FILE).blocks.filter((b) => b.t === "row");
     // 2026-02 → 2026-08 is one year, so the header carries the year once.
     expect(rows).toContainEqual({ t: "row", text: "AI Intern — International Digital Standards Union, Geneva", right: "2026" });
     expect(rows).toContainEqual({ t: "row", text: "Founder and Developer — Fieldmark, London", right: "2024 – present" });
@@ -127,26 +125,23 @@ describe("CV PDF", () => {
   });
 
   it("reports a role the master CV no longer has instead of inventing a header (TAIL-02)", async () => {
-    const stale: ApplicationWithJob = {
-      ...APP,
-      pack: { ...PACK, cv: { ...PACK.cv, sections: [{ kind: "experience", items: [{ roleId: "exp-gone", bullets: [cited("exp-idsu-01")] }] }] } },
-    };
-    const out = await render("cv", "pdf", stale);
+    const out = await render("cv", "pdf", APP, source({ ...FILE, unresolvedRoleIds: ["exp-gone"] }));
     expect(checks(out.checks).roles_resolved).toMatchObject({ pass: false });
     expect(checks(out.checks).roles_resolved.message).toContain("exp-gone");
+  });
+
+  it("notices a bullet the PDF lost", async () => {
+    const blocks = [...FILE.blocks, { t: "bullet" as const, text: "A line that the rendered file does not contain at all, anywhere." }];
+    const out = await render("cv", "pdf", APP, source({ ...FILE, blocks }));
+    expect(checks(out.checks).text_extractable).toMatchObject({ pass: false });
   });
 
   it("lints a pack still under review, the same way the download does (ATSC-05/06)", async () => {
     const reviewing: ApplicationWithJob = { ...APP, status: "ready_for_review", approvedAt: undefined };
     await expect(render("cv", "pdf", reviewing)).rejects.toThrow(ApiError);
-    const lint = await lintExport("cv", reviewing, CV, CONTACT, 1);
+    const lint = await lintExport("cv", reviewing, CV, CONTACT, 1, source());
     expect(lint.map((c) => c.id)).toEqual((await render("cv", "pdf")).checks.map((c) => c.id));
     expect(lint.filter((c) => !c.pass).map((c) => `${c.id}: ${c.message}`)).toEqual([]);
-  });
-
-  it("renders byte-identical files for the same pack (EXP-03)", async () => {
-    const [a, b] = await Promise.all([render("cv", "pdf"), render("cv", "pdf")]);
-    expect(Buffer.from(a.bytes).equals(Buffer.from(b.bytes))).toBe(true);
   });
 });
 
@@ -155,6 +150,11 @@ describe("cover letter", () => {
     const out = await render("letter", "pdf");
     expect(out.fileName).toBe("Jordan-Ellery-Letter-Fernhill-Analytics.pdf");
     expect(out.checks.filter((c) => !c.pass).map((c) => c.id)).toEqual([]);
+  });
+
+  it("renders byte-identical files for the same pack (EXP-03)", async () => {
+    const [a, b] = await Promise.all([render("letter", "pdf"), render("letter", "pdf")]);
+    expect(Buffer.from(a.bytes).equals(Buffer.from(b.bytes))).toBe(true);
   });
 
   it("signs off with the name from the master CV", () => {
@@ -194,6 +194,13 @@ describe("DOCX", () => {
     expect(xml).not.toContain("<w:tbl>");
   });
 
+  it("is the CV the person wrote, when they rewrote its file", async () => {
+    const blocks = FILE.blocks.map((b) => (b.text === BULLETS["exp-fm-01"] ? { ...b, text: "My own line about Fieldmark." } : b));
+    const xml = unzip((await render("cv", "docx", APP, source({ ...FILE, blocks, editedByUser: true }))).bytes, "word/document.xml");
+    expect(xml).toContain("My own line about Fieldmark.");
+    expect(xml).not.toContain("scouting platform");
+  });
+
   it("leaves out the bullets the pack omitted", async () => {
     const xml = unzip((await render("cv", "docx")).bytes, "word/document.xml").replace(/<[^>]+>/g, "");
     expect(xml).not.toContain("Orchestrated agentic AI workflows");
@@ -210,10 +217,12 @@ describe("DOCX", () => {
 });
 
 describe("the gate", () => {
-  it("refuses a pack that hasn't been approved (G2-03)", async () => {
+  it("refuses a pack that hasn't been approved, before the agent renders anything (G2-03)", async () => {
     const waiting: ApplicationWithJob = { ...APP, status: "ready_for_review", approvedAt: undefined };
-    await expect(render("cv", "pdf", waiting)).rejects.toThrow(ApiError);
-    await expect(render("cv", "pdf", waiting)).rejects.toThrow("Approve the pack to unlock downloads.");
+    const from = source();
+    await expect(render("cv", "pdf", waiting, from)).rejects.toThrow(ApiError);
+    await expect(render("cv", "pdf", waiting, from)).rejects.toThrow("Approve the pack to unlock downloads.");
+    expect(from.asked).toBe(0);
   });
 
   it("still exports after the application moves on", async () => {

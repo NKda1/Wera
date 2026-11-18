@@ -4,17 +4,25 @@ import { ApiError, type IdContext } from "@/lib/server/http";
 import { warn } from "@/lib/server/telemetry";
 
 /**
- * EXP-01/02: rendering happens here, on the server, and contact details are inserted at
- * render time (ARCHITECTURE §4 keeps document rendering in TypeScript). The agent holds the
- * pack, the master CV and the contact details; it never renders.
+ * EXP-01/02: every download passes through here, behind the approval gate, and contact details
+ * are inserted at render time. The letter and both Word files are rendered here; the CV PDF is
+ * rendered by the agent with RenderCV from the pack's CV file (18 Nov), and linted here like
+ * the rest.
  */
 export async function GET(req: Request, { params }: IdContext) {
   const { id } = await params;
   try {
     const { appId, kind } = parseDocId(id);
     const format = parseFormat(new URL(req.url).searchParams.get("format"));
-    const [app, cv, contact, settings] = await Promise.all([agent.getApplication(appId), agent.getCv(), agent.getContact(), agent.getSettings()]);
-    const out = await renderExport(kind, format, app, cv, contact, settings.cvPages);
+    const [app, cv, contact, settings, file] = await Promise.all([
+      agent.getApplication(appId),
+      agent.getCv(),
+      agent.getContact(),
+      agent.getSettings(),
+      kind === "cv" ? agent.cvFile(appId) : undefined,
+    ]);
+    const source = file ? { file, pdf: () => agent.cvPdf(appId) } : undefined;
+    const out = await renderExport(kind, format, app, cv, contact, settings.cvPages, source);
 
     const failed = out.checks.filter((c) => !c.pass);
     if (failed.length) {

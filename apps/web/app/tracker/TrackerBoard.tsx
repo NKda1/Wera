@@ -14,6 +14,7 @@ import { Input, Label, Select, Textarea } from "@/lib/ui/Field";
 import { revealInline, useScrollEdges } from "@/lib/ui/scrollEdges";
 import { useToast } from "@/lib/ui/Toast";
 import { DraftProgress } from "../review/_components/DraftProgress";
+import { JobLinks } from "@/lib/ui/JobLinks";
 
 const COLUMNS: { id: string; title: string; statuses: ApplicationStatus[] }[] = [
   { id: "drafting", title: "Drafting", statuses: ["drafting", "changes_requested"] },
@@ -233,6 +234,7 @@ function TrackerCard({ app, onMove }: { app: ApplicationWithJob; onMove: (to: Ap
       <p className="text-small text-ink-2">
         {app.job.company} · {formatLocation(app.job)} · fit {app.job.fitTotal.toFixed(1)}
       </p>
+      <JobLinks job={app.job} className="mt-1" />
 
       <div className="mt-2 text-small">
         {app.status === "drafting" && app.draft ? <DraftProgress step={app.draft.step} progress={app.draft.progress} /> : null}

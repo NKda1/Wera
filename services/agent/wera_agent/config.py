@@ -287,6 +287,57 @@ class SurfaceConfig(BaseModel):
     max: int = 12
 
 
+class SourceShareConfig(BaseModel):
+    """SRCH-26 (18 Nov): how a search's reads are shared between its sources and places.
+
+    The best match is read first, within two soft limits: each ticked country gets about
+    `surface.max ÷ countries` of the reads, and no single source (an API, or Google) more than
+    `ceiling` of them — a source with nothing better gives its share up rather than leave a slot
+    empty. On 18 Nov, 9 of 16 jobs left were one agency's London reposts through Reed.
+    """
+
+    ceiling: float = 0.4
+    # Firecrawl's search, asked instead of Serper when Serper's day is spent or it is failing, at
+    # most this many a search (each costs `SEARCH_CREDITS`, inside the run's credit cap).
+    firecrawl_searches: int = 6
+
+
+class CompanyBriefConfig(BaseModel):
+    """18 Nov: "Learn about the company" on the review screen. One About page per click, read with
+    plain HTTP after robots.txt says yes — never Firecrawl, never LinkedIn. A company's own site
+    isn't a job board, so the terms review in SPEC §11.3 doesn't apply to it; this switch does."""
+
+    enabled: bool = True
+    # The Serper searches a brief may spend finding the company's site, when the job's links
+    # don't name it. One is enough: the first result that isn't a board or a directory.
+    serper_queries: int = 1
+    # How much of the page the brief reads: About pages are short, and the rest is navigation.
+    max_chars: int = 4000
+
+
+class MarketsConfig(BaseModel):
+    """SRCH-11 (17 Nov): the regions WERA searches for now. A country outside them stays in a
+    profile that already has it, but no search goes there and the picker doesn't offer it.
+    North America is the US and Canada."""
+
+    regions: list[str] = ["europe", "north_america"]
+
+
+class SearchProgress(BaseModel):
+    """UX-01: how a board search's bar is shared between its steps, as fractions of the whole.
+
+    Measured on run-92 (16 Nov, 184 s): Google's searches took 75 s (41%), the job APIs about a
+    second plus their originals' searches, and reading and scoring the rest. Planning is a model
+    call when the plan is stale — 10–35 s — and nothing when it isn't. What is left over after
+    these is the closing sweep.
+    """
+
+    planning: float = 0.08
+    apis: float = 0.07
+    searching: float = 0.30
+    reading: float = 0.52  # reading and scoring, which take turns until 8–12 are found
+
+
 class CrawlCacheConfig(BaseModel):
     """SRCH-10: how long WERA may answer a crawl from what the last run already paid for.
 
@@ -352,6 +403,10 @@ class GuardConfig(BaseModel):
     # because this one is keyed on the query alone, not the run: three hours means the same
     # question asked twice in an afternoon is free, and anything posted since is found by evening.
     cache_minutes: int = 180
+    # 18 Nov: per provider, where postings move slowly enough to keep an answer longer — a job API's
+    # answer for a day, Serper's for six hours. Bigger shared buckets make every later search,
+    # and later every person in the same industry, cheaper. Unlisted: `cache_minutes`.
+    cache_minutes_by: dict[str, int] = {}
     # How long a caller that is fetching an answer holds it for the others asking the same thing.
     # Longer than one provider call with its retries, so the waiters rarely give up and pay too.
     lock_seconds: int = 15
@@ -396,12 +451,16 @@ class WeraConfig(BaseModel):
     discovery_max_queries: int = 8
     # SRCH-20: the most Serper queries one search may send, across every tier the 8–12 rule asks for.
     max_serper_queries: int = 30
-    max_scored_per_day: int = 40
+    max_scored_per_day: int = 70
     # Jobs scored at once (`intake.judge`); 1 on SQLite whatever this says.
     scoring_workers: int = 3
     # SRCH-26: 8–12 jobs a search. Replaces MATCH-05's two batches of eight, which scored sixteen
     # whether anyone wanted them or not; `max_scored_per_day` is still the day's ceiling.
     surface: SurfaceConfig = SurfaceConfig()
+    search_progress: SearchProgress = SearchProgress()
+    markets: MarketsConfig = MarketsConfig()
+    source_share: SourceShareConfig = SourceShareConfig()
+    company_brief: CompanyBriefConfig = CompanyBriefConfig()
     # SRCH-30: hosts an open search often returns, each with a posting path there, whose robots.txt
     # is asked before a search alongside the boards'. Those that refuse it are left out.
     unreadable_hint: dict[str, str] = {}

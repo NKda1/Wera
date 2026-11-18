@@ -354,6 +354,30 @@ class Where(NamedTuple):
     loose: list[str]
 
 
+# The North American market is these two (17 Nov); Bermuda, Greenland and Saint Pierre are in the
+# region but are not job markets anyone asked for.
+NORTH_AMERICA_MARKET = {"US", "CA"}
+
+
+def market_countries() -> set[str]:
+    """The countries WERA searches for now: every country in `markets.regions`."""
+    from ..config import wera
+
+    regions = set(wera().markets.regions)
+    return {
+        code
+        for code, country in COUNTRIES.items()
+        if country.region in regions and (country.region != "north_america" or code in NORTH_AMERICA_MARKET)
+    }
+
+
+def searched(w: Where) -> Where:
+    """`w` without the countries outside the markets, and their cities: what a search may ask.
+    The profile keeps them; the filter still reads them (MATCH-01)."""
+    markets = market_countries()
+    return Where([c for c in w.countries if c in markets], {c: v for c, v in w.cities.items() if c in markets}, w.loose)
+
+
 def where(countries: list[str], locations: list[str]) -> Where:
     """Read `countries` and `locations` together (SRCH-11).
 

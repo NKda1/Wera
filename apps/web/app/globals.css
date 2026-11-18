@@ -42,6 +42,13 @@
   --color-red-50: var(--c-red-50);
 
   --color-code: var(--c-code); /* .env snippet ground */
+
+  /* Charts (Upskills, 17 Nov): where a skill the jobs ask for stands against the CV. Validated as a
+     set with the dataviz six checks, each mode against its own surface: light worst adjacent CVD
+     ΔE 9.1, normal-vision 15.3; dark 8.9 and 16.2; all ≥ 3:1 on the card. */
+  --color-viz-covered: var(--c-viz-covered);
+  --color-viz-quick: var(--c-viz-quick);
+  --color-viz-missing: var(--c-viz-missing);
 }
 
 @theme {
@@ -132,6 +139,9 @@
   --c-red-700: #a3261b;
   --c-red-50: #fcebe9;
   --c-code: #0f2419;
+  --c-viz-covered: #146c43;
+  --c-viz-quick: #4c9a6b;
+  --c-viz-missing: #b87503;
 }
 
 :root.dark {
@@ -157,6 +167,9 @@
   --c-red-700: #ff8f84;
   --c-red-50: #2b1513;
   --c-code: #080c0a;
+  --c-viz-covered: #1e7347;
+  --c-viz-quick: #51a974;
+  --c-viz-missing: #c2851b;
 }
 
 @layer base {

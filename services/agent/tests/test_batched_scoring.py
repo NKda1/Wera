@@ -139,7 +139,7 @@ class TestTheDailyCapStillBounds:
     def test_batches_cannot_add_up_to_more_than_the_day_allows(self, client, pool):
         """The cap used to be enforced by handing a whole day's allowance to one run's
         pre-filter, so nothing had to remember anything. Batching made that insufficient."""
-        pool(60)
+        pool(wera().max_scored_per_day + 20)
         cap = wera().max_scored_per_day
 
         total = 0
@@ -152,7 +152,7 @@ class TestTheDailyCapStillBounds:
         assert scored_count() <= cap
 
     def test_a_capped_pass_says_so_rather_than_looking_like_an_empty_pool(self, client, pool):
-        pool(60)
+        pool(wera().max_scored_per_day + 20)
         while intake.judge([], now=NOW, run_ids={}).scored:
             pass
 
@@ -210,7 +210,7 @@ class TestScoreMore:
     def test_it_refuses_once_the_day_is_spent(self, client, pool):
         from wera_agent.errors import ApiError
 
-        pool(60)
+        pool(wera().max_scored_per_day + 20)
         while intake.judge([], now=NOW, run_ids={}).scored:
             pass
 
@@ -268,3 +268,65 @@ class TestTheSearchScoresOnlyWhatItRead:
         judged = intake.judge(fresh, now=NOW, run_ids={}, only_these=True, limit=12)
         assert judged.surfaced == 2 and judged.new_ids == {"job-batch-100", "job-batch-101"}
         assert awaiting() == before  # the 30 waiting are still waiting
+
+
+class TestTheDailyLimitSwitch:
+    """MATCH-05, 17 Nov: the 24-hour ceiling can be switched off in Settings for A/B testing.
+    Off, the weekly model budget is what stops scoring."""
+
+    def _spend_the_day(self):
+        while intake.judge([], now=NOW, run_ids={}).scored:
+            pass
+
+    def test_switched_off_it_scores_past_the_day(self, client, pool):
+        from wera_agent.schemas.settings import SettingsPatch
+
+        pool(wera().max_scored_per_day + 20)
+        self._spend_the_day()
+        assert intake.judge([], now=NOW, run_ids={}).scored == 0
+        with transaction() as session:
+            Store(session, NOW).put_settings(SettingsPatch(daily_score_limit=False))
+
+        judged = intake.judge([], now=NOW, run_ids={})
+
+        assert judged.scored == wera().surface.max
+        assert not any(code == "DAILY_CAP" for code, _ in judged.errors)
+        assert scored_count() > wera().max_scored_per_day
+
+    def test_settings_report_it_and_default_to_on(self, client):
+        from wera_agent.schemas.settings import SettingsPatch
+
+        with transaction() as session:
+            assert Store(session, NOW).get_settings().daily_score_limit is True
+            Store(session, NOW).put_settings(SettingsPatch(daily_score_limit=False))
+        with transaction() as session:
+            assert Store(session, NOW).get_settings().daily_score_limit is False
+
+    def test_the_message_says_when_the_next_slot_frees(self, client, pool):
+        pool(wera().max_scored_per_day + 20)
+        self._spend_the_day()
+        with transaction() as session:
+            message = Store(session, NOW).score_cap_message()
+        assert "in 24 hours" in message and "the next frees at" in message
+        assert "Settings" in message
+
+
+def test_a_retry_is_not_counted_as_another_job(client):
+    """16 Nov: 40 rows held 38 jobs — a failure recorded twice and its retry."""
+    with transaction() as session:
+        for attempt, ok in ((1, False), (2, True), (1, True)):
+            session.add(
+                LlmCallRow(
+                    task="fit.score",
+                    tier="scoring",
+                    model="m",
+                    input_tokens=1,
+                    output_tokens=1,
+                    cost_usd=0.0,
+                    latency_ms=1,
+                    ok=ok,
+                    attempt=attempt,
+                    called_at=iso(NOW - 1000),
+                )
+            )
+    assert scored_count() == 2

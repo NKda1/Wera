@@ -17,7 +17,7 @@ outage can never mark someone's jobs closed by mistake.
 
 import html
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -229,6 +229,29 @@ def _ashby(company: Company, body: dict[str, Any]) -> list[FeedJob]:
 
 
 URLS = {"greenhouse": GREENHOUSE, "lever": LEVER, "ashby": ASHBY}
+
+# Each system's public careers page for one employer: the page a person browses, not the API.
+CAREERS = {
+    "greenhouse": "https://job-boards.greenhouse.io/{token}",
+    "lever": "https://jobs.lever.co/{token}",
+    "ashby": "https://jobs.ashbyhq.com/{token}",
+}
+
+
+def careers_url(ats: Any) -> str | None:
+    """The employer's careers site for a job's `Ats`, or None when WERA doesn't know one.
+
+    An international organisation's is its own host from config/organisations.yaml."""
+    if ats is None:
+        return None
+    if ats.vendor in CAREERS:
+        return CAREERS[ats.vendor].format(token=ats.board_token)
+    from ..config import organisations_file
+
+    org = next((o for o in organisations_file().organisations if o.id == ats.board_token), None)
+    return f"https://{org.host}/" if org else None
+
+
 PARSERS = {"greenhouse": _greenhouse, "lever": _lever, "ashby": _ashby}
 
 
@@ -249,11 +272,15 @@ def fetch_company(company: Company) -> tuple[list[FeedJob], str | None]:
         return [], f"{company.name}: its {company.vendor} board returned something WERA couldn't read"
 
 
-def fetch_all(companies: list[Company]) -> FeedResult:
-    """Every watched company, one at a time. Public boards are small and this runs daily."""
+def fetch_all(companies: list[Company], *, on_read: Callable[[int, int, str], None] | None = None) -> FeedResult:
+    """Every watched company, one at a time. Public boards are small and this runs daily.
+    `on_read(done, total, sentence)` is told each one as it answers, for the run's progress."""
     result = FeedResult()
-    for company in companies:
+    for number, company in enumerate(companies, 1):
         jobs, error = fetch_company(company)
+        if on_read is not None:
+            said = "didn't answer" if error else f"{len(jobs)} open {'job' if len(jobs) == 1 else 'jobs'}"
+            on_read(number, len(companies), f"{company.name} · {said} ({number} of {len(companies)})")
         if error:
             result.errors.append(error)
             continue

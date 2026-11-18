@@ -365,14 +365,24 @@ def to_feed(org: Organisation, item: Listed, description: str) -> FeedJob:
 
 
 def fetch_all(
-    orgs: list[Organisation], *, wanted: Callable[[FeedJob], bool], max_details: int, robots: Robots | None = None
+    orgs: list[Organisation],
+    *,
+    wanted: Callable[[FeedJob], bool],
+    max_details: int,
+    robots: Robots | None = None,
+    on_step: Callable[[float, str], None] | None = None,
+    rank: Callable[[list[tuple[str, str]]], list[float]] | None = None,
 ) -> FeedResult:
     """Every organisation's list, then the full text of the postings `wanted` keeps.
 
     `wanted` is the profile's MATCH-01 filters, judged on the list's own fields. An organisation
     that doesn't answer costs its own postings this run and nothing else; one that answers is
-    in `answered`, with every id it listed in `listed`.
+    in `answered`, with every id it listed in `listed`. `on_step(fraction, sentence)` is told
+    each list and each posting read, naming the organisation (UX-01). With `rank` (17 Nov), the
+    postings that pass are read in full best match to the CV first, not newest first: what
+    decides which forty an organisation's hundreds are narrowed to is the person.
     """
+    tell = on_step or (lambda *_a: None)
     result = FeedResult()
     robots = robots or Robots()
     keep: list[tuple[Organisation, Listed]] = []
@@ -393,6 +403,7 @@ def fetch_all(
             continue
         result.answered.add(f"{org.platform}:{org.id}")
         seen: set[str] = set()
+        matched = 0
         for item in items:
             if item.job_id in seen:
                 continue  # a list that pages can repeat a row across a page boundary
@@ -400,9 +411,21 @@ def fetch_all(
             result.listed.add(f"{org.platform}:{org.id}:{item.job_id}")
             if wanted(to_feed(org, item, item.snippet)):
                 keep.append((org, item))
-    # Newest first, so the cap leaves the oldest for the next run; undated ones last.
+                matched += 1
+        tell(0.5 * (orgs.index(org) + 1) / len(orgs), f"{org.name} · {len(seen)} listed, {matched} match your profile")
+    # Newest first, so the cap leaves the oldest for the next run; undated ones last. Ranked, the
+    # best matches first, newest among equals.
     keep.sort(key=lambda pair: pair[1].posted_at or "", reverse=True)
-    for org, item in keep[:max_details]:
+    if rank is not None and keep:
+        try:
+            scores = rank([(item.title, item.snippet or "") for _org, item in keep])
+            order = sorted(range(len(keep)), key=lambda i: -scores[i])
+            keep = [keep[i] for i in order]
+        except Exception:  # noqa: BLE001 — ranking is an improvement, never a reason to read nothing
+            logfire.warn("Couldn't rank the organisations' postings; reading the newest first")
+    reading = keep[:max_details]
+    for number, (org, item) in enumerate(reading, 1):
+        tell(0.5 + 0.5 * number / len(reading), f"{org.name} · reading {number} of {len(reading)}: {item.title}")
         try:
             if not robots.allows(item.url):
                 continue

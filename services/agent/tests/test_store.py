@@ -127,9 +127,9 @@ class TestIntake:
 
     def test_estimate_and_cancel(self, api):
         # SRCH-20: the Serper searches a search always sends — tier 1 of the plan — counted from
-        # the same planned queries the run sends, and never more than `max_serper_queries`. The
-        # demo profile's five cities in five countries make tier 1 thirty-three, so the cap shows.
-        assert api.ok("GET", "/intake/estimate?channels=board_search")["queries"] == 30
+        # the same planned queries the run sends, and never more than `max_serper_queries`. Tier 1
+        # is the open web since 17 Nov: the demo profile's top three titles in its five countries.
+        assert api.ok("GET", "/intake/estimate?channels=board_search")["queries"] == 15
         run = api.ok("POST", "/intake/run", {"channels": ["watchlist"]})["runIds"][0]
         assert api.ok("POST", f"/intake/runs/{run}/cancel")["status"] == "cancelled"
 
@@ -332,7 +332,7 @@ class TestANewCvReJudgesTheShortlist:
 
         job = store.list_jobs("new")[0]
         row = store.s.get(FitReportRow, job.id)
-        row.cv_version, row.job_hash = None, None
+        row.cv_version, row.cv_hash, row.job_hash = None, None, None
         store.s.flush()
         self.save_a_new_cv(store)
         assert not store.get_job(job.id).fit.stale
