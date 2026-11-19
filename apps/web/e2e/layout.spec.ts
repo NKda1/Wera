@@ -49,15 +49,26 @@ for (const size of SIZES) {
         const overlaps = c.x < box.x + box.width && box.x < c.x + c.width && c.y < box.y + box.height && box.y < c.y + c.height;
         expect(overlaps, `${await chip.textContent()} sits under the sort switch`).toBe(false);
       }
-      // A phone gets one row that scrolls sideways, on purpose. With room, the chips wrap: none may
-      // be clipped out of sight.
-      if (size.width >= 768) {
-        const { scroll, client } = await filters.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
-        expect(scroll, "filter chips are clipped").toBeLessThanOrEqual(client);
-      }
+      // The dropdowns wrap rather than scroll, at every width: a scrolling row would clip the
+      // popover that opens under a button. None may be clipped out of sight.
+      const { scroll, client } = await filters.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
+      expect(scroll, "filter buttons are clipped").toBeLessThanOrEqual(client);
     });
   });
 }
+
+test.describe("the jobs filters at 1440px", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("sit on one row", async ({ page }) => {
+    await page.goto("/jobs");
+    const menus = page.getByRole("group", { name: "Filter jobs" }).locator("button[aria-haspopup]");
+    await expect(menus.first()).toBeVisible();
+    expect(await menus.count(), "expected several filter dropdowns").toBeGreaterThan(1);
+    const ys = await Promise.all((await menus.all()).map(async (m) => (await m.boundingBox())!.y));
+    expect(new Set(ys).size, `dropdowns at y = ${ys.join(", ")}`).toBe(1);
+  });
+});
 
 test.describe("the phone top bar", () => {
   test.use({ viewport: { width: 390, height: 844 } });

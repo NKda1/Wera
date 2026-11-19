@@ -1684,6 +1684,11 @@ class Store:
         """Which job an application belongs to — the graph's threads are keyed by job."""
         return self._app_row(app_id).job_id
 
+    def drafting_applications(self) -> list[tuple[str, str]]:
+        """`(job_id, application_id)` for every application mid-draft (REL-03)."""
+        rows = self.s.execute(select(ApplicationRow.job_id, ApplicationRow.id).where(ApplicationRow.status == "drafting")).all()
+        return [(job_id, app_id) for job_id, app_id in rows]
+
     def drafting_job_ids(self) -> list[str]:
         """Jobs whose application is mid-draft — the candidates for restart recovery (REL-03)."""
         return list(self.s.scalars(select(ApplicationRow.job_id).where(ApplicationRow.status == "drafting")).all())

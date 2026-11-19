@@ -32,9 +32,14 @@ test("J2: search, filter and approve from the shortlist", async ({ page }) => {
   await expect(page.getByText("Search finished: 2 new jobs added.")).toBeVisible();
   await expect(cards(page)).toHaveCount(12);
 
-  await page.getByRole("group", { name: "Fit" }).getByRole("button", { name: /^8\+/ }).click();
+  const filters = page.getByRole("group", { name: "Filter jobs" });
+  await filters.getByRole("button", { name: /^Fit/ }).click();
+  await page.getByRole("checkbox", { name: /8\+/ }).check();
+  await page.keyboard.press("Escape");
   await expect(cards(page)).toHaveCount(2);
-  await page.getByRole("button", { name: /^All/ }).click();
+  await expect(page.getByText("Fit: 8+", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Clear all" }).click();
+  await expect(cards(page)).toHaveCount(12);
 
   const fernhill = page.getByRole("region", { name: "ML Engineer, Graduate" });
   await fernhill.getByRole("button", { name: "Approve" }).click();
@@ -45,6 +50,39 @@ test("J2: search, filter and approve from the shortlist", async ({ page }) => {
   await harbour.getByRole("button", { name: "Snooze" }).click();
   await page.getByRole("menuitem", { name: "3 days" }).click();
   await expect(cards(page)).toHaveCount(10);
+});
+
+test("Filters: a dropdown per group", async ({ page }) => {
+  await page.goto("/jobs");
+  // The profile card above has a "Where" button of its own.
+  const where = page.getByRole("group", { name: "Filter jobs" }).getByRole("button", { name: /^Where/ });
+  await where.click();
+  const dialog = page.getByRole("dialog", { name: "Where filters" });
+  await dialog.getByRole("checkbox", { name: /^London/ }).check();
+  await expect(page.getByText("Where: London")).toBeVisible();
+  await expect(where).toHaveText(/^Where · London/);
+
+  // Clear empties the group but keeps focus in the popover, so the keyboard isn't thrown to <body>.
+  await dialog.getByRole("button", { name: "Clear" }).click();
+  await expect(page.getByText("Where: London")).toHaveCount(0);
+  await expect(dialog.locator(":focus")).toHaveCount(1);
+  await page.keyboard.press("ArrowDown");
+  await expect(dialog.getByRole("checkbox").and(dialog.locator(":focus"))).toHaveCount(1);
+  await dialog.getByRole("checkbox", { name: /^London/ }).check();
+
+  // An outside click closes it and it closes.
+  await page.getByRole("heading", { name: "Today's shortlist" }).click();
+  await expect(dialog).toHaveCount(0);
+
+  await where.click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(where).toBeFocused();
+
+  await page.getByRole("button", { name: "Remove Where: London" }).click();
+  await expect(page.getByText("Where: London")).toHaveCount(0);
+  await expect(where).toHaveText("Where");
 });
 
 test("Urgency grouping files jobs by how old the posting is, and hedges where the date is a guess", async ({ page }) => {

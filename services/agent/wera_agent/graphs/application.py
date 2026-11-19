@@ -197,6 +197,16 @@ async def advance(job_id: str, resume: dict[str, Any] | None) -> None:
         graph = build().compile(checkpointer=saver)
         config = config_for(job_id)
         snapshot = await graph.aget_state(config)
+        if snapshot.created_at is not None and _is_gate1(resume) and _waiting_at(snapshot) != 1:
+            # A Gate 1 decision for a thread that isn't at Gate 1: the thread belongs to an
+            # application that no longer exists. Threads are keyed by job and outlive their
+            # application — the 18 Nov CV-edit wipe deleted applications and kept every thread, and
+            # a job found again keeps its id — so the approval was being delivered to the old
+            # thread's Gate 2, which read it as "approve the pack", ended, and left the new
+            # application drafting with nothing running it. Start this job's thread again.
+            logfire.warn("Thread for {job_id} is left from an application that is gone; starting it again", job_id=job_id)
+            await saver.adelete_thread(thread_id(job_id))
+            snapshot = await graph.aget_state(config)
         if snapshot.created_at is None:
             # Lazily started: runs straight to Gate 1 and waits there.
             await graph.ainvoke(AppState(job_id=job_id), config)
@@ -211,6 +221,19 @@ async def advance(job_id: str, resume: dict[str, Any] | None) -> None:
             # A failed model call still cost money; its row was rolled back with the step that
             # failed, so it is written here (see gateway._record).
             flush_unrecorded()
+
+
+def _is_gate1(resume: dict[str, Any] | None) -> bool:
+    """Gate 1 decisions carry the application the store created (`applicationId`, None for a snooze
+    or a rejection); Gate 2 decisions never do (`routes.approve`, `regenerate`, `patch_application`)."""
+    return isinstance(resume, dict) and "applicationId" in resume
+
+
+def _waiting_at(snapshot: Any) -> int | None:
+    for item in snapshot.interrupts:
+        if isinstance(item.value, dict) and "gate" in item.value:
+            return int(item.value["gate"])
+    return None
 
 
 async def _record_failure(job_id: str, exc: BaseException) -> None:
@@ -231,24 +254,33 @@ async def resume_unfinished() -> int:
     from .checkpointer import checkpointer
 
     with transaction() as session:
-        job_ids = Store(session).drafting_job_ids()
-    if not job_ids:
+        drafting = Store(session).drafting_applications()
+    if not drafting:
         return 0
 
     resumed = 0
+    restart: list[tuple[str, str]] = []
     async with checkpointer() as saver:
         graph = build().compile(checkpointer=saver)
-        for job_id in job_ids:
+        for job_id, app_id in drafting:
             config = config_for(job_id)
             snapshot = await graph.aget_state(config)
-            if snapshot.created_at is None or not snapshot.next or snapshot.interrupts:
+            if snapshot.created_at is not None and snapshot.next and not snapshot.interrupts:
+                logfire.info("Resuming {job_id} after restart", job_id=job_id)
+                try:
+                    await graph.ainvoke(None, config)
+                    resumed += 1
+                except Exception as exc:  # noqa: BLE001
+                    await _record_failure(job_id, exc)
                 continue
-            logfire.info("Resuming {job_id} after restart", job_id=job_id)
-            try:
-                await graph.ainvoke(None, config)
-                resumed += 1
-            except Exception as exc:  # noqa: BLE001
-                await _record_failure(job_id, exc)
+            # Drafting, but nothing is running it: no thread at all, a thread that has ended, or one
+            # waiting at a gate (an application approved onto a thread left from one that is gone,
+            # before `advance` knew to start again). Draft it from the start.
+            restart.append((job_id, app_id))
+    for job_id, app_id in restart:
+        logfire.warn("Application {app_id} was drafting with nothing running it; drafting it again", app_id=app_id)
+        await advance(job_id, {"action": "approve", "applicationId": app_id})
+        resumed += 1
     return resumed
 
 

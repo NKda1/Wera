@@ -14,9 +14,10 @@ import { Dialog } from "@/lib/ui/Dialog";
 import { Label, Textarea } from "@/lib/ui/Field";
 import { Pill } from "@/lib/ui/Pill";
 import { ScoreRing } from "@/lib/ui/ScoreRing";
-import { useScrollEdges } from "@/lib/ui/scrollEdges";
 import { useToast } from "@/lib/ui/Toast";
 import dynamic from "next/dynamic";
+import { FilterMenu } from "./FilterMenu";
+import { levelLabel, workLabel } from "./filters";
 import { JobCard } from "./JobCard";
 import { ProfileCard, type SiteOption } from "./ProfileCard";
 import { RunPanel } from "./SearchRun";
@@ -46,12 +47,12 @@ const GROUP_LABELS: Record<FacetGroup, string> = {
   score: "Fit",
 };
 
-// SRCH-25 (17 Nov): searches offered as chips, newest first; older ones are behind "+N".
-const MAX_SEARCHES = 6;
+// SRCH-25 (17 Nov): searches offered in the "Found in" dropdown, newest first. A dropdown has room
+// for a long list (and a search box past eight), so these only stop it growing without end.
+const MAX_SEARCHES = 20;
 
-// How many places to offer. Enough to cover a real shortlist's spread without a chip row that
-// wraps four times; the rest are reachable by sorting and reading.
-const MAX_PLACES = 8;
+// How many places to offer, most common first; same reasoning as MAX_SEARCHES.
+const MAX_PLACES = 40;
 
 const SOURCE_LABELS: Record<string, string> = {
   board_search: "Board search",
@@ -88,13 +89,13 @@ function facetsFor(jobs: ScoredJob[]): Facet[] {
     out.push({
       id: `level:${level}`,
       group: "level",
-      label: level.replace(/_/g, " "),
+      label: levelLabel(level),
       count,
       test: (j) => j.seniority === level,
     });
   }
   for (const [mode, count] of tally((j) => j.remote ?? undefined)) {
-    out.push({ id: `work:${mode}`, group: "work", label: mode, count, test: (j) => j.remote === mode });
+    out.push({ id: `work:${mode}`, group: "work", label: workLabel(mode), count, test: (j) => j.remote === mode });
   }
   for (const [channel, count] of tally((j) => j.sources[0]?.channel)) {
     out.push({
@@ -205,7 +206,6 @@ export function JobsScreen({
   // load, because a card that jumped down the list the moment it was clicked would be worse.
   const [seen, setSeen] = useState<Set<string>>(new Set());
   const [newOnly, setNewOnly] = useState(false);
-  const [openGroups, setOpenGroups] = useState<Set<FacetGroup>>(new Set());
 
   const live = jobs.filter((j) => !removed.has(j.id));
   const fresh = (j: ScoredJob) => isNew(j) && !seen.has(j.id);
@@ -213,8 +213,8 @@ export function JobsScreen({
   // Rank is the fit position in the whole shortlist, so it stays stable under filters.
   const rankOf = useMemo(() => new Map([...live].sort((a, b) => b.fit.total - a.fit.total).map((j, i) => [j.id, i + 1])), [live]);
   const facets = useMemo(() => facetsFor(live), [live]);
-  const chipRow = useRef<HTMLDivElement>(null);
-  const chipFade = useScrollEdges(chipRow, `${facets.length}|${[...openGroups].join()}|${freshJobs.length}`);
+  // A selected id with no facet — a place that has dropped off the shortlist — shows no chip.
+  const chosenFacets = facets.filter((f) => filters.includes(f.id));
   const visible = useMemo(() => {
     // Grouped first, so chips within a group are an "either" and groups are an "and". An id with
     // no matching facet — a place that has dropped off the shortlist since it was picked — simply
@@ -475,66 +475,71 @@ export function JobsScreen({
         ) : null}
       </div>
 
-      {/* One quiet toolbar instead of a stack of chip rows and a dropdown: the filters (groups
-          split by a hairline, each chip with its count, so it's a decision before a click), and
-          sort as a three-way switch. On a phone the chips are one row that scrolls sideways; with
-          room they wrap, and the sort switch sits beside them only once both fit — so no chip is
-          ever hidden behind it. */}
-      <div className="mt-12 flex flex-col gap-3 border-b border-line pb-4 @4xl:flex-row @4xl:items-start @4xl:justify-between @4xl:gap-6">
-        <div
-          ref={chipRow}
-          style={chipFade}
-          className="scrollbar-none -mx-4 flex min-w-0 items-center gap-1.5 overflow-x-auto px-4 sm:mx-0 sm:px-0 @xl:flex-wrap @xl:overflow-visible @4xl:flex-1"
-          role="group"
-          aria-label="Filter jobs"
-        >
-          <FilterChip
-            active={filters.length === 0 && !newOnly}
-            onClick={() => {
-              setFilters([]);
-              setNewOnly(false);
-            }}
-          >
-            All <Count>{live.length}</Count>
-          </FilterChip>
-          {freshJobs.length ? (
-            <FilterChip active={newOnly} onClick={() => setNewOnly((n) => !n)}>
-              New <Count>{freshJobs.length}</Count>
+      {/* One quiet toolbar instead of a stack of chip rows: a dropdown per filter group (each option
+          with its count, so it's a decision before a click) and sort as a switch. The row wraps at
+          every width and never scrolls — a popover under a button would be clipped by a scrolling
+          row — and the sort switch sits beside it only once both fit. What is chosen is repeated
+          underneath as removable chips, so a filter set in a closed dropdown is still in sight. */}
+      <div className="mt-12 flex flex-col gap-3 border-b border-line pb-4">
+        <div className="flex flex-col gap-3 @4xl:flex-row @4xl:items-start @4xl:justify-between @4xl:gap-6">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5 @4xl:flex-1" role="group" aria-label="Filter jobs">
+            <FilterChip
+              active={filters.length === 0 && !newOnly}
+              onClick={() => {
+                setFilters([]);
+                setNewOnly(false);
+              }}
+            >
+              All <Count>{live.length}</Count>
             </FilterChip>
-          ) : null}
-          {(Object.keys(GROUP_LABELS) as FacetGroup[]).map((group) => {
-            const options = facets.filter((f) => f.group === group);
-            if (options.length < 2) return null; // one option filters nothing out
-            // The five biggest, plus any already chosen; "+N" opens the rest of this group in place.
-            const shown = openGroups.has(group) ? options : options.filter((f, i) => i < FACETS_SHOWN || filters.includes(f.id));
-            const hidden = options.length - shown.length;
-            return (
-              <span key={group} className="flex shrink-0 items-center gap-1.5" role="group" aria-label={GROUP_LABELS[group]}>
-                <span className="mx-1.5 h-5 w-px bg-line" aria-hidden="true" />
-                {shown.map((f) => (
-                  <FilterChip
-                    key={f.id}
-                    active={filters.includes(f.id)}
-                    onClick={() => setFilters((fs) => (fs.includes(f.id) ? fs.filter((x) => x !== f.id) : [...fs, f.id]))}
-                  >
-                    {f.label} <Count>{f.count}</Count>
-                  </FilterChip>
-                ))}
-                {hidden > 0 ? (
-                  <button
-                    type="button"
-                    onClick={() => setOpenGroups((g) => new Set(g).add(group))}
-                    className="min-h-9 shrink-0 px-2 text-[13px] font-semibold text-forest-700 hover:underline pointer-coarse:min-h-11"
-                    aria-label={`Show ${hidden} more ${GROUP_LABELS[group].toLowerCase()}`}
-                  >
-                    +{hidden}
-                  </button>
-                ) : null}
-              </span>
-            );
-          })}
+            {freshJobs.length ? (
+              <FilterChip active={newOnly} onClick={() => setNewOnly((n) => !n)}>
+                New <Count>{freshJobs.length}</Count>
+              </FilterChip>
+            ) : null}
+            {(Object.keys(GROUP_LABELS) as FacetGroup[]).map((group) => {
+              const options = facets.filter((f) => f.group === group);
+              if (options.length < 2) return null; // one option filters nothing out
+              return (
+                <FilterMenu
+                  key={group}
+                  group={GROUP_LABELS[group]}
+                  options={options}
+                  selected={options.filter((f) => filters.includes(f.id)).map((f) => f.id)}
+                  onToggle={(id) => setFilters((fs) => (fs.includes(id) ? fs.filter((x) => x !== id) : [...fs, id]))}
+                  onClear={() => setFilters((fs) => fs.filter((id) => !options.some((f) => f.id === id)))}
+                />
+              );
+            })}
+          </div>
+          <SortSwitch value={sort} onChange={setSort} />
         </div>
-        <SortSwitch value={sort} onChange={setSort} />
+        {chosenFacets.length ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {chosenFacets.map((f) => (
+              <span key={f.id} className="inline-flex min-h-9 items-center gap-1 border border-forest-700 bg-accent pl-3 text-[13px] font-semibold text-white pointer-coarse:min-h-11">
+                {GROUP_LABELS[f.group]}: {f.label}
+                <button
+                  type="button"
+                  aria-label={`Remove ${GROUP_LABELS[f.group]}: ${f.label}`}
+                  onClick={() => setFilters((fs) => fs.filter((x) => x !== f.id))}
+                  className="inline-flex size-9 items-center justify-center hover:bg-white/15 pointer-coarse:size-11"
+                >
+                  <svg className="size-3.5" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </span>
+            ))}
+            <button
+              type="button"
+              onClick={() => setFilters([])}
+              className="min-h-9 px-2 text-[13px] font-semibold text-forest-700 hover:underline pointer-coarse:min-h-11"
+            >
+              Clear all
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <section aria-label="Shortlisted jobs" className="mt-4 flex flex-col gap-4">
@@ -836,8 +841,6 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
 function Count({ children }: { children: React.ReactNode }) {
   return <span className="font-normal tabular-nums opacity-70">{children}</span>;
 }
-
-const FACETS_SHOWN = 5;
 
 const SORTS: { id: Sort; label: string }[] = [
   { id: "score", label: "Best match" },

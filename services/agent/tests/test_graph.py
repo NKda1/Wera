@@ -115,12 +115,19 @@ def _versions(app_id: str, kind_: str) -> int:
 
 
 class TestRestartRecovery:
-    def test_a_thread_waiting_at_a_gate_is_left_alone(self, client, approved):
+    def test_a_thread_waiting_at_a_gate_is_left_alone(self, client):
         """REL-03: waiting for a person is not the same as crashed."""
-        approved()
         run(graph.advance(JOB, None))
         assert run(graph.resume_unfinished()) == 0
         assert run(graph.pending_gate(JOB)) == 1
+
+    def test_an_approval_lost_in_a_restart_is_drafted(self, client, approved):
+        """The person approved (the application is drafting) and the process went before the
+        approval reached the thread, still at Gate 1. Nothing else would ever draft it."""
+        app_id = approved()
+        run(graph.advance(JOB, None))
+        assert run(graph.resume_unfinished()) == 1
+        assert status_of(app_id) == "ready_for_review"
 
     def test_nothing_to_resume_when_no_application_is_drafting(self, client):
         assert run(graph.resume_unfinished()) == 0
@@ -545,3 +552,55 @@ class TestProgress:
         assert steps["answers.draft"] == "answers"
         with transaction() as session:
             assert Store(session)._app_row(app_id).draft_step is None
+
+
+class TestAThreadLeftOverFromAnApplicationThatIsGone:
+    """18 Nov: the CV-edit wipe deleted applications and kept their graph threads (keyed by job).
+    A job found again keeps its id, so approving it resumed the old thread — waiting at Gate 2 —
+    with a Gate 1 approval, which Gate 2 read as "approve the pack". The thread ended and the new
+    application sat in `drafting` with nothing running it, for as long as anyone waited."""
+
+    @staticmethod
+    def wipe(app_id: str) -> None:
+        """What `reset_job_world` did to the application, leaving the checkpoints."""
+        from wera_agent.services.store import save_job
+
+        with transaction() as session:
+            for doc in session.scalars(select(DocumentRow).where(DocumentRow.application_id == app_id)).all():
+                session.delete(doc)
+            session.delete(session.get(ApplicationRow, app_id))
+            store = Store(session)
+            job = store._job(store._job_row(JOB))
+            job.status = "new"
+            save_job(session, job)
+
+    def test_approving_the_job_again_drafts_a_new_pack(self, client, approved):
+        first = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": first}))
+        assert run(graph.pending_gate(JOB)) == 2
+        self.wipe(first)
+
+        second = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": second}))
+
+        assert status_of(second) == "ready_for_review"
+        assert documents(second) == {"analysis", "cv", "letter", "ats", "answers"}
+        assert run(graph.pending_gate(JOB)) == 2
+
+    def test_one_already_stuck_is_picked_up_on_restart(self, client, approved):
+        """The applications stuck before the fix: drafting, on a thread that has ended."""
+        first = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": first}))
+        run(graph.advance(JOB, {"action": "approve"}))  # Gate 2: the old thread is finished
+        self.wipe(first)
+        second = approved()  # drafting, and nothing will ever advance it
+
+        assert run(graph.resume_unfinished()) == 1
+        assert status_of(second) == "ready_for_review"
+
+    def test_a_gate_2_decision_still_goes_to_gate_2(self, client, approved):
+        app_id = approved()
+        run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
+        run(graph.advance(JOB, {"action": "approve"}))
+        assert run(graph.pending_gate(JOB)) is None
+        assert status_of(app_id) == "ready_for_review"  # the store, not the graph, records approval
