@@ -86,6 +86,31 @@ class TestTheShares:
         )
 
 
+class TestACountryThatRunsDry:
+    """18 Nov: the US got 2 of its 3 reads in two runs because only 2 US postings were left, and
+    nothing said so. The floor still gives way; the log now says why."""
+
+    def test_a_country_with_too_few_postings_is_short(self):
+        ordered = [*(posting(i, country="gb") for i in range(12)), *(posting(i, country="us") for i in range(2))]
+        balance = Balance(["gb", "us"], per_run=12, ceiling=1.0)
+        assert len(balance.choose(ordered, 12)) == 12
+        assert balance.short() == [("us", 2, 6)]
+        assert balance.split().endswith("· us 2 of 6, none left to read")
+
+    def test_a_country_that_got_its_floor_is_not_short(self):
+        ordered = [*(posting(i, country="gb") for i in range(12)), *(posting(i, country="us") for i in range(12))]
+        balance = Balance(["gb", "us"], per_run=12, ceiling=1.0)
+        balance.choose(ordered, 12)
+        assert balance.short() == []
+        assert "none left" not in balance.split()
+
+    def test_a_search_that_stopped_early_is_not_a_country_running_dry(self):
+        ordered = [*(posting(i, country="gb") for i in range(12)), *(posting(i, country="us") for i in range(12))]
+        balance = Balance(["gb", "us"], per_run=12, ceiling=1.0)
+        balance.choose(ordered, 4)
+        assert balance.short() == []
+
+
 class TestASharedPool:
     def test_two_readers_rank_one_pool_by_their_own_cvs(self, r):
         """The pool holds postings only; each reader's own rank decides their order, and what one

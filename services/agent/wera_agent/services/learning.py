@@ -130,20 +130,25 @@ def learn(session: Session, cv_version: int, profile: SearchProfile) -> Learned:
     unhidden_places: Counter = Counter()
     rejected_titles: list[tuple[str, str]] = []
     approved_title_list: list[str] = []
-    rows = session.scalars(select(DecisionRow).where(DecisionRow.gate == 1, DecisionRow.features.is_not(None))).all()
+    # Gate 1's decisions, and Gate 2's discards: throwing a finished pack away is a "no" to the job,
+    # read as a reject (19 Nov). A cancelled draft (`cancel`) says nothing about the job.
+    gate_1 = DecisionRow.gate == 1
+    discarded = (DecisionRow.gate == 2) & (DecisionRow.decision == "discard")
+    rows = session.scalars(select(DecisionRow).where(gate_1 | discarded, DecisionRow.features.is_not(None))).all()
     counted = 0
     for row in rows:
         f = row.features or {}
         weight = 1.0 if row.cv_version == cv_version else OLDER_CV_WEIGHT
         tokens = set(f.get("tokens") or []) - target_words
         code = row.reason_code
-        if row.decision == "reject" and code in ABOUT_THE_WORK:
+        decision = "reject" if row.decision == "discard" else row.decision
+        if decision == "reject" and code in ABOUT_THE_WORK:
             counted += 1
             rejected_titles.append((f.get("title") or "", code))
             for t in tokens:
                 words[t].against += weight
                 words[t].reasons[code] += 1
-        elif row.decision in POSITIVE:
+        elif decision in POSITIVE:
             counted += 1
             for t in tokens:
                 words[t].for_ += weight
@@ -151,16 +156,16 @@ def learn(session: Session, cv_version: int, profile: SearchProfile) -> Learned:
             approved_title_list.append(title)
             if title and not filters.matches_a_target(title, profile.titles):
                 approved_titles[_title_key(title)] += 1
-            if row.decision == "unhide" and (f.get("hiddenReason") or "").startswith("Location") and f.get("city"):
+            if decision == "unhide" and (f.get("hiddenReason") or "").startswith("Location") and f.get("city"):
                 unhidden_places[f["city"]] += 1
-        elif row.decision == "reject" and code == "pay_too_low" and f.get("salary"):
+        elif decision == "reject" and code == "pay_too_low" and f.get("salary"):
             counted += 1
             s = f["salary"]
             top = s.get("max") or s.get("min")
             if top:
                 key = (s.get("currency") or "", s.get("period") or "")
                 pay_floor[key] = max(pay_floor.get(key, 0.0), float(top))
-        elif row.decision == "reject":
+        elif decision == "reject":
             counted += 1
     return Learned(
         words=dict(words),

@@ -16,6 +16,13 @@
           "maxLength": 4000,
           "type": "string"
         },
+        "reason": {
+          "maxLength": 200,
+          "type": "string"
+        },
+        "reasonCode": {
+          "$ref": "#/$defs/ReasonCode"
+        },
         "status": {
           "$ref": "#/$defs/ApplicationStatus"
         }

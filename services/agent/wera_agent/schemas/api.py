@@ -190,6 +190,9 @@ class DecisionIn(Model):
 
 class ApplicationPatchIn(Model):
     status: Opt[ApplicationStatus] = None
+    # With `status: "discarded"`: why, the same reasons as a Gate 1 reject (MATCH-11, 19 Nov).
+    reason_code: Opt[ReasonCode] = None
+    reason: Opt[Annotated[str, Field(max_length=200)]] = None
     notes: Opt[Annotated[str, Field(max_length=4000)]] = None
     follow_up_at: str | None = None  # explicit null clears it; absent leaves it alone
 

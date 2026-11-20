@@ -43,13 +43,6 @@ NOT_THE_COMPANY = (
     "wellfound.com", "builtin.com", "theorg.com", "craft.co", "owler.com", "comparably.com", "nhs.uk",
 )  # fmt: skip
 
-# A recruiter posting on an employer's behalf, by how agencies name themselves.
-_AGENCY = re.compile(
-    r"\b(recruitment|recruiting|recruiters?|staffing|resourcing|personnel|headhunt\w*|talent (?:solutions|partners|acquisition)|"
-    r"search (?:group|partners)|employment (?:agency|services))\b",
-    re.I,
-)
-
 ABOUT_PATHS = ("/about", "/about-us", "/")
 _DROP = ("script", "style", "noscript", "svg", "nav", "header", "footer", "form", "iframe", "button", "select", "template")
 
@@ -62,10 +55,6 @@ class Page:
     @property
     def text_hash(self) -> str:
         return hashlib.sha256(self.text.encode()).hexdigest()[:32]
-
-
-def is_agency(company: str) -> bool:
-    return dedupe.is_intermediary(company) or bool(_AGENCY.search(company))
 
 
 def _excluded(host: str) -> bool:
@@ -194,7 +183,7 @@ def read(job: Job) -> tuple[Page | None, str | None]:
         return None, "Reading company sites is turned off (company_brief.enabled)."
     if get_settings().wera_demo_mode:
         return None, "Demo mode reads no web pages, so this brief is from the post alone."
-    if is_agency(job.company):
+    if dedupe.is_agency(job.company):
         return None, f"This post is {job.company}'s, an agency or job board, so the employer isn't named."
     site = site_from_links(job) or site_from_search(job.company)
     if site is None:

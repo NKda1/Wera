@@ -3,21 +3,22 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiRequestError, type Decision, type ReasonCode } from "@/lib/api";
+import { api, ApiRequestError, type Decision } from "@/lib/api";
 import { formatDate, formatLocation, formatPostedAge, foundLabel, isNew, URGENCY_GROUPS } from "@/lib/format";
 import type { IntakeChannel, IntakeRun, PlaceOption, ScoredJob, SearchProfile, ShortlistMeta, SuggestionList } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { LearningCard } from "./LearningCard";
 import { Card } from "@/lib/ui/Card";
+import { FilterChip } from "@/lib/ui/Chip";
 import { cn } from "@/lib/ui/cn";
 import { Dialog } from "@/lib/ui/Dialog";
-import { Label, Textarea } from "@/lib/ui/Field";
 import { Pill } from "@/lib/ui/Pill";
+import { ReasonDialog } from "@/lib/ui/ReasonDialog";
 import { ScoreRing } from "@/lib/ui/ScoreRing";
 import { useToast } from "@/lib/ui/Toast";
 import dynamic from "next/dynamic";
 import { FilterMenu } from "./FilterMenu";
-import { levelLabel, workLabel } from "./filters";
+import { cityKey, groupCities, levelLabel, workLabel } from "./filters";
 import { JobCard } from "./JobCard";
 import { ProfileCard, type SiteOption } from "./ProfileCard";
 import { RunPanel } from "./SearchRun";
@@ -82,8 +83,10 @@ function facetsFor(jobs: ScoredJob[]): Facet[] {
     return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   };
 
-  for (const [city, count] of tally((j) => j.location.city?.trim()).slice(0, MAX_PLACES)) {
-    out.push({ id: `place:${city}`, group: "place", label: city, count, test: (j) => j.location.city?.trim() === city });
+  // Case-insensitive (19 Nov): jobs saved before the agent spelt a city one way carried "london"
+  // beside "London", and the list offered both. A chip's id and test use the case-folded key.
+  for (const { key, label, count } of groupCities(jobs.map((j) => j.location.city)).slice(0, MAX_PLACES)) {
+    out.push({ id: `place:${key}`, group: "place", label, count, test: (j) => cityKey(j.location.city) === key });
   }
   for (const [level, count] of tally((j) => j.seniority ?? undefined)) {
     out.push({
@@ -130,16 +133,6 @@ function facetsFor(jobs: ScoredJob[]): Facet[] {
   }
   return out;
 }
-
-// MATCH-11: each chip is sent as its code, and anything typed as a note beside it — the dialog
-// used to send one or the other, and only the code is something WERA can learn from.
-const REJECT_REASONS: { code: ReasonCode; label: string }[] = [
-  { code: "wrong_level", label: "Wrong level" },
-  { code: "wrong_location", label: "Wrong location" },
-  { code: "not_my_field", label: "Not my field" },
-  { code: "pay_too_low", label: "Pay too low" },
-  { code: "applied_elsewhere", label: "Already applied elsewhere" },
-];
 
 const NEW_FROM: Record<string, string> = {
   board_search: "the search",
@@ -757,7 +750,14 @@ export function JobsScreen({
 
       {importing ? <ImportDialog onClose={() => setImporting(false)} /> : null}
       {searching ? <SearchDialog profile={profile} places={places} onClose={() => setSearching(false)} onStart={startSearch} /> : null}
-      {rejecting ? <RejectDialog job={rejecting} onClose={() => setRejecting(undefined)} onReject={(reasonCode, reason) => (setRejecting(undefined), decide(rejecting, { action: "reject", reasonCode, reason }))} /> : null}
+      {rejecting ? (
+        <ReasonDialog
+          title={`Reject ${rejecting.title}?`}
+          action="Reject"
+          onClose={() => setRejecting(undefined)}
+          onConfirm={(reasonCode, reason) => (setRejecting(undefined), decide(rejecting, { action: "reject", reasonCode, reason }))}
+        />
+      ) : null}
 
       <Dialog
         open={topN}
@@ -822,22 +822,6 @@ export function JobsScreen({
   );
 }
 
-function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={cn(
-        "inline-flex min-h-9 shrink-0 items-center gap-1.5 border px-3 text-[13px] font-semibold transition-colors duration-150 pointer-coarse:min-h-11",
-        active ? "border-forest-700 bg-accent text-white" : "border-line bg-surface text-ink hover:border-forest-700 hover:text-forest-700",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
 function Count({ children }: { children: React.ReactNode }) {
   return <span className="font-normal tabular-nums opacity-70">{children}</span>;
 }
@@ -889,43 +873,4 @@ function useProgressive(total: number, resetKey: string) {
     return () => io.disconnect();
   }, [limit, total]);
   return { limit, sentinel };
-}
-
-function RejectDialog({ job, onClose, onReject }: { job: ScoredJob; onClose: () => void; onReject: (reasonCode?: ReasonCode, note?: string) => void }) {
-  const [reason, setReason] = useState<ReasonCode>();
-  const [other, setOther] = useState("");
-  return (
-    <Dialog
-      open
-      onClose={onClose}
-      size="sm"
-      title={`Reject ${job.title}?`}
-      description="A reason is optional. WERA learns from it: jobs like this move down your list, and it may suggest a change to your profile."
-      footer={
-        <>
-          <Button variant="secondary" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="dark" onClick={() => onReject(reason, other.trim() || undefined)}>
-            Reject
-          </Button>
-        </>
-      }
-    >
-      <fieldset>
-        <legend className="mb-2 text-[14px] font-semibold">Reason</legend>
-        <div className="flex flex-wrap gap-2">
-          {REJECT_REASONS.map((r) => (
-            <FilterChip key={r.code} active={reason === r.code} onClick={() => setReason(reason === r.code ? undefined : r.code)}>
-              {r.label}
-            </FilterChip>
-          ))}
-        </div>
-      </fieldset>
-      <div className="mt-4">
-        <Label htmlFor="reject-other">Something else</Label>
-        <Textarea id="reject-other" rows={2} value={other} onChange={(e) => setOther(e.target.value)} className="min-h-0" />
-      </div>
-    </Dialog>
-  );
 }

@@ -144,6 +144,19 @@ def is_intermediary(company: str) -> bool:
     return normalise_company(company) in INTERMEDIARIES
 
 
+# A recruiter posting on an employer's behalf, by how agencies name themselves.
+_AGENCY = re.compile(
+    r"\b(recruitment|recruiting|recruiters?|staffing|resourcing|personnel|headhunt\w*|talent (?:solutions|partners|acquisition)|"
+    r"search (?:group|partners)|employment (?:agency|services))\b",
+    re.I,
+)
+
+
+def is_agency(company: str) -> bool:
+    """A board or a recruiter rather than the employer: a named one, or one named like an agency."""
+    return is_intermediary(company) or bool(_AGENCY.search(company))
+
+
 def _host(url: str | None) -> str:
     try:
         return (urlparse(url or "").hostname or "").lower().removeprefix("www.")

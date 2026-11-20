@@ -301,6 +301,68 @@ def _city_countries(parts: list[str]) -> set[str]:
     return set()
 
 
+def country_code(raw: str, country: str | None = None) -> str | None:
+    """The one country a posting is in, as an ISO code — None when WERA can't tell (19 Nov).
+
+    A job's `location.country` was whatever each source wrote ("United Kingdom - Deliveroo", "EU)")
+    and nothing at all from a board page, so no count by country could be trusted. Read from the
+    first part of the posting's location that names a place ("Remote-Friendly | San Francisco, CA"
+    is the US), then from the country it gave. A city shared by two countries
+    is the larger one's only when it is at least twice the size ("Birmingham" is England's, not
+    Alabama's); otherwise ("Cambridge") it is left unsaid rather than guessed.
+    """
+    for text in [*split_places(raw or ""), country or ""]:
+        codes = country_of(text) if text.strip() else set()
+        if len(codes) == 1:
+            return next(iter(codes))
+        if len(codes) > 1:
+            return _clearly_larger(text, codes)
+    code = (country or "").strip().upper()
+    return code if code in COUNTRIES else None
+
+
+def city_name(city: str | None, country: str | None = None) -> str | None:
+    """A city as one spelling, so "London", "london" and "LONDON" are one place (19 Nov).
+
+    A board page writes its own case: haystackapp.io sends "london, england, GB", and the Jobs
+    screen's Where filter then listed London and london as two places. In order:
+
+    * a place the gazetteer knows takes the gazetteer's spelling ("zurich" and "ZÜRICH" are
+      "Zürich"). Only a place of that very name counts, apart from case and accents — "Munich" is
+      not rewritten to "München", which is the posting's own word — and where a name is shared the
+      one in the job's country wins;
+    * otherwise text that is all one case (all lower or all upper) is title-cased;
+    * anything else is left as written: "McLean" and "São Paulo" are what their people write, and a
+      guess at their case would only be wrong.
+
+    One short word in capitals ("NYC", "DC", "DIFC") is an acronym, and text with a digit ("EC2A
+    4NE") is a postcode; both are left as they came. A place the gazetteer knows is respelled
+    before this, so "ROME" is still Rome.
+    """
+    text = " ".join((city or "").split())
+    if not text:
+        return None
+    named = [p for p in places_named(text) if fold(p.name) == fold(text)]
+    if named:
+        return next((p for p in named if p.country == country), named[0]).name
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters or any(ch.isdigit() for ch in text) or (text != text.lower() and text != text.upper()):
+        return text
+    if text == text.upper() and " " not in text and len(letters) <= 4:
+        return text
+    return re.sub(r"(?<=['’])S\b", "s", text.lower().title())
+
+
+def _clearly_larger(text: str, codes: set[str]) -> str | None:
+    for part in _PARTS.split(text.strip()):
+        found = [p for p in places_named(part) if p.country in codes] if part.strip() else []
+        if found:
+            top = found[0]
+            rival = next((p.population for p in found if p.country != top.country), 0)
+            return top.country if top.population >= 2 * rival else None
+    return None
+
+
 def hubs(country: str, n: int = 3) -> list[str]:
     """The cities a country-wide search names: where the jobs are, else the largest places."""
     code = country.upper()

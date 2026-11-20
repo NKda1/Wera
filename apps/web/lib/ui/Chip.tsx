@@ -21,3 +21,20 @@ export function Chip({ variant = "mint", className, title, children }: { variant
 export function ChipList({ children, className }: { children: ReactNode; className?: string }) {
   return <div className={cn("flex flex-wrap gap-1.5", className)}>{children}</div>;
 }
+
+/** A chip that toggles: a filter, or one reason of several. */
+export function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        "inline-flex min-h-9 shrink-0 items-center gap-1.5 border px-3 text-[13px] font-semibold transition-colors duration-150 pointer-coarse:min-h-11",
+        active ? "border-forest-700 bg-accent text-white" : "border-line bg-surface text-ink hover:border-forest-700 hover:text-forest-700",
+      )}
+    >
+      {children}
+    </button>
+  );
+}

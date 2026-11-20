@@ -57,14 +57,6 @@ class Site(BaseModel):
     # Up to two URLs the host matched on, so reviewing a proposal means looking at real postings
     # rather than taking WERA's word that this is a job board.
     examples: list[str] = []
-    # A board WERA reads itself rather than paying a search engine to find jobs on. It still
-    # belongs in this file, because this file is the terms gate (`reviewed`) and that applies
-    # however a board is read — but it must never reach a Firecrawl query, or the board would be
-    # both searched *and* fetched and the free source would start costing credits.
-    #
-    # `careers.google.com` is the first of these: one employer with its own listing pages, read
-    # through `sources.extract` on the free watchlist channel.
-    direct: bool = False
     # ISO 639-1 codes for the languages the board's postings are written in. What the Strategist
     # localises search terms for (`nodes.strategist`): asking a German board for "Software
     # Engineer" finds the English-language minority of its postings and misses the rest. Empty
@@ -129,20 +121,15 @@ class Site(BaseModel):
 def usable_sites(profile: "SearchProfile", sites: list[Site]) -> list[Site]:
     """The boards this search may actually ask (SRCH-03/04/11).
 
-    Four gates, in order of how non-negotiable they are: LinkedIn is never searched whatever
-    anything says; a `direct` board is read by WERA itself and must never be paid for as a search
-    as well; a site's terms must have been reviewed; and the board has to serve somewhere the
-    person is looking. A profile naming no countries passes the last gate for everything, which
+    Three gates, in order of how non-negotiable they are: LinkedIn is never searched whatever
+    anything says; a site's terms must have been reviewed; and the board has to serve somewhere
+    the person is looking. A profile naming no countries passes the last gate for everything, which
     is what keeps a profile written before SRCH-11 working.
     """
     return [
         s
         for s in sites
-        if not is_denied(f"https://{s.domain}/")
-        and not s.direct
-        and s.reviewed
-        and s.domain in profile.sites
-        and s.serves(profile.countries)
+        if not is_denied(f"https://{s.domain}/") and s.reviewed and s.domain in profile.sites and s.serves(profile.countries)
     ]
 
 
@@ -285,6 +272,9 @@ class SurfaceConfig(BaseModel):
 
     min: int = 8
     max: int = 12
+    # MATCH-01 (19 Nov): a job scored under this is hidden, not listed at the bottom — on 18 Nov,
+    # 30 of the 59 on the list scored under 5. Only jobs above it count towards `min`. 0 is off.
+    min_fit: float = 4.0
 
 
 class SourceShareConfig(BaseModel):
@@ -300,6 +290,11 @@ class SourceShareConfig(BaseModel):
     # Firecrawl's search, asked instead of Serper when Serper's day is spent or it is failing, at
     # most this many a search (each costs `SEARCH_CREDITS`, inside the run's credit cap).
     firecrawl_searches: int = 6
+    # 19 Nov: an agency's reposts (eFinancialCareers: 15 of the 53 on the list, fit 2–3.6) count as
+    # one source. At most `agency_per_search` of one agency's jobs queued from the job APIs a search,
+    # and none while `agency_shortlist` of its jobs are already on the list waiting for a decision.
+    agency_per_search: int = 1
+    agency_shortlist: int = 3
 
 
 class CompanyBriefConfig(BaseModel):
@@ -690,10 +685,6 @@ def write_sites(data: SitesFile) -> Path:
             entry["robots_ok"] = s.robots_ok
         if s.examples:
             entry["examples"] = s.examples
-        # `direct` was never written, so any rewrite of this file quietly turned a board WERA
-        # reads for free back into one it would pay to search the moment it was approved.
-        if s.direct:
-            entry["direct"] = True
         if s.languages:
             entry["languages"] = [lang.strip().lower() for lang in s.languages]
         if s.sectors:

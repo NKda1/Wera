@@ -39,6 +39,8 @@ type Liveness = Literal["open", "unverified", "unreachable", "gone"]
 
 class Location(Model):
     city: Opt[str] = None
+    # ISO 3166-1 alpha-2 ("GB"), or None when WERA can't tell — set on the way in, whatever the
+    # source wrote (`places.country_code`, 19 Nov). `raw` keeps the words.
     country: Opt[str] = None
     raw: str
 

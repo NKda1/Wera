@@ -116,6 +116,14 @@ def matches_a_target(title: str, targets: list[str]) -> bool:
 ELSEWHERE = "Location isn't in your search"
 UNPLACED = "Couldn't tell where this is"
 
+# The reason a job scored under the fit bar is hidden with (19 Nov); `FIT_BELOW` starts it.
+FIT_BELOW = "Fit "
+
+
+def fit_below(total: float, bar: float) -> str:
+    return f"{FIT_BELOW}{total:.1f}, below your bar of {bar:g}"
+
+
 # The reason a near miss is hidden with, and what the hidden list sorts on.
 NEAR_MISS = "Close to your titles, but not one of them"
 _EARLY_IN_TITLE = re.compile(

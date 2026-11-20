@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 
 import logfire
 
-from ..config import Site
 from ..config import usable_sites as config_usable_sites
 from ..domain.places import COUNTRIES
 from ..http import is_denied
@@ -132,16 +131,6 @@ class SearchOutcome:
 # Moved to `config` so the Strategist can ask the same question without importing this module;
 # kept under its old name here for the callers that already use it.
 usable_sites = config_usable_sites
-
-
-def direct_sites(profile: SearchProfile, sites: list[Site]) -> list[Site]:
-    """The boards WERA reads itself: reviewed, serving a target country, and `direct`.
-
-    The same gates as `usable_sites` minus the one that sends a query to Firecrawl. Being in this
-    list is what makes a board free rather than what makes it allowed — `reviewed` still decides
-    that, and an unreviewed `direct` board is loaded, shown and never fetched.
-    """
-    return [s for s in sites if s.direct and s.reviewed and s.domain in profile.sites and s.serves(profile.countries)]
 
 
 def _where(profile: SearchProfile) -> str:

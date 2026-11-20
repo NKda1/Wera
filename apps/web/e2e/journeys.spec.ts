@@ -279,3 +279,16 @@ test("The search profile can't be saved without a title (PRF-03)", async ({ page
   await dialog.getByRole("button", { name: "Save profile" }).click();
   await expect(dialog.getByText("Add at least 1 target title")).toBeVisible();
 });
+
+// Last: it throws away a pack the journeys above read.
+test("Discarding a pack asks why, as a reject does (MATCH-11, 19 Nov)", async ({ page }) => {
+  await page.goto("/review");
+  await page.getByRole("link", { name: "Graduate AI Engineer" }).click();
+  await page.getByRole("button", { name: "Discard", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Discard this pack?" });
+  await dialog.getByRole("button", { name: "Not my field" }).click();
+  await expect(dialog.getByRole("button", { name: "Not my field" })).toHaveAttribute("aria-pressed", "true");
+  await dialog.getByRole("button", { name: "Discard" }).click();
+  await expect(page).toHaveURL(/\/review$/);
+  await expect(page.getByRole("link", { name: "Graduate AI Engineer" })).toHaveCount(0);
+});

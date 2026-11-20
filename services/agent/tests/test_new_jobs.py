@@ -208,6 +208,29 @@ class TestRefilter:
         assert stored(store, "job-new").hidden_reason == "Not a job posting: too little description to judge"
 
 
+class TestRespellCities:
+    """19 Nov: "london" saved beside "London" is two places on the Jobs screen."""
+
+    def test_saved_cities_are_spelt_one_way(self, store):
+        store.upsert_jobs(
+            [
+                job("job-a", "https://a.example/1", location=Location(city="london", country="GB", raw="london, england, GB")),
+                job("job-b", "https://a.example/2", location=Location(city="London", country="GB", raw="London")),
+                job("job-c", "https://a.example/3", location=Location(city="McLean", country="US", raw="McLean, VA")),
+            ]
+        )  # fmt: skip
+        moves, _ = store.respell_cities()
+        assert moves[("london", "London")] == 1 and ("London", "London") not in moves  # the store holds other jobs too
+        assert stored(store, "job-a").location.city == "london"  # a dry run changes nothing
+
+        store.respell_cities(apply=True)
+        saved = stored(store, "job-a")
+        assert (saved.location.city, saved.location.raw) == ("London", "london, england, GB")
+        assert saved.dedupe_key == "key:job-a"
+        assert stored(store, "job-c").location.city == "McLean"
+        assert ("london", "London") not in store.respell_cities()[0]
+
+
 class TestTidy:
     """What was saved before the 13 Nov reading rules, brought up to them."""
 

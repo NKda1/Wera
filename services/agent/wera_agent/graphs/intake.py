@@ -31,7 +31,6 @@ from ..config import (
     organisations,
     organisations_file,
     senders,
-    sites,
     wera,
     write_companies,
 )
@@ -47,7 +46,6 @@ from ..settings import get_settings
 from ..sources import (
     ats_discovery,
     ats_feeds,
-    browser,
     crawl_cache,
     firecrawl_search,
     inbox,
@@ -235,7 +233,6 @@ def from_watchlist(profile: SearchProfile, now: int, *, discover: bool = False, 
     out.results = len(result.jobs)
     out.jobs = [normalise.from_feed(feed, now) for feed in result.jobs]
     out.feed = result
-    out.jobs += _from_direct_sites(profile, now, tick=tick)
     return out
 
 
@@ -288,33 +285,6 @@ def _from_organisations(
     into.errors += found.errors
     into.answered |= found.answered
     into.listed |= found.listed
-
-
-def _from_direct_sites(profile: SearchProfile, now: int, *, tick: Progress | None = None) -> list[Job]:
-    """Boards WERA reads itself (SRCH-04, `Site.direct`) — today, `careers.google.com`.
-
-    Rides the watchlist because it spends no Firecrawl credits, and sits behind the same terms
-    gate as every other board: an entry with no `terms_reviewed_on` is loaded, shown in the UI
-    and **never fetched**. So this does nothing at all until a person has read the terms and
-    recorded the date, which is the intended behaviour rather than a missing step.
-
-    Its failures are returned as jobs-not-found rather than raised: a board WERA can't read must
-    not cost the watchlist the employers it could.
-    """
-    from ..sources import google_careers
-
-    direct = firecrawl_search.direct_sites(profile, sites())
-    if not any(s.domain == google_careers.HOST for s in direct):
-        return []
-    if tick is not None:
-        tick(0.7, phase="feeds", detail=google_careers.HOST, done=0, total=0, results=0)
-    with browser.session() as fetch_html:
-        jobs, errors = google_careers.list_jobs(
-            watch_titles(profile), profile.locations, fetch_html=fetch_html, now=now, parse=normalise_with_model
-        )
-    for message in errors:
-        logfire.info("Google Careers: {message}", message=message)
-    return jobs
 
 
 def sites_due(last_run: str | None, now: int) -> bool:
@@ -602,8 +572,8 @@ class Judged:
     errors: list[tuple[str, str]] = field(default_factory=list)
     # Jobs left in the pool after this pass took its batches — what "Find more" starts from.
     pool: int = 0
-    # Jobs this pass left with a fit report — what SRCH-26 counts towards its 8–12. Hidden jobs
-    # never get one, so they never count.
+    # Jobs this pass left on the list with a fit report — what SRCH-26 counts towards its 8–12.
+    # Hidden jobs never count: not those the filters hid, nor those scored under the fit bar.
     surfaced: int = 0
     # The new jobs that made the shortlist rather than the hidden list: what a run calls "new".
     visible_new: set[str] = field(default_factory=set)
@@ -783,7 +753,12 @@ def judge(
     # Ranking is read back from the fit reports when the shortlist is listed, so the order here
     # only needs to exist — the store sorts on `fit.total`.
     fit.rank(scored)
-    out.surfaced = len(scored)
+    # MATCH-01 after scoring (19 Nov): a job under the fit bar is hidden, with its score as the
+    # reason, and doesn't count towards the 8 a search aims for — so the search reads on.
+    with transaction() as session:
+        under = {j.id for j, _ in Store(session, now).fit_bar((job.id, report.total) for job, report in scored)}
+    out.visible_new -= under
+    out.surfaced = len(scored) - len(under)
     if out.scored:
         from ..services import analytics
 
@@ -836,7 +811,7 @@ def rescore(run_id: str, channel: str = "rescore", scope: str = "board") -> dict
             row.errors = [{"code": code, "message": message} for code, message in judged.errors]
             row.progress, row.phase = 1, "done"
             row.detail = None
-            row.finished_at = iso(now_ms())
+            row.finish(now_ms())
             row.settled = True
             row.status = "partial" if judged.errors else "succeeded"
     logfire.info(
@@ -882,7 +857,8 @@ def find_more(run_id: str) -> dict[str, Any]:
             row.new_jobs, row.queued, row.total = len(piped.new_ids), piped.queued, piped.surfaced
             row.errors = [{"code": code, "message": message} for code, message in piped.errors]
             row.progress, row.phase, row.detail = 1, "done", None
-            row.finished_at, row.settled = iso(now_ms()), True
+            row.finish(now_ms())
+            row.settled = True
             row.status = (
                 "failed" if piped.errors and not piped.surfaced else "partial" if piped.errors or piped.partial else "succeeded"
             )
@@ -1077,7 +1053,7 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
             # A finished run has nothing it is doing, so nothing to say about it. The summary
             # line takes over from here (`runStatus`).
             row.detail = None
-            row.finished_at = iso(now_ms())
+            row.finish(now_ms())
             row.settled = True
             # Finding jobs and scoring them fail separately. A channel that fetched nothing has
             # failed; one that fetched a list it couldn't finish scoring is partial, not a

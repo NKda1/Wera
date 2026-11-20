@@ -13,6 +13,7 @@ import { Dialog } from "@/lib/ui/Dialog";
 import { Help, Label, Textarea } from "@/lib/ui/Field";
 import { JobLinks } from "@/lib/ui/JobLinks";
 import { Pill } from "@/lib/ui/Pill";
+import { ReasonDialog } from "@/lib/ui/ReasonDialog";
 import { Tabs } from "@/lib/ui/Tabs";
 import { useToast } from "@/lib/ui/Toast";
 import { cn } from "@/lib/ui/cn";
@@ -246,29 +247,19 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
         />
       ) : null}
 
-      <Dialog
-        open={discarding}
-        onClose={() => setDiscarding(false)}
-        size="sm"
-        title="Discard this pack?"
-        description="The job is marked rejected and this pack is deleted. Your master CV isn't touched."
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setDiscarding(false)}>
-              Keep it
-            </Button>
-            <Button
-              variant="danger"
-              onClick={async () => {
-                setDiscarding(false);
-                if (await run("discard", () => api.patchApplication(app.id, { status: "discarded" }), "Pack discarded.")) router.push("/review");
-              }}
-            >
-              Discard
-            </Button>
-          </>
-        }
-      />
+      {discarding ? (
+        <ReasonDialog
+          title="Discard this pack?"
+          description="The job is marked rejected and this pack is deleted. Your master CV isn't touched. A reason is optional; WERA learns from it, as from a reject."
+          action="Discard"
+          danger
+          onClose={() => setDiscarding(false)}
+          onConfirm={async (reasonCode, reason) => {
+            setDiscarding(false);
+            if (await run("discard", () => api.patchApplication(app.id, { status: "discarded", reasonCode, reason }), "Pack discarded.")) router.push("/review");
+          }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -9,6 +9,7 @@ import httpx
 import pytest
 import respx
 
+from wera_agent.domain import dedupe
 from wera_agent.llm.demo import PackInput
 from wera_agent.schemas.jobs import Job, JobSource, Location
 from wera_agent.schemas.llm_outputs import CompanyBriefOutput
@@ -50,8 +51,8 @@ def a_job(company: str = "Kew Vale Care", apply_url: str | None = "https://caree
 class TestFindingTheSite:
     def test_an_agencys_post_has_no_employer_to_read(self):
         for company in ("eFinancialCareers", "Spectrum IT Recruitment", "Hays", "Acme Staffing Ltd"):
-            assert company_page.is_agency(company), company
-        assert not company_page.is_agency("Kew Vale Care")
+            assert dedupe.is_agency(company), company
+        assert not dedupe.is_agency("Kew Vale Care")
 
     def test_the_apply_link_names_the_site_and_a_careers_subdomain_is_dropped(self):
         assert company_page.site_from_links(a_job()) == "https://kewvale.co.uk"

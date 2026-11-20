@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from wera_agent.clock import iso, now_ms
 from wera_agent.db.models import DecisionRow
-from wera_agent.schemas.api import DecisionIn
+from wera_agent.schemas.api import ApplicationPatchIn, DecisionIn
 from wera_agent.schemas.jobs import Salary
 from wera_agent.services import learning
 
@@ -61,6 +61,40 @@ class TestRecording:
         decided(store, "Security Engineer")
         store.reset_job_world()
         assert store.s.scalars(select(DecisionRow)).first() is not None
+
+
+class TestAPackThrownAway:
+    """19 Nov: discarding a pack at Gate 2 changed the job's status and left no decision, so
+    learning never heard the person's "no" (18 Nov review: 0 discards recorded)."""
+
+    def pack(self, store, status: str):
+        target = store.list_jobs("new")[0]
+        job = store._job(store._job_row(target.id))
+        store.create_application("app-t-1", job, status=status, created_at=iso(now_ms()))
+        return target
+
+    def test_a_discarded_pack_is_a_gate_2_decision_with_what_the_job_was(self, store):
+        target = self.pack(store, "ready_for_review")
+        store.patch_application("app-t-1", ApplicationPatchIn(status="discarded", reason_code="not_my_field"))
+        row = store.s.scalars(select(DecisionRow).where(DecisionRow.job_id == target.id)).one()
+        assert (row.gate, row.decision, row.reason_code) == (2, "discard", "not_my_field")
+        assert row.features["title"] == target.title and row.fit_total == target.fit.total
+        assert store._job(store._job_row(target.id)).status == "rejected"
+
+    def test_a_cancelled_draft_is_recorded_but_not_a_no(self, store):
+        target = self.pack(store, "drafting")
+        store.patch_application("app-t-1", ApplicationPatchIn(status="discarded", reason_code="not_my_field"))
+        row = store.s.scalars(select(DecisionRow).where(DecisionRow.job_id == target.id)).one()
+        assert (row.gate, row.decision, row.reason_code) == (2, "cancel", None)
+        assert store._job(store._job_row(target.id)).status == "new"
+        assert learned(store).decisions == 0
+
+    def test_a_discard_about_the_work_counts_against_its_words(self, store):
+        target = self.pack(store, "ready_for_review")
+        store.patch_application("app-t-1", ApplicationPatchIn(status="discarded", reason_code="not_my_field"))
+        got = learned(store)
+        assert got.decisions == 1
+        assert got.rejected_titles == [(target.title, "not_my_field")]
 
 
 class TestRanking:

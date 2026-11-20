@@ -114,6 +114,8 @@ class Balance:
     ceiling: float = 0.4
     by_country: dict[str, int] = field(default_factory=dict)
     by_source: dict[str, int] = field(default_factory=dict)
+    # Ticked countries that were under their floor with nothing of theirs left to read (19 Nov).
+    dry: set[str] = field(default_factory=set)
 
     @property
     def floor(self) -> int:
@@ -143,6 +145,8 @@ class Balance:
                 pick = next((t for t in left if t.country == country and not self.over_ceiling(t, 1)), None)
                 if pick is not None:
                     break
+                if not any(t.country == country for t in left):
+                    self.dry.add(country)  # not just held back by a source's ceiling
             if pick is None:
                 pick = next((t for t in left if not self.over_ceiling(t, 1)), None)
             if pick is None:
@@ -154,11 +158,26 @@ class Balance:
             self.note(pick)
         return chosen
 
+    def short(self) -> list[tuple[str, int, int]]:
+        """The countries that ended under their floor because they ran dry: (country, got, floor).
+
+        The floor gives way quietly when a country has nothing left to read — on 18 Nov the US got
+        2 of its 3 reads in two runs, and nothing said why. A country still under its floor that
+        never ran dry (the search stopped first) isn't short of anything.
+        """
+        return [
+            (c, self.by_country.get(c, 0), self.floor)
+            for c in self.countries
+            if c in self.dry and self.by_country.get(c, 0) < self.floor
+        ]
+
     def split(self) -> str:
-        """The reads so far as the run's log says them: "ch 4, gb 4 · google 5, reed 3"."""
+        """The reads so far as the run's log says them: "ch 4, gb 4 · google 5, reed 3", then any
+        country that ran dry: "· us 2 of 3, none left to read"."""
         places = ", ".join(f"{c} {n}" for c, n in sorted(self.by_country.items(), key=lambda x: -x[1]))
         sources = ", ".join(f"{s} {n}" for s, n in sorted(self.by_source.items(), key=lambda x: -x[1]))
-        return " · ".join(part for part in (places, sources) if part)
+        dry = ", ".join(f"{c} {got} of {floor}" for c, got, floor in self.short())
+        return " · ".join(part for part in (places, sources, dry and f"{dry}, none left to read") if part)
 
 
 class TargetQueue:

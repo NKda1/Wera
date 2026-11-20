@@ -10,6 +10,8 @@ from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text, 
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from ..clock import iso, parse_ms
+
 
 def _without_nul(value: Any) -> Any:
     """`value` with every NUL character taken out of every string in it.
@@ -207,12 +209,19 @@ class IntakeRunRow(Base):
     # SRCH-26: postings found and left in the queue for "Find more" — migration 0010.
     queued: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[list[Any]]
-    duration_ms: Mapped[int] = mapped_column(Integer, default=0)  # demo runs progress over time
+    # While a run is going, a demo run's planned length (its progress bar); once it has finished,
+    # how long it took. `finish` sets both ends, so the column never holds a made-up number after.
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     settled: Mapped[bool] = mapped_column(Boolean, default=False)
     # UX-01 (17 Nov): how far through its current step the run is, 0–1, beside `progress` for the
     # whole run; and the steps it has finished, each `{at, phase, message, ms}` — migration 0015.
     stage_progress: Mapped[float] = mapped_column(Float, default=0)
     log: Mapped[list[Any]] = mapped_column(default=list)
+
+    def finish(self, at_ms: int) -> None:
+        """Stamp the run finished at `at_ms`, and record how long it really took."""
+        self.finished_at = iso(at_ms)
+        self.duration_ms = max(0, at_ms - parse_ms(self.started_at))
 
 
 class LlmCallRow(Base):

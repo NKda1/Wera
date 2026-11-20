@@ -170,6 +170,8 @@ class Piped:
     errors: list[tuple[str, str]] = field(default_factory=list)
     # Why the run stopped short of `surface.min`, in words; None when it didn't.
     short: str | None = None
+    # Countries that ran dry under their floor, as "us 2 of 3" (SRCH-26, 19 Nov).
+    dry: list[str] = field(default_factory=list)
     # SRCH-31/32: what each job API did — searches, leads, queued, or why it was skipped.
     feeds: dict[str, dict[str, object]] = field(default_factory=dict)
 
@@ -212,6 +214,7 @@ def run(
                     "surfaced": out.surfaced,
                     "queued": out.queued,
                     "short": out.short or "",
+                    "countries_dry": out.dry,
                 }
             )
     return out
@@ -253,6 +256,7 @@ def _run(
         ):
             planned, matrix = store.search_queries(refresh=True)
         known = store.known_apply_urls()
+        crowded = store.crowded_agencies()
         key = store.plan_key()
         pool, reader = store.pool_key(), store.reader_key()
         # SRCH-26 (17 Nov): the pool is read best match first, scored against the CV for free.
@@ -331,6 +335,7 @@ def _run(
                 resource=resource[0],
                 on_step=bar.step("apis"),
                 rank=rank,
+                crowded=crowded,
             )
             queue.mark_tier_sent(0)
             bar.done("apis", _feeds_note(asked), started)
@@ -450,6 +455,7 @@ def _run(
                 break
 
     out.queued = queue.size(accept=here)
+    out.dry = [f"{c} {got} of {floor}" for c, got, floor in balance.short()]
     if out.read or out.surfaced:
         bar.done("reading", _reading_note(out, balance.split()), reading_started)
     if out.short:
@@ -526,6 +532,8 @@ def _feeds_note(asked: "strategist.FeedDiscovery") -> str:
     text = f"Job APIs: {_count(searches, 'search', 'searches')}, {_count(leads, 'posting')}, {asked.queued} queued to read"
     if each:
         text += f" ({each})"
+    if asked.agency_reposts:
+        text += f" · {_count(asked.agency_reposts, 'agency repost')} left out"
     if left:
         text += f" · not asked: {', '.join(left)}"
     return text

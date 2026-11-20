@@ -8,7 +8,8 @@ that a second run costs nothing, and that a failure leaves yesterday's shortlist
 import pytest
 from sqlalchemy import select
 
-from wera_agent.clock import iso, now_ms
+from wera_agent import clock
+from wera_agent.clock import iso, now_ms, parse_ms
 from wera_agent.db.models import IntakeRunRow, JobRow, LlmCallRow
 from wera_agent.db.session import transaction
 from wera_agent.graphs import intake
@@ -123,7 +124,11 @@ class TestReScoringAfterACvChange:
             store = Store(session)
             assert store.jobs_needing_score(cv_version=store.cv().version, model=store.scoring_model()) == []
             assert not any(j.fit.stale for j in store.list_jobs("new"))
-            assert len(store.list_jobs("new")) == expected
+            # Every job is still there: on the list, or hidden for scoring under the fit bar.
+            fit_hidden = session.scalars(
+                select(JobRow.id).where(JobRow.status == "hidden", JobRow.data["hiddenReason"].as_string().like("Fit %"))
+            ).all()
+            assert len(store.list_jobs("new")) + len(fit_hidden) == expected
 
     def test_saving_a_cv_never_fails_because_a_search_is_running(self, client, runs):
         """A busy run costs the re-score, never the CV. The next ordinary run picks the work up,
@@ -370,6 +375,24 @@ class TestARunSaysWhatItIsDoing:
         row = row_for(ids["watchlist"])
         assert row.phase == "done"
         assert row.detail is None
+
+    def test_a_finished_run_records_how_long_it_really_took(self, client, runs, channels):
+        """`duration_ms` was the demo's planned length (2500 for every watchlist run, 18 Nov)."""
+        clock.freeze()
+        try:
+            ids = runs(["watchlist"])
+
+            def slow(*a, **k):
+                clock.advance(41_000)
+                return intake.ChannelOutcome(channel="watchlist", jobs=[job()], results=1)
+
+            channels(from_watchlist=slow)
+            intake.run(["watchlist"], ids)
+
+            row = row_for(ids["watchlist"])
+            assert row.duration_ms == parse_ms(row.finished_at) - parse_ms(row.started_at) == 41_000
+        finally:
+            clock.reset()
 
     def test_a_detail_too_long_for_the_column_is_truncated_not_refused(self, client, runs):
         """A heartbeat must never be the thing that fails a run."""
@@ -837,7 +860,6 @@ class TestTheRunLog:
 
         monkeypatch.setattr(intake, "companies", lambda: [Company(name="Acme", vendor="greenhouse", token="acme")])
         monkeypatch.setattr(intake, "organisations", list)
-        monkeypatch.setattr(intake, "_from_direct_sites", lambda *a, **k: [])
         monkeypatch.setattr(intake.ats_feeds, "fetch_company", lambda c: ([], None))
         ids = runs(["watchlist"])
         intake.run(["watchlist"], ids)

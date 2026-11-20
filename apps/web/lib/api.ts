@@ -118,7 +118,7 @@ export const api = {
 
   listApplications: () => call<{ items: (ApplicationWithJob & { coverage?: number })[] }>("/api/applications"),
   getApplication: (id: string) => call<ApplicationWithJob>(`/api/applications/${id}`),
-  patchApplication: (id: string, patch: { status?: ApplicationStatus; notes?: string; followUpAt?: string | null }) =>
+  patchApplication: (id: string, patch: { status?: ApplicationStatus; notes?: string; followUpAt?: string | null; reasonCode?: ReasonCode; reason?: string }) =>
     call<ApplicationWithJob>(`/api/applications/${id}`, { method: "PATCH", body: patch }),
   regenerate: (id: string, note: string) => call<ApplicationWithJob>(`/api/applications/${id}/regenerate`, { method: "POST", body: { note } }),
   approvePack: (id: string) => call<ApplicationWithJob>(`/api/applications/${id}/approve`, { method: "POST", body: {} }),

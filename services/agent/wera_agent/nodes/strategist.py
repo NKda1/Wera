@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from ..clock import iso
 from ..config import Site, usable_sites, wera
-from ..domain import filters, places
+from ..domain import dedupe, filters, places
 from ..domain.dedupe import canonical_url
 from ..errors import ApiError
 from ..http import host_of, request
@@ -766,6 +766,8 @@ class FeedDiscovery:
     by_feed: dict[str, dict[str, object]] = field(default_factory=dict)
     queued: int = 0
     errors: list[str] = field(default_factory=list)
+    # Leads left out as one more of an agency's reposts (19 Nov).
+    agency_reposts: int = 0
 
 
 def discover_feeds(
@@ -781,6 +783,7 @@ def discover_feeds(
     resource: Serper | None = None,
     on_step: Step | None = None,
     rank: Ranker | None = None,
+    crowded: frozenset[str] = frozenset(),
 ) -> FeedDiscovery:
     """Ask every job API this search can use, all at once, and queue what they found.
 
@@ -797,6 +800,9 @@ def discover_feeds(
     With `rank` (17 Nov), every API's leads are taken best match first across every place — so a
     feed's `max_queued` and the searches for snippet leads' originals go to the best of them, not
     to whichever country was asked first.
+
+    An agency is one source whoever it reposts for (19 Nov): at most `agency_per_search` of its
+    leads queued, and none when it is in `crowded` (its jobs already waiting on the shortlist).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -895,6 +901,8 @@ def discover_feeds(
             scores = rank([(lead.title, lead.snippet) for _f, _q, lead in entries])
             order = sorted(range(len(entries)), key=lambda i: -scores[i])
             entries = [entries[i] for i in order]
+        share = wera().source_share
+        by_agency: Counter = Counter()
         for feed_id, query, lead in entries:
             stats = out.by_feed[feed_id]
             cfg, feed = feeds.config(feed_id), feeds.FEEDS[feed_id]
@@ -906,6 +914,10 @@ def discover_feeds(
             if lead.date and _ms(lead.date) is not None and _ms(lead.date) < oldest:  # type: ignore[operator]
                 continue
             tried.add(same)
+            agency = dedupe.normalise_company(lead.company) if dedupe.is_agency(lead.company) else None
+            if agency and (agency in crowded or by_agency[agency] >= share.agency_per_search):
+                out.agency_reposts += 1
+                continue
             if feed.full_text:
                 url, title, snippet, source, payload = lead.url, lead.title, lead.snippet, "feed", lead.payload
             else:
@@ -942,6 +954,8 @@ def discover_feeds(
                 )
             )
             stats["queued"] += 1  # type: ignore[operator]
+            if agency:
+                by_agency[agency] += 1
 
         out.queued = queue.push(found)
         if resource is not None:
@@ -951,7 +965,10 @@ def discover_feeds(
             for feed_id, stats in out.by_feed.items()
             for k, v in stats.items()
         }
-        span.set_attributes(flat | {"queued": out.queued, "resource_queries": resource.sent if resource else 0})
+        span.set_attributes(
+            flat
+            | {"queued": out.queued, "resource_queries": resource.sent if resource else 0, "agency_reposts": out.agency_reposts}
+        )
     return out
 
 

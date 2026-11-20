@@ -314,6 +314,53 @@ class TestTheBestLeadsFirst:
         assert taken[0].country == "gb"
 
 
+class TestAnAgencyIsOneSource:
+    """19 Nov: 15 of the 53 jobs on the list were eFinancialCareers reposts through Reed, fit 2–3.6.
+    One a search now, and none while three of its jobs wait on the list."""
+
+    def _discover(self, store, redis, respx_mock, monkeypatch, employer: str, **kw):
+        monkeypatch.setitem(wera().feeds, "reed", FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=3, max_queued=6))
+        base = fixture("reed_search")["results"][0]
+        titles = ["Graduate Software Engineer", "Software Engineer", "Junior Software Engineer", "Software Developer"]
+        four = [
+            {**base, "jobId": i, "employerName": employer, "jobTitle": t, "date": "10/11/2026",
+             "jobUrl": f"https://www.reed.co.uk/jobs/x/{i}"}
+            for i, t in enumerate(titles, 1)
+        ]  # fmt: skip
+        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": four, "totalResults": 4}))
+        respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json={"results": []}))
+        queue = TargetQueue(redis, "plan")
+        profile = TestDiscoveringFromTheApis()._profile(store)
+        found = strategist.discover_feeds(planned(), profile, queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=FakeSerper({}), **kw)  # fmt: skip
+        return queue.peek(), found
+
+    @respx.mock(assert_all_called=False)
+    def test_one_of_an_agencys_reposts_a_search(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
+        queued, found = self._discover(store, redis, respx_mock, monkeypatch, "eFinancialCareers")
+        assert len(queued) == 1
+        assert found.agency_reposts == 3
+
+    @respx.mock(assert_all_called=False)
+    def test_none_while_its_jobs_wait_on_the_list(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
+        queued, found = self._discover(store, redis, respx_mock, monkeypatch, "eFinancialCareers", crowded=frozenset({"efinancialcareers"}))  # fmt: skip
+        assert queued == [] and found.agency_reposts == 4
+
+    def test_three_waiting_on_the_list_is_crowded(self, store):
+        from wera_agent.services.store import save_job
+
+        waiting = store.list_jobs("new")[:3]
+        for scored in waiting[:2]:
+            save_job(store.s, store._job(store._job_row(scored.id)).model_copy(update={"company": "eFinancialCareers Ltd"}))
+        assert store.crowded_agencies() == frozenset()
+        save_job(store.s, store._job(store._job_row(waiting[2].id)).model_copy(update={"company": "eFinancialCareers"}))
+        assert store.crowded_agencies() == frozenset({"efinancialcareers"})
+
+    @respx.mock(assert_all_called=False)
+    def test_an_employer_is_not_an_agency(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
+        queued, found = self._discover(store, redis, respx_mock, monkeypatch, "Wissen Technology")
+        assert len(queued) == 4 and found.agency_reposts == 0
+
+
 class TestOneSearchPerQuestion:
     @respx.mock(assert_all_called=False)
     def test_graduate_and_junior_are_one_reed_search_but_two_adzuna_ones(

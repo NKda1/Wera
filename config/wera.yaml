@@ -296,6 +296,9 @@ max_scored_per_day: 70
 source_share:
   ceiling: 0.4
   firecrawl_searches: 6
+  # 19 Nov: one agency's reposts are one source — one a search, none while 3 wait on the list.
+  agency_per_search: 1
+  agency_shortlist: 3
 
 # "Learn about the company" on the review screen (18 Nov): one About page, read with plain HTTP
 # after robots.txt, and one Serper search at most to find the site. Off turns the button off.
@@ -318,6 +321,9 @@ scoring_workers: 3
 surface:
   min: 8
   max: 12
+  # 19 Nov: a job scored under 4 is hidden with its score as the reason ("Unhide" brings it back),
+  # and only jobs at 4 or more count towards the 8. 0 turns it off.
+  min_fit: 4
 
 # SRCH-30: hosts an open search often returns, with a posting path on each. Their robots.txt is
 # asked before a search (weekly, cached in Redis), alongside every board the search would query,

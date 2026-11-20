@@ -61,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     refilter.add_argument("--apply", action="store_true", help="bring them back (default: only list them)")
     jobs_sub.add_parser("rescore", help="re-score the shortlist's stale scores (a new CV, model or rubric)")
     jobs_sub.add_parser("reformat", help="lay out every saved job's description with today's formatter (no model calls)")
+    bar = jobs_sub.add_parser("fit-bar", help="hide the shortlist's jobs scored under surface.min_fit")
+    bar.add_argument("--apply", action="store_true", help="hide them (default: only list them)")
+    countries = jobs_sub.add_parser("countries", help="store every saved job's country as an ISO code")
+    countries.add_argument("--apply", action="store_true", help="store them (default: only count them)")
+    cities = jobs_sub.add_parser("cities", help="spell every saved job's city one way (London, not london)")
+    cities.add_argument("--apply", action="store_true", help="store them (default: only list what would change)")
     tg = sub.add_parser("targets", help="the Strategist's job discovery: Serper searches into the Redis queue (SRCH-20)")
     tg_sub = tg.add_subparsers(dest="targets_cmd", required=True)
     tg_disc = tg_sub.add_parser("discover", help="send the planned queries and queue the postings they find")
@@ -206,6 +212,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _rescore()
         if args.jobs_cmd == "reformat":
             return _reformat()
+        if args.jobs_cmd == "countries":
+            return _countries(args.apply)
+        if args.jobs_cmd == "cities":
+            return _cities(args.apply)
+        if args.jobs_cmd == "fit-bar":
+            return _fit_bar(args.apply)
         return _refilter(args.apply) if args.jobs_cmd == "refilter" else _audit_listings(args.apply)
     if args.cmd == "eval":
         try:
@@ -520,6 +532,53 @@ def _reformat() -> int:
     with transaction() as session:
         changed, total = Store(session).reformat_saved()
     print(f"Laid out {changed} of {total} saved job(s); the rest were already current.")
+    return 0
+
+
+def _fit_bar(apply: bool) -> int:
+    """The fit bar over today's shortlist (19 Nov). Lists by default; `--apply` hides them."""
+    from .config import wera
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        under = Store(session).apply_fit_bar(apply=apply)
+    for job, total in sorted(under, key=lambda x: x[1]):
+        print(f"  {total:4.1f}  {job.title[:44]:44} {job.company[:24]}")
+    print(f"\n{len(under)} job(s) under {wera().surface.min_fit:g} {'hidden' if apply else 'to hide'}.")
+    if not apply and under:
+        print("Run again with --apply to hide them. Each keeps its score, and Unhide brings it back.")
+    return 0
+
+
+def _countries(apply: bool) -> int:
+    """Each saved job's country as an ISO code (19 Nov). Counts by default; `--apply` stores them."""
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        by_code, changed = Store(session).recode_countries(apply=apply)
+    for code, n in by_code.most_common():
+        print(f"  {code or "(can't tell)":14} {n}")
+    print(f"\n{changed} of {sum(by_code.values())} saved job(s) {'changed' if apply else 'to change'}.")
+    if not apply and changed:
+        print("Run again with --apply to store them. Nothing else about the jobs changes.")
+    return 0
+
+
+def _cities(apply: bool) -> int:
+    """Each saved job's city in one spelling (19 Nov). Lists by default; `--apply` stores them."""
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        moves, total = Store(session).respell_cities(apply=apply)
+    for (old, new), n in moves.most_common():
+        print(f"  {old!r:28} -> {new!r:28} {n}")
+    changed = sum(moves.values())
+    print(f"\n{changed} of {total} saved job(s) {'changed' if apply else 'to change'}.")
+    if not apply and changed:
+        print("Run again with --apply to store them. Nothing else about the jobs changes.")
     return 0
 
 

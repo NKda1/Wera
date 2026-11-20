@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 from ..clock import iso, parse_ms
-from ..domain import dedupe
+from ..domain import dedupe, places
 from ..domain.text import is_linkedin_url
 from ..schemas.jobs import Ats, Job, JobSource, Location, PostedPrecision, Salary
 from ..sources.ats_feeds import FeedJob
@@ -194,6 +194,17 @@ def job_id(key: str) -> str:
     return f"job-{hashlib.sha256(key.encode()).hexdigest()[:10]}"
 
 
+def _located(location: Location) -> Location:
+    """The location as it is saved: an ISO country code, and the city in one spelling.
+
+    The city's case is the board's own (haystackapp.io writes "london, england, GB"), so without
+    this the Jobs screen offered "London" and "london" as two places (19 Nov). `dedupe_key` is
+    taken from the city as the source wrote it, before this, so no saved job's key changes.
+    """
+    country = places.country_code(location.raw, location.country)
+    return location.model_copy(update={"country": country, "city": places.city_name(location.city, country)})
+
+
 def _job(
     *,
     title: str,
@@ -220,7 +231,8 @@ def _job(
         dedupe_key=key,
         title=title.strip(),
         company=company.strip(),
-        location=location,
+        # The country as an ISO code, whatever the source wrote, so jobs can be counted by country.
+        location=_located(location),
         remote=remote,
         salary=parse_salary(description),
         description_md=description or None,

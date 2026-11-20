@@ -10,7 +10,8 @@ instead, and that graph records its own figures.
 """
 
 import re
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -522,7 +523,8 @@ class Store:
 
     def _finish_run(self, run: IntakeRunRow) -> None:
         now = self.now
-        run.status, run.progress, run.finished_at = "succeeded", 1, iso(now)
+        run.status, run.progress = "succeeded", 1
+        run.finish(now)
         if run.settled:
             return
         run.settled = True
@@ -1063,27 +1065,53 @@ class Store:
             else:
                 job.status = "rejected"
         save_job(self.s, job)
-        code = learning.reason_code(d.reason_code, d.reason) if d.action == "reject" else None
+        self._record_decision(
+            job_id,
+            1,
+            d.action,
+            features,
+            before,
+            reason_code=d.reason_code,
+            reason=d.reason,
+            days=d.days,
+            coded=d.action == "reject",
+        )
+        self.s.flush()
+        logfire.info("Gate 1 {action} on {job_id}", action=d.action, job_id=job_id, job_status=job.status)
+        GATE1_DECISIONS.add(1, {"action": d.action})
+        return self.scored(job)
+
+    def _record_decision(
+        self,
+        job_id: str,
+        gate: int,
+        decision: str,
+        features: dict[str, Any],
+        before: ScoredJob | None,
+        *,
+        reason_code: str | None = None,
+        reason: str | None = None,
+        days: int | None = None,
+        coded: bool = False,
+    ) -> None:
+        """One row in `decisions`, with what MATCH-11 learns from: the coded reason, the CV it was
+        decided against, the fit, and the job's features as they were."""
+        code = learning.reason_code(reason_code, reason) if coded else None
         # The note is what the person wrote; a preset's own text is the code, not a note.
-        written = d.reason if d.reason and d.reason.strip() not in learning.REASON_FROM_NOTE else None
-        note = written or (f"{d.days}d" if d.days else None)
+        written = reason if reason and reason.strip() not in learning.REASON_FROM_NOTE else None
         self.s.add(
             DecisionRow(
                 job_id=job_id,
-                gate=1,
-                decision=d.action,
-                note=note,
-                decided_at=iso(now),
+                gate=gate,
+                decision=decision,
+                note=written or (f"{days}d" if days else None),
+                decided_at=iso(self.now),
                 reason_code=code,
                 cv_version=self.cv().version,
                 fit_total=before.fit.total if before else None,
                 features=features,
             )
         )
-        self.s.flush()
-        logfire.info("Gate 1 {action} on {job_id}", action=d.action, job_id=job_id, job_status=job.status)
-        GATE1_DECISIONS.add(1, {"action": d.action})
-        return self.scored(job)
 
     def _find_duplicate(self, job: Job) -> ApplicationRow | None:
         def norm(s: str) -> str:
@@ -1380,6 +1408,50 @@ class Store:
 
     def weights(self) -> FitWeights:
         return self._weights()
+
+    def fit_bar(self, totals: Iterable[tuple[str, float]], *, apply: bool = True) -> list[tuple[Job, float]]:
+        """MATCH-01 after scoring (19 Nov): each `new` job in `totals` scored under
+        `surface.min_fit`, hidden with its score as the reason. Returns them with their totals.
+
+        Never a job the person brought back from hiding, which stays where they put it, and never
+        one they are acting on (only `new` jobs). Unhide brings one back like any hidden job.
+        """
+        bar = wera().surface.min_fit
+        if not bar:
+            return []
+        unhidden = set(self.s.scalars(select(DecisionRow.job_id).where(DecisionRow.decision == "unhide")).all())
+        under: list[tuple[Job, float]] = []
+        for job_id, total in totals:
+            if total >= bar or job_id in unhidden:
+                continue
+            row = self.s.get(JobRow, job_id)
+            if row is None or row.status != "new":
+                continue
+            job = self._job(row)
+            if apply:
+                job.status, job.hidden_reason = "hidden", filters.fit_below(total, bar)
+                save_job(self.s, job)
+            under.append((job, total))
+        self.s.flush()
+        return under
+
+    def apply_fit_bar(self, *, apply: bool = False) -> list[tuple[Job, float]]:
+        """The fit bar over the shortlist as it is: what a list saved before 19 Nov keeps under it.
+        A stale score is left alone — it was judged against something that has since changed."""
+        listed = self.list_jobs("new")
+        return self.fit_bar([(j.id, j.fit.total) for j in listed if not j.fit.stale], apply=apply)
+
+    def crowded_agencies(self) -> frozenset[str]:
+        """The agencies with `source_share.agency_shortlist` or more jobs on the shortlist waiting
+        for a decision, as `dedupe.normalise_company` names them. A search queues no more of their
+        reposts until the person has worked through some (19 Nov)."""
+        waiting = Counter(
+            dedupe.normalise_company(company)
+            for company in self.s.scalars(select(JobRow.company).where(JobRow.status == "new")).all()
+            if company and dedupe.is_agency(company)
+        )
+        limit = wera().source_share.agency_shortlist
+        return frozenset(name for name, n in waiting.items() if n >= limit)
 
     def known_apply_urls(self) -> set[str]:
         """Every apply URL WERA already has, so a search doesn't scrape them again (SRCH-05).
@@ -1837,9 +1909,25 @@ class Store:
                 )
             job = self._job(self._job_row(app.job_id))
             if patch.status == "discarded":
-                # Cancelling a draft puts the job back on the shortlist; discarding a finished pack rejects it.
-                job.status = "new" if app.status == "drafting" else "rejected"
+                # Cancelling a draft puts the job back on the shortlist; discarding a finished pack
+                # rejects it. Either is a decision (MATCH-11, 19 Nov): a discard is a Gate 2 "no" to
+                # the job, learned from like a Gate 1 reject; a cancelled draft says nothing about it.
+                before = self.scored_or_none(job)
+                features = learning.features_of(job, before)
+                cancelled = app.status == "drafting"
+                job.status = "new" if cancelled else "rejected"
                 save_job(self.s, job)
+                self._record_decision(
+                    job.id,
+                    2,
+                    "cancel" if cancelled else "discard",
+                    features,
+                    before,
+                    reason_code=patch.reason_code,
+                    reason=patch.reason,
+                    coded=not cancelled,
+                )
+                logfire.info("Gate 2 {decision} on {app_id}", decision="cancel" if cancelled else "discard", app_id=app_id)
             if patch.status == "submitted":
                 app.submitted_at = iso(self.now)
                 app.follow_up_at = app.follow_up_at or iso(self.now + 7 * DAY)
@@ -2431,7 +2519,8 @@ class Store:
         if run is None:
             raise ApiError(404, "NOT_FOUND", "That run doesn't exist.")
         if run.status == "running":
-            run.status, run.finished_at, run.settled = "cancelled", iso(self.now), True
+            run.status, run.settled = "cancelled", True
+            run.finish(self.now)
         return self.get_run(run_id)
 
     # ---- CV and profile (CV-01…07, PRF-01…03) ----
@@ -2678,6 +2767,49 @@ class Store:
         self.s.flush()
         return changed, total
 
+    def recode_countries(self, *, apply: bool = False) -> tuple[Counter, int]:
+        """Every saved job's country as an ISO code (19 Nov), as a job saved today gets it.
+
+        Returns the count per code ("" for those WERA can't place) and how many would change.
+        Only `location.country` changes; the words stay in `location.raw`.
+        """
+        from ..domain import places
+
+        by_code: Counter = Counter()
+        changed = 0
+        for row in self.s.scalars(select(JobRow)).all():
+            location = row.data.get("location") or {}
+            code = places.country_code(location.get("raw") or "", location.get("country"))
+            by_code[code or ""] += 1
+            if code != location.get("country"):
+                changed += 1
+                if apply:
+                    row.data = {**row.data, "location": {**location, "country": code}}
+        self.s.flush()
+        return by_code, changed
+
+    def respell_cities(self, *, apply: bool = False) -> tuple[Counter, int]:
+        """Every saved job's city in one spelling (19 Nov), as a job saved today gets it.
+
+        "london" and "London" were two places on the Jobs screen. Returns how many jobs go from
+        each spelling to each ((old, new) → count) and how many jobs there are in all. Only
+        `location.city` changes: the words stay in `location.raw`, and `dedupe_key` is left alone
+        (it lowercases the city, and a key that moved would stop a re-read matching the saved job).
+        """
+        from ..domain import places
+
+        moves: Counter = Counter()
+        rows = self.s.scalars(select(JobRow)).all()
+        for row in rows:
+            location = row.data.get("location") or {}
+            city = places.city_name(location.get("city"), location.get("country"))
+            if city != location.get("city"):
+                moves[(location.get("city"), city)] += 1
+                if apply:
+                    row.data = {**row.data, "location": {**location, "city": city}}
+        self.s.flush()
+        return moves, len(rows)
+
     def tidy_saved(self, *, apply: bool = False) -> list[dict[str, str]]:
         """Today's reading rules applied to what was saved before them (12 Nov review).
 
@@ -2739,7 +2871,9 @@ class Store:
         profile = self._profile()
         for row in self.s.scalars(select(JobRow).where(JobRow.status == "hidden")).all():
             job = self._job(row)
-            if not job.hidden_reason or job.hidden_reason.startswith("Not a job posting"):
+            # A posting that isn't a job, or one scored under the fit bar, wasn't hidden by the
+            # filters, so passing them now is no reason to bring it back.
+            if not job.hidden_reason or job.hidden_reason.startswith(("Not a job posting", filters.FIT_BELOW)):
                 continue
             reason = filters.hidden_reason(job, profile, self.now)
             if reason is not None:
@@ -2794,7 +2928,8 @@ class Store:
         # than left running, because `start_rescore_if_idle` and `start_score_more` both refuse
         # while one is active — so a run abandoned here would block the next search instead.
         for run in self.s.scalars(select(IntakeRunRow).where(IntakeRunRow.status == "running")).all():
-            run.status, run.finished_at, run.settled = "cancelled", iso(self.now), True
+            run.status, run.settled = "cancelled", True
+            run.finish(self.now)
         self.s.flush()
 
         counts: dict[str, int] = {}
