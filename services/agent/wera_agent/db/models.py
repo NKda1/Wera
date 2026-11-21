@@ -284,3 +284,29 @@ class CrawlCacheRow(Base):
     payload: Mapped[dict[str, Any]]
     stored_at: Mapped[str] = mapped_column(Iso)
     expires_at: Mapped[str] = mapped_column(Iso, index=True)
+
+
+class JobSignalRow(Base):
+    """UPSK-06 (20 Nov): what a job the CV nearly matched asks for, read for Upskills.
+
+    A near miss is a job the title rule dropped — an API lead never read, or a saved job hidden as
+    "Not one of your target titles" — that is still close to the CV. Its keywords and degree ask
+    are extracted once (`keywords.extract`, fast tier) and kept here; Upskills counts them at half
+    a scored job's weight. One row per posting (`key`, the URL hash `targets.url_key` gives), so a
+    posting two searches nearly matched is read once. Migration 0017.
+    """
+
+    __tablename__ = "job_signals"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    url: Mapped[str | None] = mapped_column(_Text)
+    # The saved job it was read from, when it was one; None for an API lead.
+    job_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(_Text)
+    company: Mapped[str] = mapped_column(_Text)
+    # "lead" (an API's snippet) or "saved" (a saved job's whole description).
+    source: Mapped[str] = mapped_column(String(16))
+    similarity: Mapped[float | None] = mapped_column(Float)
+    keywords: Mapped[list[Any]]
+    education: Mapped[dict[str, Any] | None] = mapped_column(Json)
+    job_hash: Mapped[str | None] = mapped_column(String(32))
+    seen_at: Mapped[str] = mapped_column(Iso, index=True)

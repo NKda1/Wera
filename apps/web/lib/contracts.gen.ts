@@ -2,7 +2,7 @@
 // Regenerate: uv run --project services/agent wera schemas && pnpm --filter web gen:contracts
 
 export type Seniority = "intern" | "graduate" | "junior" | "entry" | "mid" | "senior" | "lead" | "principal";
-export type KeywordCategory = "hard_skill" | "methodology" | "tool";
+export type KeywordCategory = "hard_skill" | "methodology" | "tool" | "qualification";
 export type BriefTopic = "what_they_do" | "who_they_serve" | "size_or_stage" | "values" | "why_the_role";
 export type HookType = "Introduction" | "Core-Metric" | "Company-Mission" | "Industry-Problem" | "Referral";
 export type LetterSection = "opening_hook" | "core_value_proposition" | "strategic_alignment_and_culture" | "call_to_action_and_close";
@@ -43,10 +43,10 @@ export type JobStatus = "new" | "shortlisted" | "in_application" | "snoozed" | "
 export type Liveness = "open" | "unverified" | "unreachable" | "gone";
 export type Urgency = "today" | "this_week" | "two_weeks" | "older" | "unknown";
 export type SkillLevel = "familiar" | "proficient" | "expert";
+export type SkillStatus = "covered" | "quick_win" | "missing";
 export type PostedPrecision = "exact" | "approximate" | "unknown";
 export type Recency = "24h" | "7d" | "21d";
 export type SecretStatus = "set" | "missing" | "invalid";
-export type SkillStatus = "covered" | "quick_win" | "missing";
 export type SuggestionKind = "exclude_term" | "remove_title" | "add_title" | "add_location";
 
 /**
@@ -164,13 +164,19 @@ export interface AtsKeyword {
 }
 /**
  * One part of the ATS score (ATSC-07): its points out of its share of 100, and why.
+ *
+ * 20 Nov: a part that can't be measured — the post names no keywords, so there is nothing to
+ * count or to show in a line — has `points` None and `max` 0, and the other parts' `max` are
+ * rescaled to fill 100 (resume-matcher's `compute_ats_score`, Apache-2.0). It used to score
+ * full marks instead, which is the score claiming a measurement it never made. Either way the
+ * parts' points add up to the score and their `max` to 100.
  */
 export interface AtsPart {
   detail: string;
   id: "keywords" | "evidence" | "alignment" | "structure" | "length";
   label: string;
   max: number;
-  points: number;
+  points: number | null;
 }
 /**
  * 18 Nov: what the post and the company's own About page say about it, each item quoted.
@@ -334,6 +340,46 @@ export interface Ats {
   jobId: string;
   vendor: "greenhouse" | "lever" | "ashby" | "un_careers" | "taleo" | "workday" | "successfactors";
 }
+/**
+ * ATSC-08 (20 Nov): the job ad beside the CV, each keyword highlighted where it is.
+ *
+ * The spans are found by the matcher the ATS report uses (`nodes.ats.term_spans` over
+ * `vocab`), on the text the report measures, and each status is read off them — so a keyword
+ * counted as matched is one the CV column highlights. `coverage` and `potential_coverage` are
+ * the report's weighted sums (required counts double): what is on the CV now, and what would be
+ * with every keyword the master CV backs added. `stale` is True when a status differs from the
+ * stored report's, which happens only when the matcher has changed since it was stored.
+ */
+export interface AtsCompare {
+  coverage: number;
+  cvText: string;
+  descriptionStatus: "full" | "partial" | "missing";
+  jobText: string;
+  keywords: CompareKeyword[];
+  potentialCoverage: number;
+  stale: boolean;
+}
+/**
+ * One of the post's keywords, with where it is in the ad and in the CV (ATSC-08).
+ *
+ * `status` is measured as the ATS report measures it (`AtsCompare`): `matched` is on the CV,
+ * `in_cv` is in the master CV but not in this pack, `missing` is in neither — the last two are
+ * resume-matcher's "injectable" and "non-injectable".
+ */
+export interface CompareKeyword {
+  cvSpans: AtsSpan[];
+  jobSpans: AtsSpan[];
+  status: "matched" | "in_cv" | "missing";
+  term: string;
+  weight: "required" | "nice";
+}
+/**
+ * Where one keyword is on a page: `[start, end)` in the text it was found in.
+ */
+export interface AtsSpan {
+  end: number;
+  start: number;
+}
 export interface Bullet {
   id: string;
   tags: string[];
@@ -343,6 +389,9 @@ export interface CategoryCoverage {
   category: KeywordCategory | "other";
   covered: number;
   missing: number;
+  nearCovered: number;
+  nearMissing: number;
+  nearQuickWins: number;
   quickWins: number;
 }
 export interface ChannelSummary {
@@ -368,10 +417,20 @@ export interface CoreCompetencies {
  * Skill asks — one job asking for one skill — by where the CV stands on them. Counted over
  * asks rather than distinct skills, so a skill twenty jobs want weighs twenty times one that a
  * single job mentions.
+ *
+ * 20 Nov: `covered`, `quick_wins` and `missing` are the asks of jobs on the list, as before; the
+ * `near_*` three are the near misses' asks, plain counts too (0 in the view without them). The
+ * page draws a near-miss ask as `NearMissView.near_weight` (0.5) of an ask — the weight the gap
+ * list gives a near miss — so the donut's shares are (list + 0.5 × near) over the same sum, and
+ * its labels say both counts. Coverage is not lifted for poorly matched jobs: it answers "how
+ * much of what's asked does the CV show", which an inflated gap would misstate.
  */
 export interface Coverage {
   covered: number;
   missing: number;
+  nearCovered: number;
+  nearMissing: number;
+  nearQuickWins: number;
   quickWins: number;
 }
 /**
@@ -517,6 +576,55 @@ export interface Education {
   notes?: Bullet[];
   start?: YearMonth;
 }
+/**
+ * The degree a post asks for, as it says it (UPSK-05, 20 Nov). Degrees were keywords before
+ * this — "Bachelor’s Degree" and "Business Administration" were shown as skills to acquire to a
+ * CV with a BSc in Economics. `domain.degrees.meets` judges this against the CV's education.
+ */
+export interface EducationAsk {
+  level: "none" | "bachelor" | "master" | "phd" | "professional";
+  required: boolean;
+  subjects: string[];
+}
+/**
+ * UPSK-05 (20 Nov): the degrees the jobs ask for against the CV's education. Degrees are
+ * judged here, in code (`domain.degrees`), and never listed as skills.
+ */
+export interface EducationDemand {
+  cvLevel: string;
+  field?: string;
+  gapExamples: UpskillJob[];
+  jobsAsking: number;
+  levelGaps: number;
+  levels: LevelDemand[];
+  met: number;
+  nearMisses: number;
+  programmes: Programme[];
+  subjectGaps: number;
+}
+export interface UpskillJob {
+  company: string;
+  id: string;
+  title: string;
+}
+/**
+ * How many of the jobs asking for a degree ask for this level, and whether the CV has it.
+ */
+export interface LevelDemand {
+  jobs: number;
+  level: "bachelor" | "master" | "phd";
+  met: boolean;
+  share: number;
+}
+/**
+ * A programme employers in the person's field name: from the postings, counted, or from the
+ * starter list (`config/degrees.yaml`) while the postings have named too few.
+ */
+export interface Programme {
+  mentions: number;
+  name: string;
+  source: "postings" | "starter";
+}
 export interface Estimate {
   companies: number;
   credits: number;
@@ -526,6 +634,15 @@ export interface Estimate {
   usd: number;
 }
 /**
+ * How many jobs of one role family (UPSK-07, 21 Nov): "Quantitative roles", 6.
+ */
+export interface FamilyShare {
+  family: string;
+  jobs: number;
+  label: string;
+  nearMisses: number;
+}
+/**
  * Sub-scores as produced by the scoring model. The total is never model output (MATCH-04).
  */
 export interface FitEvidence {
@@ -533,6 +650,7 @@ export interface FitEvidence {
   core: SubScore;
   culture: string[];
   cvBulletIds: string[];
+  education?: EducationAsk;
   eligibility: SubScore;
   experience: SubScore;
   jobQuote: string;
@@ -556,6 +674,7 @@ export interface FitReport {
   core: SubScore;
   culture: string[];
   cvBulletIds: string[];
+  education?: EducationAsk;
   eligibility: SubScore;
   experience: SubScore;
   freshness: number;
@@ -670,6 +789,7 @@ export interface Job {
   linkedinUrl?: string;
   location: Location;
   postedAt?: string;
+  postedBy?: string;
   postedPrecision: "exact" | "approximate" | "unknown";
   remote: ("remote" | "hybrid" | "onsite") | null;
   salary?: Salary;
@@ -740,6 +860,7 @@ export interface ScoredJob {
   location: Location;
   possiblyClosed: boolean;
   postedAt?: string;
+  postedBy?: string;
   postedPrecision: "exact" | "approximate" | "unknown";
   remote: ("remote" | "hybrid" | "onsite") | null;
   salary?: Salary;
@@ -837,6 +958,116 @@ export interface NavCounts {
   review: number;
 }
 /**
+ * A job the CV nearly matched (UPSK-06): a title the filter dropped, read for what it asks.
+ * `job_id` when it is a saved (hidden) job; else `url`, the API's link to it.
+ */
+export interface NearMissJob {
+  company: string;
+  jobId?: string;
+  title: string;
+  url?: string;
+}
+/**
+ * UPSK-06 (20 Nov): the gaps and the degree asks with the jobs the CV nearly matched counted
+ * in — at half a scored job's weight — beside the report's own, which count scored jobs only. The
+ * page's "Include near misses" switch picks between them.
+ *
+ * Amended 20 Nov: the view carries its own chart data and quick wins too, under the report's
+ * own field names, so the page reads either view the same way and the switch moves the charts
+ * as well as the table (the user, 20 Nov: "the bar charts and pie charts" didn't move while the
+ * table's "nearly matched" counts did). `jobs_considered` is the scored jobs, as on the report —
+ * a near miss is never called a job on the list — and `near_misses` how many were read.
+ */
+export interface NearMissView {
+  byCategory: CategoryCoverage[];
+  coverage: Coverage1;
+  demand: SkillDemand[];
+  education?: EducationDemand;
+  jobsConsidered: number;
+  missing: Upskill[];
+  nearMisses: number;
+  nearWeight: number;
+  quickWins: QuickWin[];
+}
+/**
+ * Skill asks — one job asking for one skill — by where the CV stands on them. Counted over
+ * asks rather than distinct skills, so a skill twenty jobs want weighs twenty times one that a
+ * single job mentions.
+ *
+ * 20 Nov: `covered`, `quick_wins` and `missing` are the asks of jobs on the list, as before; the
+ * `near_*` three are the near misses' asks, plain counts too (0 in the view without them). The
+ * page draws a near-miss ask as `NearMissView.near_weight` (0.5) of an ask — the weight the gap
+ * list gives a near miss — so the donut's shares are (list + 0.5 × near) over the same sum, and
+ * its labels say both counts. Coverage is not lifted for poorly matched jobs: it answers "how
+ * much of what's asked does the CV show", which an inflated gap would misstate.
+ */
+export interface Coverage1 {
+  covered: number;
+  missing: number;
+  nearCovered: number;
+  nearMissing: number;
+  nearQuickWins: number;
+  quickWins: number;
+}
+/**
+ * One skill the posts ask for, whatever the CV says about it — what the Upskills chart of
+ * the most-asked skills draws, coloured by `status` (17 Nov).
+ *
+ * 20 Nov: each row says where its demand comes from — `jobs` on the list and `near_misses` the CV
+ * nearly matched, plain counts that always add up to the jobs asking — and how much it matters:
+ * `importance` from the jobs on the list, `near_importance` from the near misses. A job weighs
+ * its `upskills.lift` (1 for a strong match, up to 2 for a poor one) and a near miss half that,
+ * except for a skill the CV lists (`covered`), which weighs its plain count: a skill already
+ * on the CV isn't what a poor match teaches. The chart draws and orders by the two
+ * importances, stacked; its labels and tooltips give the counts.
+ */
+export interface SkillDemand {
+  category?: KeywordCategory;
+  importance: number;
+  jobs: number;
+  nearImportance: number;
+  nearMisses: number;
+  poor: number;
+  share: number;
+  status: SkillStatus;
+  term: string;
+}
+/**
+ * One skill the CV doesn't show, and how much the person's market wants it.
+ */
+export interface Upskill {
+  category?: KeywordCategory;
+  closeTo: string[];
+  examples: UpskillJob[];
+  families: FamilyShare[];
+  jobs: number;
+  nearMissExamples: NearMissJob[];
+  nearMisses: number;
+  outsideField: boolean;
+  poor: number;
+  previous: number;
+  recent: number;
+  requiredShare: number;
+  score: number;
+  share: number;
+  spellings: string[];
+  term: string;
+  trend: "new" | "rising" | "steady" | "falling";
+}
+/**
+ * A skill the posts ask for that the CV backs in a line but doesn't list as a skill: the
+ * cheapest point on the ATS score (ATSC-07), and only the person can decide to claim it.
+ */
+export interface QuickWin {
+  category?: KeywordCategory;
+  importance: number;
+  jobs: number;
+  line: string;
+  nearMisses: number;
+  share: number;
+  term: string;
+}
+/**
  * SRCH-11: a country the profile can target, and what would search it there.
  *
  * Offered whether or not a reviewed board covers it — the open web search reaches every one,
@@ -899,17 +1130,6 @@ export interface SearchProfile {
   skills: string[];
   titles: string[];
   updatedAt: string;
-}
-/**
- * A skill the posts ask for that the CV backs in a line but doesn't list as a skill: the
- * cheapest point on the ATS score (ATSC-07), and only the person can decide to claim it.
- */
-export interface QuickWin {
-  category?: KeywordCategory;
-  jobs: number;
-  line: string;
-  share: number;
-  term: string;
 }
 export interface RunIds {
   runIds: string[];
@@ -1027,17 +1247,6 @@ export interface SiteOption {
   robotsOk?: boolean;
 }
 /**
- * One skill the posts ask for, whatever the CV says about it — what the Upskills chart of
- * the most-asked skills draws, coloured by `status` (17 Nov).
- */
-export interface SkillDemand {
-  category?: KeywordCategory;
-  jobs: number;
-  share: number;
-  status: SkillStatus;
-  term: string;
-}
-/**
  * MATCH-13: a change to the search profile that the person's decisions point at. Nothing
  * changes until they accept it (PRF-04).
  */
@@ -1066,44 +1275,69 @@ export interface TestResult {
   message: string;
   ok: boolean;
 }
-/**
- * One skill the CV doesn't show, and how much the person's market wants it.
- */
-export interface Upskill {
-  category?: KeywordCategory;
-  closeTo: string[];
-  examples: UpskillJob[];
-  jobs: number;
-  previous: number;
-  recent: number;
-  requiredShare: number;
-  score: number;
-  share: number;
-  spellings: string[];
-  term: string;
-  trend: "new" | "rising" | "steady" | "falling";
-}
-export interface UpskillJob {
-  company: string;
-  id: string;
-  title: string;
-}
 export interface UpskillsReport {
   byCategory: CategoryCoverage[];
-  coverage: Coverage1;
+  coverage: Coverage2;
   demand: SkillDemand[];
+  education?: EducationDemand;
+  families: FamilyShare[];
+  family?: string;
   jobsConsidered: number;
   missing: Upskill[];
+  ownFamily?: string;
   quickWins: QuickWin[];
   windowDays: number;
+  withNearMisses?: NearMissView;
 }
 /**
  * Skill asks — one job asking for one skill — by where the CV stands on them. Counted over
  * asks rather than distinct skills, so a skill twenty jobs want weighs twenty times one that a
  * single job mentions.
+ *
+ * 20 Nov: `covered`, `quick_wins` and `missing` are the asks of jobs on the list, as before; the
+ * `near_*` three are the near misses' asks, plain counts too (0 in the view without them). The
+ * page draws a near-miss ask as `NearMissView.near_weight` (0.5) of an ask — the weight the gap
+ * list gives a near miss — so the donut's shares are (list + 0.5 × near) over the same sum, and
+ * its labels say both counts. Coverage is not lifted for poorly matched jobs: it answers "how
+ * much of what's asked does the CV show", which an inflated gap would misstate.
  */
-export interface Coverage1 {
+export interface Coverage2 {
   covered: number;
   missing: number;
+  nearCovered: number;
+  nearMissing: number;
+  nearQuickWins: number;
   quickWins: number;
+}
+/**
+ * One CV line the Writing card has a suggestion for. `source_id` is the master-CV line it
+ * shows, so "add a figure" can point at the line to edit.
+ */
+export interface WritingBullet {
+  figurePrompt?: string;
+  issues: ("weak_verb" | "no_verb" | "no_number")[];
+  sourceId: string | null;
+  suggestions: string[];
+  text: string;
+  weakPhrase?: string;
+  where: string;
+}
+/**
+ * ATSC-09 (20 Nov): how the CV reads, from the JobLeads review of 19 Nov. Suggestions only:
+ * it changes no line, invents no number, and is not part of the ATS score.
+ */
+export interface WritingReport {
+  actionShare: number;
+  bulletCount: number;
+  bullets: WritingBullet[];
+  numberShare: number;
+  skills: WritingTarget;
+  summary: WritingTarget;
+}
+export interface WritingTarget {
+  count: number;
+  high: number;
+  low: number;
+  message: string;
+  ok: boolean;
 }

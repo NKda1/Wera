@@ -4,6 +4,7 @@
 import type {
   ApplicationStatus,
   ApplicationWithJob,
+  AtsCompare,
   Contact,
   CvFile,
   CvFileSaved,
@@ -22,6 +23,7 @@ import type {
   SettingsResponse,
   SiteOption,
   SuggestionList,
+  WritingReport,
 } from "./types";
 
 export class ApiRequestError extends Error {
@@ -135,6 +137,10 @@ export const api = {
   /** The file as page images, saved or not. Problems come back as issues rather than errors. */
   previewCvFile: (appId: string, yaml: string) => call<CvPreview>(`/api/applications/${appId}/cv-file/preview`, { method: "POST", body: { yaml } }),
   // Exports are plain <a download> links to /api/documents/:id/export (EXP-01).
+  /** ATSC-08: the job ad beside the CV, with each keyword's place on both. Read only. */
+  getCompare: (appId: string) => call<AtsCompare>(`/api/applications/${encodeURIComponent(appId)}/compare`),
+  /** ATSC-09: verbs, numbers, summary length and skills count. Suggestions only. */
+  getWriting: (appId: string) => call<WritingReport>(`/api/applications/${encodeURIComponent(appId)}/writing`),
   /** ATSC-05/06: the format lint, run on the PDF as it renders now. Works before approval. */
   getFormatChecks: (docId: string) => call<{ checks: FormatCheck[] }>(`/api/documents/${docId}/checks`),
 

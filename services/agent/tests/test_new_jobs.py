@@ -230,6 +230,20 @@ class TestRespellCities:
         assert stored(store, "job-c").location.city == "McLean"
         assert ("london", "London") not in store.respell_cities()[0]
 
+    def test_words_that_name_no_place_are_no_city(self, store):
+        """20 Nov: "Hybrid", "Not stated" and "London or Manchester" were offered as cities."""
+        store.upsert_jobs(
+            [
+                job("job-d", "https://a.example/4", location=Location(city="Hybrid", country="GB", raw="Hybrid")),
+                job("job-e", "https://a.example/5", location=Location(city="Not stated", raw="Not stated")),
+                job("job-f", "https://a.example/6", location=Location(city="London or Manchester", country="GB", raw="London or Manchester")),
+            ]
+        )  # fmt: skip
+        moves, _ = store.respell_cities(apply=True)
+        assert moves[("Hybrid", None)] == 1 and moves[("Not stated", None)] == 1 and moves[("London or Manchester", None)] == 1
+        saved = stored(store, "job-d")
+        assert (saved.location.city, saved.location.raw) == (None, "Hybrid")
+
 
 class TestTidy:
     """What was saved before the 13 Nov reading rules, brought up to them."""

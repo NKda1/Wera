@@ -202,6 +202,11 @@ class Job(Model):
     # did. Set when the job is first saved and kept through later sightings. A job found via
     # Adzuna carries Adzuna's linked label on its card (their terms).
     via: Opt[str] = None
+    # 20 Nov: the agency or board that reposted this employer's job ("eFinancialCareers"), when the
+    # company WERA shows is the employer its title named ("Investment Banking Analyst - Citi"). With
+    # no limit on any one site, one agency's reposts could fill a search; shown under fourteen
+    # banks' names, they read as what they are — fourteen employers, one of them reposting.
+    posted_by: Opt[str] = None
     # SRCH-34: a post at an international organisation, with its grade and who it is open to.
     international: Opt[InternationalPost] = None
     # 18 Nov: the description to read, and a summary when the person asked for one.
@@ -218,7 +223,20 @@ class SubScore(Model):
 # The checkable kinds of keyword — the ones a CV can name and coverage divides by. Soft skills
 # and culture are a fourth kind in the post, kept in `FitEvidence.culture` instead, so that no
 # reader of `keywords` (coverage, the skills line, the citation guard) can count them by mistake.
-type KeywordCategory = Literal["hard_skill", "methodology", "tool"]
+# `qualification` (20 Nov): a certification or licence a post asks for — CFA, ACA, ACCA, CPA, PMP.
+# Checkable like a skill (a CV holds it or doesn't), and shown on Upskills under its own heading.
+type KeywordCategory = Literal["hard_skill", "methodology", "tool", "qualification"]
+
+
+class EducationAsk(Model):
+    """The degree a post asks for, as it says it (UPSK-05, 20 Nov). Degrees were keywords before
+    this — "Bachelor’s Degree" and "Business Administration" were shown as skills to acquire to a
+    CV with a BSc in Economics. `domain.degrees.meets` judges this against the CV's education."""
+
+    level: Literal["none", "bachelor", "master", "phd", "professional"] = "none"
+    # Fields of study the post names, in its words ("Finance", "Economics", "a related field").
+    subjects: list[str] = []
+    required: bool = False
 
 
 class JobKeyword(Model):
@@ -243,6 +261,9 @@ class FitEvidence(Model):
     # Display and letter context only — never a keyword. They were once in the coverage
     # denominator, twelve of fifteen terms, and coverage read 7%.
     culture: list[str] = []
+    # The degree the post asks for (UPSK-05). None on reports read before 20 Nov, and when the
+    # post asks for none.
+    education: Opt[EducationAsk] = None
     model: str
     # Which version of the scoring rubric judged this (`nodes.fit.RUBRIC`). A score from an older
     # rubric is stale like one from another model, and is re-scored. None: before versions.

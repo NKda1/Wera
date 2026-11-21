@@ -338,6 +338,52 @@
       "title": "Ats",
       "type": "object"
     },
+    "AtsCompare": {
+      "description": "ATSC-08 (20 Nov): the job ad beside the CV, each keyword highlighted where it is.\n\nThe spans are found by the matcher the ATS report uses (`nodes.ats.term_spans` over\n`vocab`), on the text the report measures, and each status is read off them \u2014 so a keyword\ncounted as matched is one the CV column highlights. `coverage` and `potential_coverage` are\nthe report's weighted sums (required counts double): what is on the CV now, and what would be\nwith every keyword the master CV backs added. `stale` is True when a status differs from the\nstored report's, which happens only when the matcher has changed since it was stored.",
+      "properties": {
+        "coverage": {
+          "type": "number"
+        },
+        "cvText": {
+          "type": "string"
+        },
+        "descriptionStatus": {
+          "enum": [
+            "full",
+            "partial",
+            "missing"
+          ],
+          "type": "string"
+        },
+        "jobText": {
+          "type": "string"
+        },
+        "keywords": {
+          "items": {
+            "$ref": "#/$defs/CompareKeyword"
+          },
+          "type": "array"
+        },
+        "potentialCoverage": {
+          "type": "number"
+        },
+        "stale": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "jobText",
+        "cvText",
+        "keywords",
+        "coverage",
+        "potentialCoverage",
+        "descriptionStatus",
+        "stale"
+      ],
+      "title": "AtsCompare",
+      "type": "object"
+    },
     "AtsKeyword": {
       "properties": {
         "category": {
@@ -373,7 +419,7 @@
       "type": "object"
     },
     "AtsPart": {
-      "description": "One part of the ATS score (ATSC-07): its points out of its share of 100, and why.",
+      "description": "One part of the ATS score (ATSC-07): its points out of its share of 100, and why.\n\n20 Nov: a part that can't be measured \u2014 the post names no keywords, so there is nothing to\ncount or to show in a line \u2014 has `points` None and `max` 0, and the other parts' `max` are\nrescaled to fill 100 (resume-matcher's `compute_ats_score`, Apache-2.0). It used to score\nfull marks instead, which is the score claiming a measurement it never made. Either way the\nparts' points add up to the score and their `max` to 100.",
       "properties": {
         "detail": {
           "type": "string"
@@ -395,7 +441,14 @@
           "type": "number"
         },
         "points": {
-          "type": "number"
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -466,6 +519,23 @@
         "suggestedSkills"
       ],
       "title": "AtsReport",
+      "type": "object"
+    },
+    "AtsSpan": {
+      "description": "Where one keyword is on a page: `[start, end)` in the text it was found in.",
+      "properties": {
+        "end": {
+          "type": "integer"
+        },
+        "start": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "title": "AtsSpan",
       "type": "object"
     },
     "BriefItem": {
@@ -551,6 +621,18 @@
           "default": 0,
           "type": "integer"
         },
+        "nearCovered": {
+          "default": 0,
+          "type": "integer"
+        },
+        "nearMissing": {
+          "default": 0,
+          "type": "integer"
+        },
+        "nearQuickWins": {
+          "default": 0,
+          "type": "integer"
+        },
         "quickWins": {
           "default": 0,
           "type": "integer"
@@ -560,6 +642,9 @@
         "covered",
         "quickWins",
         "missing",
+        "nearCovered",
+        "nearQuickWins",
+        "nearMissing",
         "category"
       ],
       "title": "CategoryCoverage",
@@ -704,6 +789,50 @@
       "title": "CompanySource",
       "type": "object"
     },
+    "CompareKeyword": {
+      "description": "One of the post's keywords, with where it is in the ad and in the CV (ATSC-08).\n\n`status` is measured as the ATS report measures it (`AtsCompare`): `matched` is on the CV,\n`in_cv` is in the master CV but not in this pack, `missing` is in neither \u2014 the last two are\nresume-matcher's \"injectable\" and \"non-injectable\".",
+      "properties": {
+        "cvSpans": {
+          "items": {
+            "$ref": "#/$defs/AtsSpan"
+          },
+          "type": "array"
+        },
+        "jobSpans": {
+          "items": {
+            "$ref": "#/$defs/AtsSpan"
+          },
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "matched",
+            "in_cv",
+            "missing"
+          ],
+          "type": "string"
+        },
+        "term": {
+          "type": "string"
+        },
+        "weight": {
+          "enum": [
+            "required",
+            "nice"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "term",
+        "weight",
+        "status",
+        "jobSpans",
+        "cvSpans"
+      ],
+      "title": "CompareKeyword",
+      "type": "object"
+    },
     "Contact": {
       "description": "CV-06: stored separately from the CV and never sent to a model.",
       "properties": {
@@ -795,13 +924,25 @@
       "type": "object"
     },
     "Coverage": {
-      "description": "Skill asks \u2014 one job asking for one skill \u2014 by where the CV stands on them. Counted over\nasks rather than distinct skills, so a skill twenty jobs want weighs twenty times one that a\nsingle job mentions.",
+      "description": "Skill asks \u2014 one job asking for one skill \u2014 by where the CV stands on them. Counted over\nasks rather than distinct skills, so a skill twenty jobs want weighs twenty times one that a\nsingle job mentions.\n\n20 Nov: `covered`, `quick_wins` and `missing` are the asks of jobs on the list, as before; the\n`near_*` three are the near misses' asks, plain counts too (0 in the view without them). The\npage draws a near-miss ask as `NearMissView.near_weight` (0.5) of an ask \u2014 the weight the gap\nlist gives a near miss \u2014 so the donut's shares are (list + 0.5 \u00d7 near) over the same sum, and\nits labels say both counts. Coverage is not lifted for poorly matched jobs: it answers \"how\nmuch of what's asked does the CV show\", which an inflated gap would misstate.",
       "properties": {
         "covered": {
           "default": 0,
           "type": "integer"
         },
         "missing": {
+          "default": 0,
+          "type": "integer"
+        },
+        "nearCovered": {
+          "default": 0,
+          "type": "integer"
+        },
+        "nearMissing": {
+          "default": 0,
+          "type": "integer"
+        },
+        "nearQuickWins": {
           "default": 0,
           "type": "integer"
         },
@@ -813,7 +954,10 @@
       "required": [
         "covered",
         "quickWins",
-        "missing"
+        "missing",
+        "nearCovered",
+        "nearQuickWins",
+        "nearMissing"
       ],
       "title": "Coverage",
       "type": "object"
@@ -1272,6 +1416,101 @@
       "title": "Education",
       "type": "object"
     },
+    "EducationAsk": {
+      "description": "The degree a post asks for, as it says it (UPSK-05, 20 Nov). Degrees were keywords before\nthis \u2014 \"Bachelor\u2019s Degree\" and \"Business Administration\" were shown as skills to acquire to a\nCV with a BSc in Economics. `domain.degrees.meets` judges this against the CV's education.",
+      "properties": {
+        "level": {
+          "default": "none",
+          "enum": [
+            "none",
+            "bachelor",
+            "master",
+            "phd",
+            "professional"
+          ],
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        },
+        "subjects": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "level",
+        "subjects",
+        "required"
+      ],
+      "title": "EducationAsk",
+      "type": "object"
+    },
+    "EducationDemand": {
+      "description": "UPSK-05 (20 Nov): the degrees the jobs ask for against the CV's education. Degrees are\njudged here, in code (`domain.degrees`), and never listed as skills.",
+      "properties": {
+        "cvLevel": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        },
+        "gapExamples": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UpskillJob"
+          },
+          "type": "array"
+        },
+        "jobsAsking": {
+          "type": "integer"
+        },
+        "levelGaps": {
+          "type": "integer"
+        },
+        "levels": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LevelDemand"
+          },
+          "type": "array"
+        },
+        "met": {
+          "type": "integer"
+        },
+        "nearMisses": {
+          "default": 0,
+          "type": "integer"
+        },
+        "programmes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Programme"
+          },
+          "type": "array"
+        },
+        "subjectGaps": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cvLevel",
+        "jobsAsking",
+        "met",
+        "levelGaps",
+        "subjectGaps",
+        "levels",
+        "programmes",
+        "gapExamples",
+        "nearMisses"
+      ],
+      "title": "EducationDemand",
+      "type": "object"
+    },
     "ErrorDetail": {
       "properties": {
         "code": {
@@ -1326,6 +1565,32 @@
       "title": "Estimate",
       "type": "object"
     },
+    "FamilyShare": {
+      "description": "How many jobs of one role family (UPSK-07, 21 Nov): \"Quantitative roles\", 6.",
+      "properties": {
+        "family": {
+          "type": "string"
+        },
+        "jobs": {
+          "type": "integer"
+        },
+        "label": {
+          "type": "string"
+        },
+        "nearMisses": {
+          "default": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "family",
+        "label",
+        "jobs",
+        "nearMisses"
+      ],
+      "title": "FamilyShare",
+      "type": "object"
+    },
     "FitEvidence": {
       "description": "Sub-scores as produced by the scoring model. The total is never model output (MATCH-04).",
       "properties": {
@@ -1347,6 +1612,9 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "education": {
+          "$ref": "#/$defs/EducationAsk"
         },
         "eligibility": {
           "$ref": "#/$defs/SubScore"
@@ -1416,6 +1684,9 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "education": {
+          "$ref": "#/$defs/EducationAsk"
         },
         "eligibility": {
           "$ref": "#/$defs/SubScore"
@@ -1958,6 +2229,9 @@
         "postedAt": {
           "type": "string"
         },
+        "postedBy": {
+          "type": "string"
+        },
         "postedPrecision": {
           "$ref": "#/$defs/PostedPrecision",
           "default": "unknown"
@@ -2230,7 +2504,8 @@
       "enum": [
         "hard_skill",
         "methodology",
-        "tool"
+        "tool",
+        "qualification"
       ],
       "type": "string"
     },
@@ -2312,6 +2587,36 @@
         "call_to_action_and_close"
       ],
       "type": "string"
+    },
+    "LevelDemand": {
+      "description": "How many of the jobs asking for a degree ask for this level, and whether the CV has it.",
+      "properties": {
+        "jobs": {
+          "type": "integer"
+        },
+        "level": {
+          "enum": [
+            "bachelor",
+            "master",
+            "phd"
+          ],
+          "type": "string"
+        },
+        "met": {
+          "type": "boolean"
+        },
+        "share": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "level",
+        "jobs",
+        "share",
+        "met"
+      ],
+      "title": "LevelDemand",
+      "type": "object"
     },
     "Link": {
       "properties": {
@@ -2538,6 +2843,98 @@
         "demoMode"
       ],
       "title": "NavCounts",
+      "type": "object"
+    },
+    "NearMissJob": {
+      "description": "A job the CV nearly matched (UPSK-06): a title the filter dropped, read for what it asks.\n`job_id` when it is a saved (hidden) job; else `url`, the API's link to it.",
+      "properties": {
+        "company": {
+          "type": "string"
+        },
+        "jobId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "company"
+      ],
+      "title": "NearMissJob",
+      "type": "object"
+    },
+    "NearMissView": {
+      "description": "UPSK-06 (20 Nov): the gaps and the degree asks with the jobs the CV nearly matched counted\nin \u2014 at half a scored job's weight \u2014 beside the report's own, which count scored jobs only. The\npage's \"Include near misses\" switch picks between them.\n\nAmended 20 Nov: the view carries its own chart data and quick wins too, under the report's\nown field names, so the page reads either view the same way and the switch moves the charts\nas well as the table (the user, 20 Nov: \"the bar charts and pie charts\" didn't move while the\ntable's \"nearly matched\" counts did). `jobs_considered` is the scored jobs, as on the report \u2014\na near miss is never called a job on the list \u2014 and `near_misses` how many were read.",
+      "properties": {
+        "byCategory": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CategoryCoverage"
+          },
+          "type": "array"
+        },
+        "coverage": {
+          "$ref": "#/$defs/Coverage",
+          "default": {
+            "covered": 0,
+            "missing": 0,
+            "nearCovered": 0,
+            "nearMissing": 0,
+            "nearQuickWins": 0,
+            "quickWins": 0
+          }
+        },
+        "demand": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SkillDemand"
+          },
+          "type": "array"
+        },
+        "education": {
+          "$ref": "#/$defs/EducationDemand"
+        },
+        "jobsConsidered": {
+          "default": 0,
+          "type": "integer"
+        },
+        "missing": {
+          "items": {
+            "$ref": "#/$defs/Upskill"
+          },
+          "type": "array"
+        },
+        "nearMisses": {
+          "type": "integer"
+        },
+        "nearWeight": {
+          "default": 0.5,
+          "type": "number"
+        },
+        "quickWins": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QuickWin"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "nearMisses",
+        "missing",
+        "jobsConsidered",
+        "nearWeight",
+        "quickWins",
+        "demand",
+        "coverage",
+        "byCategory"
+      ],
+      "title": "NearMissView",
       "type": "object"
     },
     "Pack": {
@@ -2792,17 +3189,50 @@
       "title": "ProfileProposalResult",
       "type": "object"
     },
+    "Programme": {
+      "description": "A programme employers in the person's field name: from the postings, counted, or from the\nstarter list (`config/degrees.yaml`) while the postings have named too few.",
+      "properties": {
+        "mentions": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "postings",
+            "starter"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "mentions",
+        "source"
+      ],
+      "title": "Programme",
+      "type": "object"
+    },
     "QuickWin": {
       "description": "A skill the posts ask for that the CV backs in a line but doesn't list as a skill: the\ncheapest point on the ATS score (ATSC-07), and only the person can decide to claim it.",
       "properties": {
         "category": {
           "$ref": "#/$defs/KeywordCategory"
         },
+        "importance": {
+          "default": 0.0,
+          "type": "number"
+        },
         "jobs": {
           "type": "integer"
         },
         "line": {
           "type": "string"
+        },
+        "nearMisses": {
+          "default": 0,
+          "type": "integer"
         },
         "share": {
           "type": "number"
@@ -2815,7 +3245,9 @@
         "term",
         "jobs",
         "share",
-        "line"
+        "line",
+        "nearMisses",
+        "importance"
       ],
       "title": "QuickWin",
       "type": "object"
@@ -3298,6 +3730,9 @@
           "type": "boolean"
         },
         "postedAt": {
+          "type": "string"
+        },
+        "postedBy": {
           "type": "string"
         },
         "postedPrecision": {
@@ -3883,12 +4318,28 @@
       "type": "object"
     },
     "SkillDemand": {
-      "description": "One skill the posts ask for, whatever the CV says about it \u2014 what the Upskills chart of\nthe most-asked skills draws, coloured by `status` (17 Nov).",
+      "description": "One skill the posts ask for, whatever the CV says about it \u2014 what the Upskills chart of\nthe most-asked skills draws, coloured by `status` (17 Nov).\n\n20 Nov: each row says where its demand comes from \u2014 `jobs` on the list and `near_misses` the CV\nnearly matched, plain counts that always add up to the jobs asking \u2014 and how much it matters:\n`importance` from the jobs on the list, `near_importance` from the near misses. A job weighs\nits `upskills.lift` (1 for a strong match, up to 2 for a poor one) and a near miss half that,\nexcept for a skill the CV lists (`covered`), which weighs its plain count: a skill already\non the CV isn't what a poor match teaches. The chart draws and orders by the two\nimportances, stacked; its labels and tooltips give the counts.",
       "properties": {
         "category": {
           "$ref": "#/$defs/KeywordCategory"
         },
+        "importance": {
+          "default": 0.0,
+          "type": "number"
+        },
         "jobs": {
+          "type": "integer"
+        },
+        "nearImportance": {
+          "default": 0.0,
+          "type": "number"
+        },
+        "nearMisses": {
+          "default": 0,
+          "type": "integer"
+        },
+        "poor": {
+          "default": 0,
           "type": "integer"
         },
         "share": {
@@ -3904,7 +4355,11 @@
       "required": [
         "term",
         "jobs",
+        "nearMisses",
         "share",
+        "importance",
+        "nearImportance",
+        "poor",
         "status"
       ],
       "title": "SkillDemand",
@@ -4257,7 +4712,33 @@
           },
           "type": "array"
         },
+        "families": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FamilyShare"
+          },
+          "type": "array"
+        },
         "jobs": {
+          "type": "integer"
+        },
+        "nearMissExamples": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NearMissJob"
+          },
+          "type": "array"
+        },
+        "nearMisses": {
+          "default": 0,
+          "type": "integer"
+        },
+        "outsideField": {
+          "default": false,
+          "type": "boolean"
+        },
+        "poor": {
+          "default": 0,
           "type": "integer"
         },
         "previous": {
@@ -4299,14 +4780,19 @@
         "term",
         "spellings",
         "jobs",
+        "nearMisses",
         "share",
         "requiredShare",
         "score",
+        "poor",
         "trend",
         "recent",
         "previous",
         "closeTo",
-        "examples"
+        "examples",
+        "nearMissExamples",
+        "families",
+        "outsideField"
       ],
       "title": "Upskill",
       "type": "object"
@@ -4345,6 +4831,9 @@
           "default": {
             "covered": 0,
             "missing": 0,
+            "nearCovered": 0,
+            "nearMissing": 0,
+            "nearQuickWins": 0,
             "quickWins": 0
           }
         },
@@ -4355,6 +4844,19 @@
           },
           "type": "array"
         },
+        "education": {
+          "$ref": "#/$defs/EducationDemand"
+        },
+        "families": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FamilyShare"
+          },
+          "type": "array"
+        },
+        "family": {
+          "type": "string"
+        },
         "jobsConsidered": {
           "type": "integer"
         },
@@ -4364,6 +4866,9 @@
           },
           "type": "array"
         },
+        "ownFamily": {
+          "type": "string"
+        },
         "quickWins": {
           "items": {
             "$ref": "#/$defs/QuickWin"
@@ -4372,6 +4877,9 @@
         },
         "windowDays": {
           "type": "integer"
+        },
+        "withNearMisses": {
+          "$ref": "#/$defs/NearMissView"
         }
       },
       "required": [
@@ -4381,7 +4889,8 @@
         "quickWins",
         "demand",
         "coverage",
-        "byCategory"
+        "byCategory",
+        "families"
       ],
       "title": "UpskillsReport",
       "type": "object"
@@ -4431,6 +4940,124 @@
         "hidden"
       ],
       "title": "WhereChange",
+      "type": "object"
+    },
+    "WritingBullet": {
+      "description": "One CV line the Writing card has a suggestion for. `source_id` is the master-CV line it\nshows, so \"add a figure\" can point at the line to edit.",
+      "properties": {
+        "figurePrompt": {
+          "type": "string"
+        },
+        "issues": {
+          "items": {
+            "enum": [
+              "weak_verb",
+              "no_verb",
+              "no_number"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sourceId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "suggestions": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "text": {
+          "type": "string"
+        },
+        "weakPhrase": {
+          "type": "string"
+        },
+        "where": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceId",
+        "text",
+        "where",
+        "issues",
+        "suggestions"
+      ],
+      "title": "WritingBullet",
+      "type": "object"
+    },
+    "WritingReport": {
+      "description": "ATSC-09 (20 Nov): how the CV reads, from the JobLeads review of 19 Nov. Suggestions only:\nit changes no line, invents no number, and is not part of the ATS score.",
+      "properties": {
+        "actionShare": {
+          "type": "number"
+        },
+        "bulletCount": {
+          "type": "integer"
+        },
+        "bullets": {
+          "items": {
+            "$ref": "#/$defs/WritingBullet"
+          },
+          "type": "array"
+        },
+        "numberShare": {
+          "type": "number"
+        },
+        "skills": {
+          "$ref": "#/$defs/WritingTarget"
+        },
+        "summary": {
+          "$ref": "#/$defs/WritingTarget"
+        }
+      },
+      "required": [
+        "bullets",
+        "bulletCount",
+        "actionShare",
+        "numberShare",
+        "summary",
+        "skills"
+      ],
+      "title": "WritingReport",
+      "type": "object"
+    },
+    "WritingTarget": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "high": {
+          "type": "integer"
+        },
+        "low": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "count",
+        "low",
+        "high",
+        "ok",
+        "message"
+      ],
+      "title": "WritingTarget",
       "type": "object"
     },
     "YearMonth": {

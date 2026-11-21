@@ -2,7 +2,7 @@
 
 import { Check, Copy, Minus, Plus } from "lucide-react";
 import { type ReactNode, useState } from "react";
-import { roleDates, year } from "@/lib/format";
+import { displayCase, roleDates, year } from "@/lib/format";
 import type { AnswerItem, CoverLetter, MasterCV, TailoredCV } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -210,7 +210,7 @@ export function LetterPaper({
             </span>
           </div>
         ))}
-        <p className="whitespace-pre-line">{letter.signoff.replace(/\n.*$/, `\n${name}`)}</p>
+        <p className="whitespace-pre-line">{letter.signoff.replace(/\n.*$/, `\n${displayCase(name)}`)}</p>
       </article>
     </Card>
   );

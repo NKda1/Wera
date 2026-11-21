@@ -31,133 +31,233 @@ watch_titles: []
 max_companies: 60
 discover_every_days: 7
 companies:
-- name: Fospha
+- name: William Blair
   vendor: greenhouse
-  token: fosphamarketing
-  discovered_on: '2026-11-13'
-  matched: Junior Software Engineer
-- name: Wiz, Inc.
+  token: williamblair
+  discovered_on: '2026-11-20'
+  matched: Investment Banking Analyst
+- name: AQ Technology Partners
   vendor: greenhouse
-  token: wizinc
-  discovered_on: '2026-10-29'
-  matched: Backend Engineer
-- name: Orbitalindustries
-  vendor: ashby
-  token: orbitalindustries
-  discovered_on: '2026-10-29'
-  matched: Backend Engineer
-- name: Dualentry
-  vendor: ashby
-  token: dualentry
-  discovered_on: '2026-10-29'
-  matched: Backend Engineer
-- name: Monzo
+  token: aqtechnologypartners
+  discovered_on: '2026-11-20'
+  matched: Investment Banking Analyst
+- name: Financial Technology Partners
   vendor: greenhouse
-  token: monzo
-  discovered_on: '2026-10-29'
-  matched: Backend Engineer
-- name: Capsa
+  token: financialtechnologypartners
+  discovered_on: '2026-11-20'
+  matched: Investment Banking Analyst
+- name: Agentis Capital Advisors
   vendor: ashby
-  token: capsa
-  discovered_on: '2026-10-29'
-  matched: Backend Engineer
-- name: Deducta
-  vendor: ashby
-  token: deducta
-  discovered_on: '2026-11-13'
-  matched: Backend Engineer
-- name: Referrals Only
+  token: Agentis-Capital-Advisors
+  discovered_on: '2026-11-20'
+  matched: Investment Banking Analyst
+- name: LionTree
   vendor: greenhouse
-  token: monzoreferrals
-  discovered_on: '2026-10-29'
-  matched: Backend Engineer
-- name: Iwoca.Co.Uk
+  token: liontree
+  discovered_on: '2026-11-20'
+  matched: Investment Banking Analyst
+- name: Maca
   vendor: ashby
-  token: iwoca.co.uk
-  discovered_on: '2026-11-13'
-  matched: Backend Engineer
-- name: Scale AI
+  token: maca
+  discovered_on: '2026-11-20'
+  matched: Investment Banking Analyst
+- name: Julius
+  vendor: ashby
+  token: julius
+  discovered_on: '2026-11-20'
+  matched: Investment Banking Analyst
+- name: 10xteam
+  vendor: ashby
+  token: 10xteam
+  discovered_on: '2026-11-20'
+  matched: Investment Banking Analyst
+- name: Dadavidson
+  vendor: lever
+  token: dadavidson
+  discovered_on: '2026-11-20'
+  matched: Investment Banking Analyst
+- name: Super.Com
+  vendor: ashby
+  token: super.com
+  discovered_on: '2026-11-20'
+  matched: Corporate Finance Analyst
+- name: Cfsenergy
+  vendor: lever
+  token: cfsenergy
+  discovered_on: '2026-11-20'
+  matched: Corporate Finance Analyst
+- name: ComparaJá
   vendor: greenhouse
-  token: scaleai
-  discovered_on: '2026-11-05'
-  matched: Backend Engineer
+  token: comparaja
+  discovered_on: '2026-11-20'
+  matched: Corporate Finance Analyst
+- name: GW&K Investment Management, LLC
+  vendor: greenhouse
+  token: gwkinvestmentmanagementllc
+  discovered_on: '2026-11-20'
+  matched: Equity Research Analyst
+- name: YipitData
+  vendor: greenhouse
+  token: yipitdata
+  discovered_on: '2026-11-20'
+  matched: Equity Research Analyst
+- name: DV Trading
+  vendor: greenhouse
+  token: dvtrading
+  discovered_on: '2026-11-20'
+  matched: Equity Research Analyst
+- name: CTC Lateral - Website & LinkedIn
+  vendor: greenhouse
+  token: chicagotrading
+  discovered_on: '2026-11-20'
+  matched: Equity Research Analyst
+- name: Wasatchglobal
+  vendor: lever
+  token: wasatchglobal
+  discovered_on: '2026-11-20'
+  matched: Equity Research Analyst
+- name: Point72
+  vendor: greenhouse
+  token: point72
+  discovered_on: '2026-11-20'
+  matched: Equity Research Analyst
+- name: Airwallex
+  vendor: ashby
+  token: airwallex
+  discovered_on: '2026-11-20'
+  matched: Financial Analyst
+- name: Pointfive
+  vendor: ashby
+  token: pointfive
+  discovered_on: '2026-11-20'
+  matched: Financial Analyst
+- name: Joyfulhealth
+  vendor: ashby
+  token: joyfulhealth
+  discovered_on: '2026-11-20'
+  matched: Financial Analyst
+- name: Integrate
+  vendor: ashby
+  token: integrate
+  discovered_on: '2026-11-20'
+  matched: Financial Analyst
+- name: VectorSolutions
+  vendor: ashby
+  token: VectorSolutions
+  discovered_on: '2026-11-20'
+  matched: Financial Analyst
+- name: Nox Metals
+  vendor: ashby
+  token: nox-metals
+  discovered_on: '2026-11-20'
+  matched: Financial Analyst
+- name: Sketchpro
+  vendor: ashby
+  token: sketchpro
+  discovered_on: '2026-11-20'
+  matched: Financial Analyst
+- name: Pushpress
+  vendor: lever
+  token: pushpress
+  discovered_on: '2026-11-20'
+  matched: Financial Analyst
+- name: WRITER
+  vendor: ashby
+  token: WRITER
+  discovered_on: '2026-11-20'
+  matched: Financial Analyst
+- name: EarnIn
+  vendor: greenhouse
+  token: earnin
+  discovered_on: '2026-11-20'
+  matched: M&A Analyst
+- name: Gyde
+  vendor: greenhouse
+  token: gyde
+  discovered_on: '2026-11-20'
+  matched: M&A Analyst
+- name: Banyan Software
+  vendor: greenhouse
+  token: banyansoftware
+  discovered_on: '2026-11-20'
+  matched: M&A Analyst
+- name: Banyan Canopy Group
+  vendor: greenhouse
+  token: banyancanopygroup
+  discovered_on: '2026-11-20'
+  matched: M&A Analyst
+- name: Crypto
+  vendor: lever
+  token: crypto
+  discovered_on: '2026-11-20'
+  matched: M&A Analyst
+- name: Basata
+  vendor: ashby
+  token: basata
+  discovered_on: '2026-11-20'
+  matched: Valuation Analyst
+- name: Peerspace
+  vendor: lever
+  token: peerspace
+  discovered_on: '2026-11-20'
+  matched: Valuation Analyst
+- name: Dave
+  vendor: ashby
+  token: dave
+  discovered_on: '2026-11-20'
+  matched: Valuation Analyst
+- name: Vaulted Deep
+  vendor: ashby
+  token: vaulted-deep
+  discovered_on: '2026-11-20'
+  matched: Valuation Analyst
+- name: Hims And Hers
+  vendor: ashby
+  token: hims-and-hers
+  discovered_on: '2026-11-20'
+  matched: Valuation Analyst
+- name: Centuro Global Careers
+  vendor: ashby
+  token: centuro-global-careers
+  discovered_on: '2026-11-20'
+  matched: Valuation Analyst
+- name: TPG Careers Page
+  vendor: greenhouse
+  token: tpgcareers
+  discovered_on: '2026-11-20'
+  matched: Asset Management Analyst
+- name: Prometheus Real Estate Group
+  vendor: greenhouse
+  token: prometheusrealestategroup
+  discovered_on: '2026-11-20'
+  matched: Asset Management Analyst
+- name: Atoms
+  vendor: greenhouse
+  token: atoms
+  discovered_on: '2026-11-20'
+  matched: Asset Management Analyst
+- name: Cipher Digital
+  vendor: greenhouse
+  token: cipherminingtechnologiesinc
+  discovered_on: '2026-11-20'
+  matched: Asset Management Analyst
+- name: Northmarq
+  vendor: greenhouse
+  token: northmarq
+  discovered_on: '2026-11-20'
+  matched: Asset Management Analyst
 - name: Deliveroo
   vendor: greenhouse
   token: deliveroo
   discovered_on: '2026-11-13'
   matched: Backend Engineer
-- name: Ripple
+- name: Case in Point Consulting
   vendor: greenhouse
-  token: ripple
-  discovered_on: '2026-10-29'
-  matched: Software Engineer
-- name: Cloudflare
-  vendor: greenhouse
-  token: cloudflare
-  discovered_on: '2026-11-05'
-  matched: Systems Engineer
-- name: Anthropic
-  vendor: greenhouse
-  token: anthropic
-  discovered_on: '2026-10-29'
-  matched: Software Engineer
-- name: Tripadvisor
-  vendor: greenhouse
-  token: tripadvisor
-  discovered_on: '2026-10-29'
-  matched: Software Engineer
-- name: Addepar
-  vendor: greenhouse
-  token: addepar1
-  discovered_on: '2026-11-05'
-  matched: Software Engineer
-- name: Graphcore
-  vendor: greenhouse
-  token: graphcore
-  discovered_on: '2026-10-29'
-  matched: Software Engineer
-- name: Clear Street
-  vendor: greenhouse
-  token: clearstreet
-  discovered_on: '2026-11-05'
-  matched: Software Engineer
-- name: Yext
-  vendor: greenhouse
-  token: yext
-  discovered_on: '2026-11-13'
-  matched: Systems Engineer
-- name: Cloudflare Events
-  vendor: greenhouse
-  token: careersday
-  discovered_on: '2026-11-05'
-  matched: Systems Engineer
-- name: Catapult Sports
-  vendor: greenhouse
-  token: catapultsports
-  discovered_on: '2026-10-29'
-  matched: Graduate Software Engineer
-- name: Sensor Tower
-  vendor: ashby
-  token: sensor-tower
-  discovered_on: '2026-11-05'
-  matched: DevOps Engineer
-- name: Teza Technologies
-  vendor: ashby
-  token: teza-technologies
-  discovered_on: '2026-11-05'
-  matched: DevOps Engineer
-- name: Ledgy
-  vendor: greenhouse
-  token: ledgy
-  discovered_on: '2026-11-13'
-  matched: DevOps Engineer
-- name: Walkme
+  token: caseinpointconsulting
+  discovered_on: '2026-11-20'
+  matched: Asset Management Analyst
+- name: Solarlandscape
   vendor: lever
-  token: walkme
-  discovered_on: '2026-11-05'
-  matched: DevOps Engineer
-- name: Wiz
-  vendor: greenhouse
-  token: wizprivate
-  discovered_on: '2026-11-05'
-  matched: DevOps Engineer
+  token: solarlandscape
+  discovered_on: '2026-11-20'
+  matched: Asset Management Analyst

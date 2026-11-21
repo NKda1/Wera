@@ -201,11 +201,18 @@ class FormatCheck(Model):
 
 
 class AtsPart(Model):
-    """One part of the ATS score (ATSC-07): its points out of its share of 100, and why."""
+    """One part of the ATS score (ATSC-07): its points out of its share of 100, and why.
+
+    20 Nov: a part that can't be measured — the post names no keywords, so there is nothing to
+    count or to show in a line — has `points` None and `max` 0, and the other parts' `max` are
+    rescaled to fill 100 (resume-matcher's `compute_ats_score`, Apache-2.0). It used to score
+    full marks instead, which is the score claiming a measurement it never made. Either way the
+    parts' points add up to the score and their `max` to 100.
+    """
 
     id: Literal["keywords", "evidence", "alignment", "structure", "length"]
     label: str
-    points: float
+    points: float | None
     max: float
     detail: str
 
@@ -246,6 +253,87 @@ class AtsReport(Model):
         if self.backed_coverage < 0:
             self.backed_coverage = self.coverage
         return self
+
+
+class AtsSpan(Model):
+    """Where one keyword is on a page: `[start, end)` in the text it was found in."""
+
+    start: int
+    end: int
+
+
+class CompareKeyword(Model):
+    """One of the post's keywords, with where it is in the ad and in the CV (ATSC-08).
+
+    `status` is measured as the ATS report measures it (`AtsCompare`): `matched` is on the CV,
+    `in_cv` is in the master CV but not in this pack, `missing` is in neither — the last two are
+    resume-matcher's "injectable" and "non-injectable".
+    """
+
+    term: str
+    weight: Literal["required", "nice"]
+    status: Literal["matched", "in_cv", "missing"]
+    job_spans: list[AtsSpan]
+    cv_spans: list[AtsSpan]
+
+
+class AtsCompare(Model):
+    """ATSC-08 (20 Nov): the job ad beside the CV, each keyword highlighted where it is.
+
+    The spans are found by the matcher the ATS report uses (`nodes.ats.term_spans` over
+    `vocab`), on the text the report measures, and each status is read off them — so a keyword
+    counted as matched is one the CV column highlights. `coverage` and `potential_coverage` are
+    the report's weighted sums (required counts double): what is on the CV now, and what would be
+    with every keyword the master CV backs added. `stale` is True when a status differs from the
+    stored report's, which happens only when the matcher has changed since it was stored.
+    """
+
+    job_text: str
+    cv_text: str
+    keywords: list[CompareKeyword]
+    coverage: float
+    potential_coverage: float
+    # Whether the ad is the full post. A partial description has fewer keywords to show.
+    description_status: Literal["full", "partial", "missing"]
+    stale: bool = False
+
+
+class WritingBullet(Model):
+    """One CV line the Writing card has a suggestion for. `source_id` is the master-CV line it
+    shows, so "add a figure" can point at the line to edit."""
+
+    source_id: str | None
+    text: str
+    where: str
+    issues: list[Literal["weak_verb", "no_verb", "no_number"]]
+    # The weak opening it found ("Collaborated in"), and stronger verbs to consider in its place.
+    weak_phrase: Opt[str] = None
+    suggestions: list[str] = []
+    # `cv.profile`'s implied result for this line ("cut onboarding time"): the part a number
+    # would quantify. Never a number — the person knows it, WERA doesn't.
+    figure_prompt: Opt[str] = None
+
+
+class WritingTarget(Model):
+    count: int
+    low: int
+    high: int
+    ok: bool
+    message: str
+
+
+class WritingReport(Model):
+    """ATSC-09 (20 Nov): how the CV reads, from the JobLeads review of 19 Nov. Suggestions only:
+    it changes no line, invents no number, and is not part of the ATS score."""
+
+    bullets: list[WritingBullet]
+    bullet_count: int
+    # Resume-ATS's two measures (ideas only, no code): the share of lines that open with an
+    # action verb, and the share that state a number.
+    action_share: float
+    number_share: float
+    summary: WritingTarget
+    skills: WritingTarget
 
 
 class AnswerItem(Model):

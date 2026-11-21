@@ -1,6 +1,7 @@
 """Keyword normalisation (ATSC-01): a synonym map so "Postgres" counts as PostgreSQL."""
 
 import re
+import unicodedata
 from functools import lru_cache
 from typing import Protocol
 
@@ -108,6 +109,28 @@ SYNONYMS: dict[str, list[str]] = {
     # 175 fit reports' keywords — "gcp" and "google cloud platform" were counted as two missing
     # skills, and an ad saying "Amazon Web Services" didn't match a CV saying AWS.
     "aws": ["aws", "amazon web services"],
+    # 20 Nov, from the finance CV's Upskills: "discounted cash flow" was a gap to a CV built on "DCF
+    # valuations", "comps" to one that ran "comparable company … benchmarking", and "Excel
+    # modeling" to one that lists Excel. Finance writes its methods as abbreviations, and a CV and a
+    # post rarely pick the same one.
+    "discounted cash flow": ["discounted cash flow", "dcf", "dcf valuation", "dcf valuations", "dcf model", "dcf models"],
+    "comparable company analysis": [
+        "comparable company analysis",
+        "comparable companies",
+        "comparable company",
+        "comps",
+        "trading comps",
+        "trading comparables",
+        "comparables",
+    ],  # fmt: skip
+    "leveraged buyout": ["leveraged buyout", "leveraged buyouts", "lbo", "lbo model", "lbo models", "lbo modeling"],
+    "mergers and acquisitions": ["mergers and acquisitions", "mergers & acquisitions", "m&a"],
+    "financial modeling": ["financial modeling", "financial model", "financial models", "excel modeling", "3-statement model"],
+    "microsoft excel": ["microsoft excel", "ms excel", "excel"],
+    "microsoft word": ["microsoft word", "ms word"],
+    "microsoft powerpoint": ["microsoft powerpoint", "ms powerpoint", "powerpoint"],
+    "equity research": ["equity research", "equity analysis", "stock research"],
+    "pitch books": ["pitch books", "pitch book", "pitchbook", "pitchbooks", "pitch decks"],
     "gcp": ["gcp", "google cloud", "google cloud platform"],
     "azure": ["azure", "microsoft azure"],
     "javascript": ["javascript", "js", "ecmascript"],
@@ -149,6 +172,8 @@ SYNONYMS: dict[str, list[str]] = {
 # language is `Go` but the architecture is `REST`, and "Rest of the migration" at the start of a
 # bullet is exactly the false positive this exists to stop.
 CASE_SENSITIVE_ALIASES: dict[str, str] = {
+    # 20 Nov: "candidates who excel under pressure" is not a spreadsheet.
+    "excel": "Excel",
     "go": "Go",
     "rest": "REST",
     "rag": "RAG",
@@ -182,6 +207,58 @@ QUALIFIER_TAIL = re.compile(
     r"\s+(?:pipelines?|experience|skills?|knowledge|tools?|tooling|development|practices?|"
     r"frameworks?|libraries|stack|expertise|proficiency|fundamentals|principles|techniques?)$"
 )
+
+
+# Typography a post or a CV may use for the same character. "Bachelor’s Degree" (U+2019) slipped
+# past `NOT_A_SKILL`'s "bachelor's degree" on 20 Nov and was shown as a gap to a CV with a BSc:
+# every comparison here was an exact string test on whatever the page typed.
+_TYPOGRAPHY = str.maketrans(
+    {
+        "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'", "\u00b4": "'", "\u0060": "'",
+        "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u2033": '"',
+        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-", "\u2212": "-",
+        "\u00a0": " ", "\u202f": " ", "\u2009": " ",
+    }
+)  # fmt: skip
+
+
+# British and American spellings of the same word, written American-side so both sides of a
+# comparison meet: "Financial Modeling" in a post was a gap to "financial modelling" on a CV (20 Nov).
+# Only whole words, and only words that mean one thing — not "program", which is also code.
+_SPELLINGS = {
+    "modelling": "modeling", "modelled": "modeled", "labelling": "labeling", "travelling": "traveling",
+    "analyse": "analyze", "analysed": "analyzed", "analysing": "analyzing", "analyser": "analyzer",
+    "optimise": "optimize", "optimised": "optimized", "optimising": "optimizing", "optimisation": "optimization",
+    "organisation": "organization", "organisations": "organizations", "organisational": "organizational",
+    "visualisation": "visualization", "visualise": "visualize", "standardisation": "standardization",
+    "prioritise": "prioritize", "prioritisation": "prioritization", "summarise": "summarize",
+    "synthesise": "synthesize", "synthesised": "synthesized", "utilise": "utilize", "utilisation": "utilization",
+    "behaviour": "behavior", "behavioural": "behavioral", "colour": "color", "centre": "center",
+    "catalogue": "catalog", "licence": "license", "defence": "defense", "programme": "program",
+    "programmes": "programs", "amortisation": "amortization", "capitalisation": "capitalization",
+    "monetisation": "monetization", "securitisation": "securitization", "localisation": "localization",
+}  # fmt: skip
+_SPELLING_RE = re.compile(r"\b(" + "|".join(sorted(_SPELLINGS, key=len, reverse=True)) + r")\b")
+
+
+def _one_spelling(lowered: str) -> str:
+    return _SPELLING_RE.sub(lambda m: _SPELLINGS[m.group(1)], lowered)
+
+
+@lru_cache(maxsize=1024)
+def normalise_text(text: str) -> str:
+    """The text with one spelling per character, case kept: NFKC (ligatures, full-width forms),
+    curly quotes and primes made straight, dashes made "-", every space one space.
+
+    Applied to both sides of every comparison in this module, so a post's typography can never
+    decide whether a term matches. Case is kept for `CASE_SENSITIVE_ALIASES`; callers lower it."""
+    return " ".join(unicodedata.normalize("NFKC", text).translate(_TYPOGRAPHY).split())
+
+
+def normalise_term(term: str) -> str:
+    """`normalise_text`, lower-cased and in one spelling (`_SPELLINGS`): the form every lookup key
+    here is written in."""
+    return _one_spelling(normalise_text(term).lower())
 
 
 def _groups() -> dict[str, tuple[str, ...]]:
@@ -228,11 +305,17 @@ NOT_A_SKILL = frozenset(
 )  # fmt: skip
 
 
+def not_a_skill(term: str) -> bool:
+    """Whether a post's term is culture or a field of study rather than a skill (`NOT_A_SKILL`),
+    under any typography and any qualifier tail ("Communication skills")."""
+    return normalise_term(term) in NOT_A_SKILL or group_key(term) in NOT_A_SKILL
+
+
 def group_key(term: str) -> str:
     """One key per requirement, for counting the same skill once however posts spell it (UPSK-01):
     the group's first spelling for a term in a synonym group, else the term with one qualifier tail
     peeled ("Kafka experience" → "kafka") — the same reach as `aliases_for`."""
-    chain = _reductions(term.lower().strip())
+    chain = _reductions(normalise_term(term))
     for form in chain:
         if group := _GROUPS.get(form):
             return group[0]
@@ -247,8 +330,7 @@ def aliases_for(term: str) -> list[str]:
     reduction, so "Kafka experience" finds "Kafka" with nothing mapped — but only one level, since
     peeling further is guessing rather than normalising.
     """
-    key = term.lower().strip()
-    chain = _reductions(key)
+    chain = _reductions(normalise_term(term))
     for form in chain:
         if group := _GROUPS.get(form):
             return list(group)
@@ -257,7 +339,22 @@ def aliases_for(term: str) -> list[str]:
 
 @lru_cache(maxsize=4096)
 def _alias_re(alias: str) -> re.Pattern[str]:
-    return re.compile(rf"(^|[^a-z0-9]){re.escape(alias)}($|[^a-z0-9])")
+    """The alias as a whole word: no word character touching either end (20 Nov, after
+    resume-matcher's `keyword_in_text`, Apache-2.0 — see NOTICE).
+
+    Lookarounds rather than the boundary characters this used to consume, for two reasons. A
+    match is now the alias and nothing else, so its span is where the term is on the page — what
+    the side-by-side view highlights (`nodes.ats.term_spans`) — and two occurrences one space
+    apart are both found. And `\\w` is Unicode, so "café" no longer ends a word at the "é".
+
+    The boundary only applies on a side where the alias itself ends in a word character. "C++"
+    and "C#" end in punctuation, so "C++17" and "C#," are C++ and C#; ".NET" starts with it, so
+    "ASP.NET" is .NET. The other side still holds: "java" never matches "javascript", nor "c#"
+    "abc#".
+    """
+    head = r"(?<!\w)" if re.match(r"\w", alias) else ""
+    tail = r"(?!\w)" if re.search(r"\w$", alias) else ""
+    return re.compile(rf"{head}{re.escape(alias)}{tail}")
 
 
 @lru_cache(maxsize=256)
@@ -268,8 +365,9 @@ def _proper_noun_re(alias: str) -> re.Pattern[str]:
 def text_has_term(text: str, term: str) -> bool:
     """Whole-word match of a term or any of its synonyms, case-insensitive except where an alias
     is also an ordinary word (`CASE_SENSITIVE_ALIASES`, `AMBIGUOUS_ALIASES`)."""
-    haystack = text.lower()
-    own = set(_reductions(term.lower().strip())[:2])
+    text = normalise_text(text)
+    haystack = _one_spelling(text.lower())
+    own = set(_reductions(normalise_term(term))[:2])
     for alias in aliases_for(term):
         if alias in AMBIGUOUS_ALIASES and alias not in own:
             continue
@@ -363,7 +461,17 @@ def master_cv_text(cv: MasterCV) -> str:
 
 
 def cv_line_index(cv: MasterCV) -> dict[str, dict[str, str]]:
-    """Every bullet in the CV, keyed by id, plus the summary."""
+    """Every bullet in the CV, keyed by id, plus the summary and each education entry.
+
+    Education entries are lines too since 20 Nov — "BSc (Hons) Economics and Finance, London
+    School of Economics and Political Science (LSE)", under the entry's own id. The letter's
+    opening is told to say who the applicant is "as their headline, education or summary puts
+    it (cite that line)", and until then only the summary had an id to cite: an opening built on
+    the degree cited nothing, failed the guard for "no master-CV source" without a repair, and was
+    replaced by a 25–40 word plain introduction — one of the reasons two of 20 Nov's seven letters
+    came out at 130–133 words. The entry's text is its degree and institution as the CV writes
+    them, so a letter citing it is held to that wording like any other line.
+    """
     out: dict[str, dict[str, str]] = {}
     if cv.summary:
         out[cv.summary.id] = {"text": cv.summary.text, "where": "Summary"}
@@ -371,6 +479,7 @@ def cv_line_index(cv: MasterCV) -> dict[str, dict[str, str]]:
         for b in role.bullets:
             out[b.id] = {"text": b.text, "where": f"{role.title} — {role.org}"}
     for ed in cv.education:
+        out[ed.id] = {"text": f"{ed.degree}, {ed.institution}", "where": "Education"}
         for b in ed.notes or []:
             out[b.id] = {"text": b.text, "where": ed.degree}
     return out

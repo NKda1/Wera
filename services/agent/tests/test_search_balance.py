@@ -2,8 +2,9 @@
 
 On 18 Nov, 9 of the 16 jobs left on the list were one agency's London reposts through Reed, and a
 country with weaker matches could get none of a search's reads. Now: the best match first, within a
-floor for each ticked country and a ceiling for each source; APIs, Google and Firecrawl each with a
-job; and the pool of public postings shared by an industry, ranked against each reader's own CV.
+floor for each ticked country; APIs, Google and Firecrawl each with a job; and the pool of public
+postings shared by an industry, ranked against each reader's own CV. The per-source ceiling went on
+20 Nov: reads are shared out by quality, not by site.
 """
 
 import fakeredis
@@ -40,31 +41,27 @@ class TestTheShares:
     def test_each_ticked_country_gets_its_floor_even_with_weaker_matches(self):
         """The UK's matches are all better, but Switzerland still gets its share of the 12."""
         ordered = [*(posting(i, country="gb") for i in range(12)), *(posting(i, country="ch") for i in range(12))]
-        balance = Balance(["ch", "gb"], per_run=12, ceiling=1.0)
+        balance = Balance(["ch", "gb"], per_run=12)
         chosen = balance.choose(ordered, 12)
         assert sum(t.country == "ch" for t in chosen) >= 6
 
-    def test_no_source_takes_more_than_its_ceiling_while_others_have_postings(self):
-        """18 Nov: one agency's Reed reposts were 9 of 16. Reed's matches are all better here, but
-        three sources each keep to 40% of the 12."""
+    def test_one_site_may_fill_a_search_with_its_better_matches(self):
+        """20 Nov, reversing 18 Nov's 40% ceiling: "1 site could actually contain a lot of quality
+        jobs". Reed's matches are all better here, so Reed's are read."""
         ordered = [
-            *(posting(i, country="gb", via="reed") for i in range(10)),
+            *(posting(i, country="gb", via="reed") for i in range(12)),
             *(posting(i, country="gb") for i in range(10)),
             *(posting(i, country="gb", via="adzuna") for i in range(10)),
         ]
-        chosen = Balance(["gb"], per_run=12, ceiling=0.4).choose(ordered, 12)
-        counts = {s: sum(source_of(t) == s for t in chosen) for s in ("reed", "google", "adzuna")}
-        assert counts == {"reed": 4, "google": 4, "adzuna": 4}
+        chosen = Balance(["gb"], per_run=12).choose(ordered, 12)
+        assert chosen == ordered[:12]
+        assert sum(source_of(t) == "reed" for t in chosen) == 12
 
-    def test_two_sources_take_turns_when_both_reach_the_ceiling(self):
-        ordered = [*(posting(i, country="gb", via="reed") for i in range(10)), *(posting(i, country="gb") for i in range(10))]
-        chosen = Balance(["gb"], per_run=12, ceiling=0.4).choose(ordered, 12)
-        assert sum(source_of(t) == "reed" for t in chosen) == 6
-
-    def test_a_source_with_nothing_better_gives_up_its_ceiling(self):
-        """Every posting from one API: the slots are filled rather than left empty."""
-        ordered = [posting(i, country="gb", via="reed") for i in range(12)]
-        assert len(Balance(["gb"], per_run=12, ceiling=0.4).choose(ordered, 12)) == 12
+    def test_the_country_floor_still_stands(self):
+        """It is about places, not sites: the US's weaker matches still get their share."""
+        ordered = [*(posting(i, country="gb", via="reed") for i in range(12)), *(posting(i, country="us") for i in range(6))]
+        chosen = Balance(["gb", "us"], per_run=12).choose(ordered, 12)
+        assert sum(t.country == "us" for t in chosen) == 6
 
     def test_one_country_and_one_source_is_plain_best_match(self):
         ordered = [posting(i, country="gb") for i in range(6)]
@@ -92,21 +89,21 @@ class TestACountryThatRunsDry:
 
     def test_a_country_with_too_few_postings_is_short(self):
         ordered = [*(posting(i, country="gb") for i in range(12)), *(posting(i, country="us") for i in range(2))]
-        balance = Balance(["gb", "us"], per_run=12, ceiling=1.0)
+        balance = Balance(["gb", "us"], per_run=12)
         assert len(balance.choose(ordered, 12)) == 12
         assert balance.short() == [("us", 2, 6)]
         assert balance.split().endswith("· us 2 of 6, none left to read")
 
     def test_a_country_that_got_its_floor_is_not_short(self):
         ordered = [*(posting(i, country="gb") for i in range(12)), *(posting(i, country="us") for i in range(12))]
-        balance = Balance(["gb", "us"], per_run=12, ceiling=1.0)
+        balance = Balance(["gb", "us"], per_run=12)
         balance.choose(ordered, 12)
         assert balance.short() == []
         assert "none left" not in balance.split()
 
     def test_a_search_that_stopped_early_is_not_a_country_running_dry(self):
         ordered = [*(posting(i, country="gb") for i in range(12)), *(posting(i, country="us") for i in range(12))]
-        balance = Balance(["gb", "us"], per_run=12, ceiling=1.0)
+        balance = Balance(["gb", "us"], per_run=12)
         balance.choose(ordered, 4)
         assert balance.short() == []
 

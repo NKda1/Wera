@@ -22,6 +22,7 @@ today's scoring limit, or no more searches in the plan. It never pads with weak 
 then the tiers this plan hasn't sent yet.
 """
 
+import contextvars
 import threading
 import time
 from collections import Counter
@@ -33,12 +34,13 @@ from typing import TYPE_CHECKING, Literal
 import logfire
 
 from ..config import sites, wera
+from ..db.session import engine as db_engine
 from ..db.session import transaction
 from ..domain.dedupe import canonical_url
 from ..errors import ApiError
 from ..nodes import prefilter, strategist
 from ..settings import get_settings
-from ..sources import browser, feeds, harvest, targets
+from ..sources import feeds, harvest, targets
 from ..sources.firecrawl_search import FirecrawlSearch, SearchCaps, SearchOutcome
 from ..sources.provider_guard import Guard
 from ..sources.serper import Serper
@@ -174,6 +176,10 @@ class Piped:
     dry: list[str] = field(default_factory=list)
     # SRCH-31/32: what each job API did — searches, leads, queued, or why it was skipped.
     feeds: dict[str, dict[str, object]] = field(default_factory=dict)
+    # 20 Nov: the job APIs' leads by what became of them (`strategist.FeedDiscovery`).
+    leads: dict[str, int] = field(default_factory=dict)
+    # UPSK-06: what the near-miss pass read (`services.near_misses.Captured`).
+    near_misses: object | None = None
 
     @property
     def partial(self) -> bool:
@@ -256,11 +262,11 @@ def _run(
         ):
             planned, matrix = store.search_queries(refresh=True)
         known = store.known_apply_urls()
-        crowded = store.crowded_agencies()
         key = store.plan_key()
         pool, reader = store.pool_key(), store.reader_key()
         # SRCH-26 (17 Nov): the pool is read best match first, scored against the CV for free.
-        rank = prefilter.lead_ranker(store.cv(), profile.titles if profile else [], demo_mode=get_settings().wera_demo_mode)
+        cv = store.cv()
+        rank = prefilter.lead_ranker(cv, profile.titles if profile else [], demo_mode=get_settings().wera_demo_mode)
     if not planned:
         out.errors.append(("NO_QUERIES", "Add a target title to your search profile to search."))
         return
@@ -289,14 +295,16 @@ def _run(
             return False
         return not target.country or not countries or target.country in countries
 
-    # SRCH-26 (18 Nov): best match first, each ticked country's share, no source above the ceiling.
-    balance = targets.Balance(sorted(countries), per_run=surface_max, ceiling=wera().source_share.ceiling)
+    # SRCH-26: best match first, each ticked country's share — and, since 20 Nov, no share by site.
+    balance = targets.Balance(sorted(countries), per_run=surface_max)
 
     if any(feeds.skipped(f, countries=countries, person=person) is None for f in feeds.FEEDS):
         tiers = [0, *tiers]
     pending = [t for t in tiers if mode == "search" or t not in queue.tiers_sent()]
     # Serper for finding snippet leads' originals (SRCH-32), on its own cap; made when tier 0 runs.
     resource: list[Serper] = []
+    # UPSK-06: the leads the title rule dropped, for Upskills once reading is done.
+    near: list[strategist.NearMiss] = []
 
     # SRCH-26 (18 Nov): Firecrawl's search, asked instead when Serper's day is spent or it is
     # failing — never for the run's own cap, which is the person's limit, not a provider's.
@@ -312,11 +320,16 @@ def _run(
     def sent() -> int:
         return serper.sent + stand_in.sent + sum(r.sent for r in resource)
 
-    def discover_next() -> bool:
-        """Stage 2 for the next tier. False when there is no tier left or Serper stopped."""
+    def discover_next(only: set[str] | None = None) -> bool:
+        """Stage 2 for the next tier. False when there is no tier left or Serper stopped.
+
+        `only` (20 Nov): just the next tier's searches for these countries, which leaves the tier
+        to send in full later — for a ticked country that ran dry under its floor."""
         if not pending or searcher() is None:
             return False
-        tier = pending.pop(0)
+        if only is not None and pending[0] == 0:
+            return False  # the job APIs are asked whole, at the start
+        tier = pending[0] if only is not None else pending.pop(0)
         started = time.monotonic()
         if tier == 0:
             bar.at("apis", 0.0, "Asking the job APIs for your titles in each place")
@@ -335,17 +348,28 @@ def _run(
                 resource=resource[0],
                 on_step=bar.step("apis"),
                 rank=rank,
-                crowded=crowded,
             )
+            near.extend(asked.near_misses)
             queue.mark_tier_sent(0)
             bar.done("apis", _feeds_note(asked), started)
             out.feeds = asked.by_feed
+            out.leads = {
+                "unique": asked.unique,
+                "passed": asked.passed,
+                "queued": asked.queued,
+                "not_looked_for": asked.not_looked_for,
+            }
+            out.leads |= {f"dropped_{why}": n for why, n in asked.dropped.items()}
             out.queries = sent()
             out.errors += [("SEARCH", message) for message in asked.errors if ("SEARCH", message) not in out.errors]
             return True
         plan = planned if tier != 4 else strategist.page_two_worth_asking(planned, queue.postings_by_query())
+        if only is not None:
+            plan = [q for q in plan if q.gl in only]
         sending = sum(1 for q in plan if q.tier == tier)
         if not sending:
+            if only is not None:
+                return False
             queue.mark_tier_sent(tier)  # no page 1 was rich enough for its page 2: nothing to pay for
             return discover_next()
         engine = searcher()
@@ -371,8 +395,9 @@ def _run(
             on_step=bar.step("searching"),
             engine="firecrawl" if engine is stand_in else "google",
         )
-        queue.mark_tier_sent(tier)
-        bar.done("searching", _search_note(tier, found, "Firecrawl" if engine is stand_in else "Google"), started)
+        if only is None:
+            queue.mark_tier_sent(tier)
+        bar.done("searching", _search_note(tier, found, "Firecrawl" if engine is stand_in else "Google", only), started)
         out.tiers.append(tier)
         out.queries = sent()
         out.results += found.results
@@ -395,16 +420,44 @@ def _run(
             total=surface_max,
         )
 
-    with browser.session() as fetch_html:
+    # 20 Nov: postings are read a few at once (`harvest.READERS`), so the browser lives on a thread
+    # of its own that every reader hands its pages to.
+    topped_up = False
+    resumed_waiting = False
+    with harvest.browser_lane() as fetch_html:
         while out.surfaced < surface_max:
             with transaction() as session:
                 intake._check_cancelled(session, list(run_ids.values()))
             batch = queue.take(min(harvest.BATCH, surface_max - out.surfaced), accept=here, balance=balance)
             if not batch:
                 if out.surfaced >= surface_min:
+                    # 20 Nov: with no share by site, one full-text API can fill a search from one
+                    # country, and the run stopped with the US and Canada at 0 and 1 of their 6.
+                    # A ticked country that ran dry under its floor gets the next tier's searches
+                    # for it, once, before the search ends.
+                    dry = {c for c, _got, _floor in balance.short()}
+                    if mode == "search" and dry and not topped_up and discover_next(only=dry):
+                        topped_up = True
+                        continue
                     break
                 if discover_next():
                     continue
+                # 20 Nov: leads an earlier search kept because the day's lookups were spent — "Find
+                # more" looks for their originals once, before saying there is nothing left.
+                if not resumed_waiting and strategist.waiting(queue):
+                    resumed_waiting = True
+                    lookup = Serper(
+                        max_queries=strategist.RESOURCE_QUERIES, window=strategist.RESOURCE_WINDOW, guard=Guard(client, "serper")
+                    )
+                    resource.append(lookup)
+                    looked, queued = strategist.look_for_waiting(
+                        queue, profile=profile, sites=boards, known_urls=known, resource=lookup
+                    )
+                    if looked:
+                        message = f"Looked for {_count(looked, 'lead')} kept from an earlier search: {queued} queued to read"
+                        intake.report(run_ids, phase="searching", progress=bar.edges["reading"][0], detail=message, note=message)
+                    if queued:
+                        continue
                 out.short = _why_short(serper, pending, out.spend)
                 break
 
@@ -458,6 +511,8 @@ def _run(
     out.dry = [f"{c} {got} of {floor}" for c, got, floor in balance.short()]
     if out.read or out.surfaced:
         bar.done("reading", _reading_note(out, balance.split()), reading_started)
+    if not _stops(out.errors):
+        _near_misses(out, run_ids, near, cv=cv, rank=rank, now=now, at=bar.edges["reading"][1], redis=client)
     if out.short:
         out.errors.append(("FEWER_THAN_8", f"Found {out.surfaced} of the {surface_min} a search aims for: {out.short}."))
     logfire.info(
@@ -467,6 +522,72 @@ def _run(
         short=out.short or "",
         feeds=out.feeds,
     )
+
+
+def _near_misses(
+    out: Piped,
+    run_ids: dict[str, str],
+    near: list["strategist.NearMiss"],
+    *,
+    cv: object,
+    rank: object,
+    now: int,
+    at: float,
+    redis: object | None = None,
+) -> None:
+    """UPSK-06 (20 Nov): the jobs this CV nearly matched, read for what they ask, once the search's
+    own jobs are scored. A failure here costs Upskills some near misses and never the search.
+
+    **In the background on a real install** (20 Nov): read inside the run, it held a search open
+    31–40 s after its last job was scored, and held "Find more" 32 s to read three — time the person
+    spent waiting on Upskills, which nothing on the Jobs screen needs. `capture` opens its own units
+    of work, so it runs on its own thread once the search's jobs are in, and says what it read in
+    the logs rather than the run's step log (the run has finished by then). SQLite and the demo
+    keep it in line, in order, where the tests and the one writer need it.
+    """
+    from ..services import near_misses
+
+    if wera().upskills.near_miss_per_search <= 0:
+        return
+    if db_engine().dialect.name != "sqlite" and not get_settings().wera_demo_mode:
+
+        def later() -> None:
+            try:
+                got = near_misses.capture(near, cv=cv, rank=rank, now=now, redis=redis)  # type: ignore[arg-type]
+            except Exception:  # noqa: BLE001 — Upskills' extra evidence, never anything a search waits on
+                logfire.exception("Near misses for Upskills failed")
+                return
+            logfire.info(
+                "Upskills: {extracted} near misses read for what they ask ({above} close to the CV of {candidates})",
+                extracted=got.extracted,
+                above=got.above_floor,
+                candidates=got.candidates,
+                seconds=got.seconds,
+            )
+
+        threading.Thread(target=contextvars.copy_context().run, args=(later,), name="near-misses", daemon=True).start()
+        return
+    started = time.monotonic()
+    intake.report(run_ids, phase="harvesting", progress=at, detail="Reading the jobs you nearly matched, for Upskills")
+    try:
+        got = near_misses.capture(near, cv=cv, rank=rank, now=now, redis=redis)  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001 — Upskills' extra evidence, never a reason a search fails
+        logfire.exception("Near misses for Upskills failed")
+        return
+    out.near_misses = got
+    if got.candidates:
+        message = (
+            f"Upskills: {got.extracted} of the jobs you nearly matched read for what they ask "
+            f"({got.above_floor} close to your CV of {got.candidates}, {got.already_read} read before)"
+        )
+        intake.report(
+            run_ids,
+            phase="harvesting",
+            progress=at,
+            detail=message,
+            note=message,
+            took_ms=int((time.monotonic() - started) * 1000),
+        )
 
 
 def _stops(errors: list[tuple[str, str]]) -> bool:
@@ -532,17 +653,22 @@ def _feeds_note(asked: "strategist.FeedDiscovery") -> str:
     text = f"Job APIs: {_count(searches, 'search', 'searches')}, {_count(leads, 'posting')}, {asked.queued} queued to read"
     if each:
         text += f" ({each})"
-    if asked.agency_reposts:
-        text += f" · {_count(asked.agency_reposts, 'agency repost')} left out"
+    if asked.unique:
+        text += f" · {asked.passed} of {asked.unique} passed your filters"
+    if asked.resumed:
+        text += f" · {asked.resumed} kept from an earlier search looked for"
+    if asked.waiting:
+        text += f" · {_count(asked.waiting, 'lead')} waiting for the next search with Google to spare"
     if left:
         text += f" · not asked: {', '.join(left)}"
     return text
 
 
-def _search_note(tier: int, found: "strategist.Discovery", engine: str = "Google") -> str:
+def _search_note(tier: int, found: "strategist.Discovery", engine: str = "Google", only: set[str] | None = None) -> str:
     postings = found.kinds["posting"]
+    where = f" for {', '.join(sorted(c.upper() for c in only))}" if only else ""
     text = (
-        f"{engine}, tier {tier}: {_count(found.asked, 'search', 'searches')}, "
+        f"{engine}, tier {tier}{where}: {_count(found.asked, 'search', 'searches')}, "
         f"{_count(found.results, 'result')}, {_count(postings, 'posting')}, {found.queued} queued to read"
     )
     skipped = [

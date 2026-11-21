@@ -67,6 +67,7 @@ def guard_and_repair(
     *,
     claims: bool = False,
     unsourced_ok: frozenset[str] | set[str] = frozenset(),
+    names: bool = False,
 ) -> tuple[GuardResult, Decisions]:
     """Checks every line, repairs each failing one once, and reports what is left.
 
@@ -75,8 +76,9 @@ def guard_and_repair(
 
     `claims` adds the model's claim check to the regex rules — for prose a model composed (the
     letter), not for CV lines, which are copies of the master and can't claim anything it doesn't.
+    `names` adds the check that a place of study is named as the CV names it (20 Nov), likewise.
     """
-    first = check_cited(items, cv, keywords, unsourced_ok=unsourced_ok)
+    first = check_cited(items, cv, keywords, unsourced_ok=unsourced_ok, names=names)
     if claims and (found := claim_violations(session, items, cv)):
         first = GuardResult(pass_=False, violations=[*first.violations, *found], repaired=False)
     if first.pass_:
@@ -124,7 +126,7 @@ def guard_and_repair(
     # The regex rules only: the repair was told which claim to remove, and asking the claim check
     # again would make every repaired paragraph cost two more calls.
     second = (
-        check_cited(repaired, cv, keywords, unsourced_ok=unsourced_ok)
+        check_cited(repaired, cv, keywords, unsourced_ok=unsourced_ok, names=names)
         if repaired
         else GuardResult(pass_=True, violations=[], repaired=False)
     )
@@ -141,6 +143,7 @@ WHY = {
     "terms": "a skill that isn't in the cited lines or anywhere in your CV",
     "claims": "a claim the lines it cites don't support",
     "sources": "no usable master-CV source",
+    "names": "a school or university named otherwise than your CV names it",
 }
 
 
@@ -148,6 +151,7 @@ def _dropped_detail(location: str, first: GuardResult) -> str:
     """What the person is told about a line WERA left out, using that line's own first failure."""
     rules = {v.rule for v in first.violations if v.location == location}
     named = next(
-        (WHY[rule] for rule in ("numbers", "terms", "claims", "sources") if rule in rules), "a claim your CV doesn't carry"
+        (WHY[rule] for rule in ("numbers", "terms", "claims", "names", "sources") if rule in rules),
+        "a claim your CV doesn't carry",
     )
     return f"Left out: it had {named}, and rewriting it didn't fix that."

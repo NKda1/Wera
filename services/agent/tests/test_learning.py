@@ -212,3 +212,32 @@ class TestOverHttp:
     def test_the_routes_answer(self, api):
         body = api.ok("GET", "/learning/suggestions")
         assert body["items"] == [] and "decisions" in body
+
+
+class TestTitlesWeraNearlyMatched:
+    """20 Nov: "Private Equity Associate" sat at 0.72 by meaning against the 0.80 a target title
+    needs, so a finance CV's near misses kept landing in Upskills and never on the list."""
+
+    def _signal(self, store, i: int, title: str, company: str, similarity: float = 0.78) -> None:
+        from wera_agent.db.models import JobSignalRow
+
+        store.s.add(
+            JobSignalRow(
+                key=f"sig-{i}", url=f"https://x.example/{i}", job_id=None, title=title, company=company, source="lead",
+                similarity=similarity, keywords=[], education=None, job_hash=None, seen_at="2026-11-20T09:00:00.000Z",
+            )
+        )  # fmt: skip
+        store.s.flush()
+
+    def test_a_title_nearly_matched_from_three_employers_is_offered(self, store):
+        for i, firm in enumerate(["Apax", "Permira", "Cinven"]):
+            self._signal(store, i, "Private Equity Associate", firm)
+        offered = [s for s in store.learning_suggestions().items if s.kind == "add_title"]
+        assert [s.value for s in offered] == ["Private Equity Associate"] and offered[0].evidence == 3
+
+    def test_two_employers_or_a_distant_title_is_not_enough(self, store):
+        self._signal(store, 10, "Private Equity Associate", "Apax")
+        self._signal(store, 11, "Private Equity Associate", "Permira")
+        for i, firm in enumerate(["A", "B", "C"]):
+            self._signal(store, 20 + i, "Procurement Analyst", firm, similarity=0.6)
+        assert not [s for s in store.learning_suggestions().items if s.kind == "add_title"]

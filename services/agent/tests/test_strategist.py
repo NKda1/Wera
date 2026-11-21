@@ -7,10 +7,10 @@ only while the CV, profile and model it was built from still hold. How the plan 
 is `test_discovery.py`.
 """
 
-import shutil
 from datetime import date
 
 import pytest
+import yaml
 
 from wera_agent import config
 from wera_agent.config import Site
@@ -149,7 +149,11 @@ class TestTheMatrixOverTheApi:
         assert client.get("/strategy").json() is None  # a plan for a search nobody is running now
 
     def test_verified_proposals_are_appended_unreviewed(self, client, tmp_path, monkeypatch):
-        shutil.copy(config.CONFIG_DIR / "sites.yaml", tmp_path / "sites.yaml")
+        # The repository's file with room in it: its own boards and proposals waiting for review can
+        # fill `max_sites` (12 of 12 on 20 Nov), and a full file rightly takes no proposal.
+        data = yaml.safe_load((config.CONFIG_DIR / "sites.yaml").read_text())
+        data["max_sites"] = len(data["sites"]) + 5
+        (tmp_path / "sites.yaml").write_text(yaml.safe_dump(data))
         monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
         config.sites_file.cache_clear()
         config.sites.cache_clear()

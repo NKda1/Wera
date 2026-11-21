@@ -41,6 +41,7 @@ from ..schemas.cv_file import CvFile, CvFileIn, CvPreview
 from ..schemas.cv_profile import CvProfile
 from ..schemas.jobs import ScoredJob
 from ..schemas.learning import SuggestionList
+from ..schemas.pack import AtsCompare, WritingReport
 from ..schemas.profile import SavedProfile, SearchProfile
 from ..schemas.runs import Estimate, IntakeRun, RunIds
 from ..schemas.settings import SettingsPatch, SettingsResponse
@@ -264,6 +265,28 @@ def rewrite_letter(s: S, app_id: str) -> ApplicationWithJob:
     return s.rewrite_letter(app_id)
 
 
+@router.get("/applications/{app_id}/compare")
+def compare_application(s: S, app_id: str) -> AtsCompare:
+    """ATSC-08 (20 Nov): the job ad beside the CV, each of the post's keywords highlighted where it
+    is — found by the ATS report's own matcher, on the text the report measures. Read only."""
+    from ..domain.vocab import master_cv_text
+    from ..nodes.ats import compare
+
+    pack, job, _, text = s.ats_view(app_id)
+    return compare(job, pack.ats.keywords, text, master=master_cv_text(s.cv()))
+
+
+@router.get("/applications/{app_id}/writing")
+def writing_checks(s: S, app_id: str) -> WritingReport:
+    """ATSC-09 (20 Nov): action verbs, numbers, summary length and skills count. Suggestions only;
+    the "add a figure" prompts are `cv.profile`'s, read from its cache, so no model is called."""
+    from ..domain.writing import writing_report
+
+    _, _, doc, _ = s.ats_view(app_id)
+    implied = {a.bullet_id: a.phrase for role in s.cv_profile_cached().professional_history for a in role.implied_achievements}
+    return writing_report(doc, s.cv(), implied=implied)
+
+
 # ---- the CV file (EXP-01, 18 Nov) ----
 #
 # The CV PDF is rendered here, by RenderCV, from the pack's CV file; the web app renders the
@@ -338,11 +361,15 @@ def start_run(s: S, body: RunIn, request: Request) -> RunIds:
 
 
 @router.get("/upskills")
-def get_upskills(s: S, days: int = Query(60, ge=7, le=365)) -> UpskillsReport:
+def get_upskills(s: S, days: int = Query(60, ge=7, le=365), family: str | None = Query(None, max_length=32)) -> UpskillsReport:
     """UPSK-01: the skills the person's jobs ask for that their CV doesn't show. No model call."""
     from ..services import upskills
+    from ..services.store import get_kv
 
-    return upskills.report(s.s, s.cv(), now=s.now, days=days)
+    field = (get_kv(s.s, "target_matrix") or {}).get("field")
+    # UPSK-07 (21 Nov): the target titles say the person's own role family; `family` filters to one.
+    titles = s.get_profile().titles
+    return upskills.report(s.s, s.cv(), now=s.now, days=days, field=field, titles=titles, family=family or None)
 
 
 @router.get("/learning/suggestions")

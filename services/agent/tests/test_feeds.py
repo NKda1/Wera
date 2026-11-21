@@ -60,7 +60,7 @@ def keys(outbound, monkeypatch):
 def reviewed(monkeypatch):
     """Every API's terms reviewed, as config/wera.yaml would say once they are."""
     for feed_id in feeds.FEEDS:
-        monkeypatch.setitem(wera().feeds, feed_id, FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=1, max_queued=2))
+        monkeypatch.setitem(wera().feeds, feed_id, FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=1))
 
 
 @pytest.fixture
@@ -290,13 +290,56 @@ class TestDiscoveringFromTheApis:
         assert queue.peek() == []
 
 
+class TestLeadsWaitForLookups:
+    """20 Nov, live: with the day's Serper allowance spent, 228 snippet leads that passed every
+    filter were never looked for, and "Find more" found nothing. They wait for the next search
+    that has lookups to spend, best match first."""
+
+    def _profile(self, store):
+        return store.get_profile().model_copy(update={"titles": ["Graduate Software Engineer", "Technology Graduate Programme"], "locations": ["London, UK"], "seniority": ["graduate"], "exclude": ["Senior"]})  # fmt: skip
+
+    @respx.mock(assert_all_called=False)
+    def test_a_lead_kept_while_serper_is_spent_is_looked_for_by_the_next_search(self, keys, reviewed, redis, store, respx_mock):
+        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
+        adzuna_search = respx_mock.get(adzuna.SEARCH.format(country="gb"))
+        adzuna_search.mock(return_value=httpx.Response(200, json=fixture("adzuna_search")))
+        spent = FakeSerper({})
+        spent.stopped = "daily_budget"
+        queue = TargetQueue(redis, "plan")
+
+        first = strategist.discover_feeds(planned(), self._profile(store), queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=spent)  # fmt: skip
+        assert first.waiting >= 1 and queue.peek() == [] and spent.asked == []
+
+        adzuna_search.mock(return_value=httpx.Response(200, json={"results": []}))  # nothing new today
+        serper = FakeSerper({'"Arch Capital Group"': [Result("https://boards.greenhouse.io/archcapital/jobs/42", "Technology & Change Graduate Programme 2027", "Arch Capital Group, London", None, 1)]})  # fmt: skip
+        second = strategist.discover_feeds(planned(), self._profile(store), queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=serper)  # fmt: skip
+        assert second.resumed >= 1
+        assert [t.url for t in queue.peek()] == ["https://boards.greenhouse.io/archcapital/jobs/42"]
+
+    @respx.mock(assert_all_called=False)
+    def test_find_more_looks_for_them_once_the_plan_is_sent(self, keys, reviewed, redis, store, respx_mock):
+        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
+        respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json=fixture("adzuna_search")))
+        spent = FakeSerper({})
+        spent.stopped = "daily_budget"
+        queue = TargetQueue(redis, "plan")
+        strategist.discover_feeds(planned(), self._profile(store), queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=spent)  # fmt: skip
+        assert strategist.waiting(queue) >= 1
+
+        serper = FakeSerper({'"Arch Capital Group"': [Result("https://boards.greenhouse.io/archcapital/jobs/42", "Technology & Change Graduate Programme 2027", "Arch Capital Group, London", None, 1)]})  # fmt: skip
+        looked, queued = strategist.look_for_waiting(
+            queue, profile=self._profile(store), sites=[], known_urls=set(), resource=serper
+        )
+        assert looked >= 1 and queued == 1 and strategist.waiting(queue) == 0
+
+
 class TestTheBestLeadsFirst:
-    """17 Nov: every API's leads are taken best match first, so `max_queued` and the searches for
-    originals go to the best of them — and each posting carries the country it was found for."""
+    """17 Nov: every API's leads are taken best match first, so the searches for originals go to
+    the best of them — and each posting carries the country it was found for."""
 
     @respx.mock(assert_all_called=False)
     def test_a_ranked_search_queues_the_best_full_text_posting_first(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
-        monkeypatch.setitem(wera().feeds, "reed", FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=3, max_queued=1))
+        monkeypatch.setitem(wera().feeds, "reed", FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=3))
         base = fixture("reed_search")["results"][0]
         two = [
             {**base, "jobId": 1, "jobTitle": "Java Developer", "date": "10/11/2026"},
@@ -314,51 +357,49 @@ class TestTheBestLeadsFirst:
         assert taken[0].country == "gb"
 
 
-class TestAnAgencyIsOneSource:
-    """19 Nov: 15 of the 53 jobs on the list were eFinancialCareers reposts through Reed, fit 2–3.6.
-    One a search now, and none while three of its jobs wait on the list."""
+class TestAnAgencyIsAMainBoard:
+    """20 Nov, reversing 19 Nov's cap of one agency repost a search: an agency like
+    eFinancialCareers is a main board for finance, and one site can hold a lot of good jobs. Every
+    lead that passes is queued; only a repost of the *same* job (its employer named in its title)
+    is one lead."""
 
-    def _discover(self, store, redis, respx_mock, monkeypatch, employer: str, **kw):
-        monkeypatch.setitem(wera().feeds, "reed", FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=3, max_queued=6))
+    def _discover(self, store, redis, respx_mock, monkeypatch, employer: str, titles: list[str], **kw):
+        monkeypatch.setitem(wera().feeds, "reed", FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=3))
         base = fixture("reed_search")["results"][0]
-        titles = ["Graduate Software Engineer", "Software Engineer", "Junior Software Engineer", "Software Developer"]
-        four = [
+        rows = [
             {**base, "jobId": i, "employerName": employer, "jobTitle": t, "date": "10/11/2026",
              "jobUrl": f"https://www.reed.co.uk/jobs/x/{i}"}
             for i, t in enumerate(titles, 1)
         ]  # fmt: skip
-        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": four, "totalResults": 4}))
+        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": rows, "totalResults": len(rows)}))
         respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json={"results": []}))
         queue = TargetQueue(redis, "plan")
         profile = TestDiscoveringFromTheApis()._profile(store)
         found = strategist.discover_feeds(planned(), profile, queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=FakeSerper({}), **kw)  # fmt: skip
         return queue.peek(), found
 
-    @respx.mock(assert_all_called=False)
-    def test_one_of_an_agencys_reposts_a_search(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
-        queued, found = self._discover(store, redis, respx_mock, monkeypatch, "eFinancialCareers")
-        assert len(queued) == 1
-        assert found.agency_reposts == 3
+    FOUR = ["Graduate Software Engineer", "Software Engineer", "Junior Software Engineer", "Software Developer"]
 
     @respx.mock(assert_all_called=False)
-    def test_none_while_its_jobs_wait_on_the_list(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
-        queued, found = self._discover(store, redis, respx_mock, monkeypatch, "eFinancialCareers", crowded=frozenset({"efinancialcareers"}))  # fmt: skip
-        assert queued == [] and found.agency_reposts == 4
-
-    def test_three_waiting_on_the_list_is_crowded(self, store):
-        from wera_agent.services.store import save_job
-
-        waiting = store.list_jobs("new")[:3]
-        for scored in waiting[:2]:
-            save_job(store.s, store._job(store._job_row(scored.id)).model_copy(update={"company": "eFinancialCareers Ltd"}))
-        assert store.crowded_agencies() == frozenset()
-        save_job(store.s, store._job(store._job_row(waiting[2].id)).model_copy(update={"company": "eFinancialCareers"}))
-        assert store.crowded_agencies() == frozenset({"efinancialcareers"})
+    def test_every_one_of_an_agencys_leads_is_queued(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
+        queued, found = self._discover(store, redis, respx_mock, monkeypatch, "eFinancialCareers", self.FOUR)
+        assert len(queued) == 4 and found.passed == 4
 
     @respx.mock(assert_all_called=False)
-    def test_an_employer_is_not_an_agency(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
-        queued, found = self._discover(store, redis, respx_mock, monkeypatch, "Wissen Technology")
-        assert len(queued) == 4 and found.agency_reposts == 0
+    def test_no_api_has_a_cap_on_what_it_queues(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
+        """The `reviewed` fixture used to cap each API at two; there is no such setting now."""
+        titles = [
+            f"Graduate Software Engineer {team}" for team in ("Payments", "Search", "Ads", "Maps", "Cloud", "Data", "Mobile")
+        ]
+        queued, _found = self._discover(store, redis, respx_mock, monkeypatch, "Wissen Technology", titles)
+        assert len(queued) == 7
+        assert not hasattr(FeedConfig(), "max_queued")
+
+    @respx.mock(assert_all_called=False)
+    def test_an_agencys_two_copies_of_one_job_are_one_lead(self, keys, reviewed, redis, store, respx_mock, monkeypatch):
+        titles = ["Graduate Software Engineer - Citi", "Graduate Software Engineer - Citi", "Software Engineer - Barclays"]
+        queued, found = self._discover(store, redis, respx_mock, monkeypatch, "eFinancialCareers", titles)
+        assert len(queued) == 2 and found.unique == 2
 
 
 class TestOneSearchPerQuestion:
@@ -367,9 +408,7 @@ class TestOneSearchPerQuestion:
         self, keys, reviewed, redis, store, respx_mock, monkeypatch
     ):
         for feed_id in feeds.FEEDS:
-            monkeypatch.setitem(
-                wera().feeds, feed_id, FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=3, max_queued=2)
-            )
+            monkeypatch.setitem(wera().feeds, feed_id, FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=3))
         reed_route = respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
         adzuna_route = respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(
             return_value=httpx.Response(200, json={"results": []})

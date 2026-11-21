@@ -9,6 +9,7 @@ import "server-only";
 // in the file: role headers, dates and education come from the master CV, never from the pack.
 // EXP-02: contact details are read here, at render time, and in the agent's `export/cv_pdf.py`.
 
+import { displayCase } from "../../format";
 import type { ApplicationWithJob, Contact, CvFile, MasterCV } from "../../types";
 
 export type ExportKind = "cv" | "letter";
@@ -70,7 +71,7 @@ function letterDate(date: Date): string {
 function letterBlocks(app: ApplicationWithJob, cv: MasterCV): Block[] {
   const letter = app.pack!.letter;
   // The signoff's second line is the sender's name, which comes from the master CV (TAIL-02).
-  const signoff = letter.signoff.replace(/\n.*$/, `\n${cv.person.name}`);
+  const signoff = letter.signoff.replace(/\n.*$/, `\n${displayCase(cv.person.name)}`);
   // The furniture a letter is supposed to carry and this one didn't: a date, and who it is
   // addressed to. Both come from data WERA already holds — the approval time (EXP-03) and the
   // job's own title and company — so nothing here is inferred, and a letter that opens straight

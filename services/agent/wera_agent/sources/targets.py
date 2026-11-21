@@ -100,18 +100,19 @@ def source_of(target: Target) -> str:
 
 @dataclass
 class Balance:
-    """A search's reads so far, and the two soft limits on them (SRCH-26, 18 Nov).
+    """A search's reads so far, and the one soft limit on them (SRCH-26).
 
-    The best match is read first, within: a floor for each ticked country (about `per_run ÷
-    countries` of the reads, so a place with weaker matches still gets its share) and a ceiling for
-    each source (`ceiling` of the reads, so one API can't fill a search). Both give way rather than
-    leave a slot empty: a country with nothing left gives its share up, and a source over its
-    ceiling is read when nothing else is.
+    The best match is read first, within a floor for each ticked country (about `per_run ÷
+    countries` of the reads, so a place with weaker matches still gets its share). The floor gives
+    way rather than leave a slot empty: a country with nothing left gives its share up.
+
+    The per-source ceiling (18 Nov: no source above 40% of a search) went on 20 Nov. It shared reads
+    out by site rather than by quality, and one site can hold a lot of good jobs. Reads are still
+    counted by source, for the run's log.
     """
 
     countries: list[str]
     per_run: int
-    ceiling: float = 0.4
     by_country: dict[str, int] = field(default_factory=dict)
     by_source: dict[str, int] = field(default_factory=dict)
     # Ticked countries that were under their floor with nothing of theirs left to read (19 Nov).
@@ -127,14 +128,8 @@ class Balance:
         source = source_of(target)
         self.by_source[source] = self.by_source.get(source, 0) + 1
 
-    def over_ceiling(self, target: Target, taking: int) -> bool:
-        if len(self.by_source) == 0 and taking <= 1:
-            return False
-        limit = max(1, int(self.ceiling * max(self.per_run, sum(self.by_source.values()) + taking)))
-        return self.by_source.get(source_of(target), 0) >= limit
-
     def choose(self, ordered: list[Target], n: int) -> list[Target]:
-        """Up to `n` of `ordered` (best match first), honouring the floors, then the ceilings."""
+        """Up to `n` of `ordered` (best match first), each ticked country's floor first."""
         chosen: list[Target] = []
         left = list(ordered)
         while len(chosen) < n and left:
@@ -142,17 +137,12 @@ class Balance:
             # A ticked country under its floor goes first: its best posting, if it has one.
             behind = [c for c in self.countries if self.by_country.get(c, 0) < self.floor]
             for country in sorted(behind, key=lambda c: self.by_country.get(c, 0)):
-                pick = next((t for t in left if t.country == country and not self.over_ceiling(t, 1)), None)
+                pick = next((t for t in left if t.country == country), None)
                 if pick is not None:
                     break
-                if not any(t.country == country for t in left):
-                    self.dry.add(country)  # not just held back by a source's ceiling
+                self.dry.add(country)
             if pick is None:
-                pick = next((t for t in left if not self.over_ceiling(t, 1)), None)
-            if pick is None:
-                # Every source at its ceiling (two sources can't both stay under 40% of a search):
-                # the least-read source's best posting, so they take turns rather than one winning.
-                pick = min(left, key=lambda t: self.by_source.get(source_of(t), 0))
+                pick = left[0]
             left.remove(pick)
             chosen.append(pick)
             self.note(pick)

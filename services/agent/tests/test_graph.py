@@ -143,7 +143,7 @@ class TestRestartRecovery:
             """Not an Exception: `advance` must not treat this as a drafting failure."""
 
         def die_on_letter(task, variables, context, demo_input=None):
-            if task == "letter.write":
+            if task in ("letter.write", "letter.paragraph"):
                 raise Crash
             return real(task, variables, context, demo_input)
 
@@ -272,6 +272,16 @@ class TestCitationGuard:
         assert all(b.source_ids for s in doc.sections for i in s.items for b in i.bullets)
 
 
+@pytest.fixture
+def single(monkeypatch):
+    """`letters.mode: single` — the one-call letter these tests were written for, kept for
+    rollback (20 Nov). The paragraph-by-paragraph default is `test_letter_paragraphs.py`'s."""
+    from wera_agent.config import wera
+
+    monkeypatch.setattr(wera().letters, "mode", "single")
+
+
+@pytest.mark.usefixtures("single")
 class TestLetterRedraft:
     """LTR-01: a letter is 3 or 4 paragraphs, so one that the guard cuts below three is asked
     for again rather than shipped short."""
@@ -377,6 +387,7 @@ class TestLetterRedraft:
         assert letter.guard.violations
 
 
+@pytest.mark.usefixtures("single")
 class TestAShortLetter:
     """LTR-01's 150-word floor: a letter the model wrote short is asked for once more, told its
     own count, and never costs the pack — the longer attempt is kept either way."""
@@ -484,7 +495,8 @@ class TestAtsCoverage:
         app_id = approved()
         run(graph.advance(JOB, {"action": "approve", "applicationId": app_id}))
         assert calls.count("cv.tailor") == 1
-        assert calls.count("letter.write") == 1
+        # Four paragraphs, each written once: nothing failed, so nothing was written again.
+        assert calls.count("letter.paragraph") == 4
         assert status_of(app_id) == "ready_for_review"
 
 
@@ -548,7 +560,7 @@ class TestProgress:
         # Whatever the model is asked, the step shown is the document being built.
         steps = dict(seen)
         assert steps["cv.tailor"] == "cv"
-        assert steps["letter.write"] == "letter"
+        assert steps["letter.paragraph"] == "letter"
         assert steps["answers.draft"] == "answers"
         with transaction() as session:
             assert Store(session)._app_row(app_id).draft_step is None

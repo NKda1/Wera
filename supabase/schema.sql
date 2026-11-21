@@ -73,6 +73,23 @@ CREATE TABLE IF NOT EXISTS intake_runs (
 );
 CREATE INDEX IF NOT EXISTS ix_intake_runs_status ON intake_runs (status);
 
+CREATE TABLE IF NOT EXISTS job_signals (
+	key VARCHAR(64) NOT NULL,
+	url TEXT,
+	job_id VARCHAR(64),
+	title TEXT NOT NULL,
+	company TEXT NOT NULL,
+	source VARCHAR(16) NOT NULL,
+	similarity FLOAT,
+	keywords JSONB NOT NULL,
+	education JSONB,
+	job_hash VARCHAR(32),
+	seen_at VARCHAR(32) NOT NULL,
+	PRIMARY KEY (key)
+);
+CREATE INDEX IF NOT EXISTS ix_job_signals_job_id ON job_signals (job_id);
+CREATE INDEX IF NOT EXISTS ix_job_signals_seen_at ON job_signals (seen_at);
+
 CREATE TABLE IF NOT EXISTS jobs (
 	id VARCHAR(64) NOT NULL,
 	dedupe_key VARCHAR(512) NOT NULL,
@@ -215,6 +232,7 @@ alter table contact enable row level security;
 alter table crawl_cache enable row level security;
 alter table decisions enable row level security;
 alter table intake_runs enable row level security;
+alter table job_signals enable row level security;
 alter table jobs enable row level security;
 alter table kv enable row level security;
 alter table llm_calls enable row level security;

@@ -158,9 +158,23 @@ def title_mismatch(title: str, profile: SearchProfile) -> str | None:
     """
     if not [t for t in profile.titles if t.strip()]:
         return None
-    if matches_a_target(title, profile.titles):
+    if matches_a_target(title, profile.titles) or close_in_meaning(title, profile.titles):
         return None
     return "Not one of your target titles"
+
+
+def close_in_meaning(title: str, targets: list[str]) -> bool:
+    """A title that means one of the targets without carrying all of its words (20 Nov):
+    "Equity Analyst" for "Equity Research Analyst", "Commercial Finance Analyst" for "Financial
+    Analyst". The word rule dropped 274 of the 606 leads a finance search found that day, these
+    among them. Judged by the local embedding against `prefilter.TITLE_MEANING_MIN`; the excluded
+    words and the seniority rule run before this and are unchanged by it. Only the real embedder
+    says anything here (`prefilter.title_closeness`), so the demo and the tests keep the word rule.
+    """
+    from ..nodes import prefilter  # the embedding lives with the pre-filter, which loads it once
+
+    closeness = prefilter.title_closeness(title, targets)
+    return closeness is not None and closeness >= prefilter.TITLE_MEANING_MIN
 
 
 def excluded_term(title: str, profile: SearchProfile) -> str | None:
@@ -436,11 +450,47 @@ DAY_MS = 24 * 60 * 60 * 1000
 RECENCY_MS = {"24h": DAY_MS, "7d": 7 * DAY_MS, "21d": 21 * DAY_MS}
 
 
+# 20 Nov, live: "Junior Financial Analyst / Trader UK Work Visa Opportunity" was a trading
+# "academy" selling a route to a Skilled Worker visa, with firm-allocated capital for those with a
+# live trading track record. It scored 4.2, a pack was drafted for it, and its words — "live trading
+# track record", "systematic trading strategies" — climbed Upskills' gaps. Not a job: hidden as
+# "Not a job posting", which Upskills, the refilter and the dedupe already leave alone.
+SCHEME = "Not a job posting: a paid trading scheme or a visa offer"
+_VISA_SALE = re.compile(
+    r"\b(?:work )?visa (?:opportunit|sponsorship opportunit|route|pathway|guaranteed)|\bsponsorship opportunit", re.I
+)
+_PAID = re.compile(
+    # Fees the candidate pays — not a recruiter's "placement fees" or a client's "programme fees",
+    # which an ordinary procurement or finance job describes (20 Nov).
+    r"\b(?:training|course|registration|academy|trader) fees?\b|"
+    r"\brefundable deposit\b|\bpay (?:for|towards) (?:your|the) (?:training|course|place)\b",
+    re.I,
+)
+_ACADEMY = re.compile(
+    r"\b(?:trading )?academy (?:pathway|route|programme|program)\b|\btrader (?:academy|training programme)\b", re.I
+)
+_FUNDED = re.compile(
+    r"\bfirm[- ]allocated capital\b|\bfunded (?:trader|account)\b|\blive trading track record\b|\btrading capital\b", re.I
+)
+
+
+def scheme_reason(job: Job) -> str | None:
+    """`SCHEME` when the job is an advert for a paid scheme or a visa rather than a job: a title
+    selling a visa, a fee to take part, or a trading academy that hands out capital. Each signal is
+    one a real employer's posting doesn't carry — "visa sponsorship available" is not a sale."""
+    text = job.description_md or ""
+    if _VISA_SALE.search(job.title) or _PAID.search(text) or (_ACADEMY.search(text) and _FUNDED.search(text)):
+        return SCHEME
+    return None
+
+
 def hidden_reason(job: Job, profile: SearchProfile, now: int | None = None) -> str | None:
     """Why this job shouldn't reach the shortlist, or None if it should.
 
     Checked in the order a person would read them, so the reason shown is the most obvious one.
     """
+    if scheme := scheme_reason(job):
+        return scheme
     term = excluded_term(job.title, profile)
     if term:
         return f"Title contains an excluded term: {term}"
@@ -490,6 +540,7 @@ def apply(jobs: list[Job], profile: SearchProfile, now: int | None = None) -> tu
     kept: list[Job] = []
     hidden: list[Job] = []
     at = now if now is not None else now_ms()
+    _warm([job.title for job in jobs], profile)
     for job in jobs:
         reason = hidden_reason(job, profile, at)
         if reason is None:
@@ -498,3 +549,13 @@ def apply(jobs: list[Job], profile: SearchProfile, now: int | None = None) -> tu
         job.status, job.hidden_reason = "hidden", reason
         hidden.append(job)
     return kept, hidden
+
+
+def _warm(titles: list[str], profile: SearchProfile) -> None:
+    """One embedding batch for every title the word rule won't take, before `close_in_meaning`
+    asks about them one by one (a watched board's thousands of vacancies, 20 Nov)."""
+    from ..nodes import prefilter
+
+    wanted = [t for t in profile.titles if t.strip()]
+    if wanted:
+        prefilter.warm_titles([*wanted, *(t for t in titles if not matches_a_target(t, wanted))])

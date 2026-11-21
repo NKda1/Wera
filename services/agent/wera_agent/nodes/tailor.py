@@ -8,23 +8,49 @@ The job description reaches the model inside an untrusted-data block (§9.3): it
 input here that an employer — or someone posting as one — controls.
 """
 
+import contextvars
 import re
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 
 import logfire
 from sqlalchemy.orm import Session
 
 from ..config import wera
+from ..db.session import transaction
 from ..domain import dedupe
+from ..domain.guard import check_cited
+from ..domain.text import display_case
 from ..domain.vocab import cv_line_index, master_cv_text, text_has_term
 from ..errors import ApiError
-from ..llm.demo import PackInput, no_stop, words
+from ..llm.demo import PackInput, named_contact, no_stop, words
 from ..llm.gateway import structured
-from ..llm.prompts import cv_text, untrusted
+from ..llm.prompts import PARAGRAPH_BRIEFS, cv_text, untrusted
 from ..schemas.cv import MasterCV, Summary
-from ..schemas.llm_outputs import LetterOutput, SummaryDraft, TailorSelection
-from ..schemas.pack import Cited, CompanyFact, CoverLetter, CvItem, CvSection, Paragraph, TailoredCV
-from .guard import guard_and_repair
-from .letter_plan import context_text, keywords_text, plan
+from ..schemas.llm_outputs import LetterOutput, LetterParagraphOutput, SummaryDraft, TailorSelection
+from ..schemas.pack import (
+    Cited,
+    CompanyFact,
+    CoverLetter,
+    CvItem,
+    CvSection,
+    GuardResult,
+    Paragraph,
+    TailoredCV,
+    Violation,
+)
+from .guard import claim_violations, guard_and_repair
+from .letter_plan import (
+    SECTIONS,
+    SectionPlan,
+    context_text,
+    keywords_text,
+    plan,
+    section_keywords_text,
+    section_plans,
+    template_paragraph,
+)
 
 # Roughly how many bullets fit, by CV length. The model is told the budget; `estimate_pages`
 # checks what actually came back.
@@ -55,17 +81,22 @@ def job_block(inp: PackInput) -> str:
     description: the model only ever sees a prefix, so a quote it takes from what it saw is still
     a substring of the whole.
     """
+    description = (inp.job.description_md or "")[: wera().job_description_limit]
+    return f"{job_header(inp)}\n{untrusted('job post', description)}"
+
+
+def job_header(inp: PackInput) -> str:
+    """The job's one-line header, without the post: all a `letter.paragraph` call is given of
+    the job, beside the post's words its plan already chose (20 Nov)."""
     job = inp.job
-    header = f"Job: {job.title} at {job.company} ({job.location.raw})"
     if dedupe.is_intermediary(job.company):
         # Said outright, so the letter names the employer when the post does and otherwise
         # writes to the hiring team — not to the board as if it were hiring.
-        header = (
+        return (
             f"Job: {job.title} ({job.location.raw}), posted by {job.company} — a job board or agency, not the "
             "employer. Name the employer only if the post does; never write to the board as the employer."
         )
-    description = (job.description_md or "")[: wera().job_description_limit]
-    return f"{header}\n{untrusted('job post', description)}"
+    return f"Job: {job.title} at {job.company} ({job.location.raw})"
 
 
 def _keywords(inp: PackInput, *, backed_only: bool = False) -> str:
@@ -299,15 +330,58 @@ def master_summary(cv: MasterCV) -> Cited:
     return Cited(text="", source_ids=[])
 
 
+@dataclass
+class LetterStats:
+    """What writing one letter took, for `evaluate.run_letters` and the letter's span. Not stored."""
+
+    mode: str
+    calls: int = 0  # `letter.write` or `letter.paragraph` calls made
+    failed_calls: int = 0  # of those, how many raised (the gateway's own retries are inside one)
+    written_words: int = 0  # what the first round wrote, before the guard
+    dropped: int = 0  # paragraphs the guard cut and nothing replaced (single mode)
+    regenerated: int = 0  # paragraphs written again after failing the guard (paragraph mode)
+    templated: int = 0  # paragraphs built from the CV's own lines instead (paragraph mode)
+    lengthened: int = 0  # paragraphs written again because the letter came out short
+    shortened: int = 0  # and because it came out long (20 Nov)
+    # Why first-round paragraphs failed, by guard rule ("claims", "numbers", "filler", …).
+    failed_on: dict[str, int] = field(default_factory=dict)
+
+
 def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
     """LTR-01…05: 3–4 paragraphs, one company fact quoted from the post, every claim cited.
+
+    Written the way `letters.mode` says (20 Nov): a paragraph per call by default, or the one
+    call that wrote every letter before (`single`), kept for rollback and comparison.
+    """
+    return write_letter(session, inp, doc)[0]
+
+
+def write_letter(
+    session: Session, inp: PackInput, doc: TailoredCV, *, mode: str | None = None
+) -> tuple[CoverLetter, LetterStats]:
+    """`letter`, with what it took. `mode` overrides the configured one, for the eval."""
+    mode = mode or wera().letters.mode
+    with logfire.span("letter {mode}", mode=mode, job_id=inp.job.id) as span:
+        made, stats = _by_paragraphs(session, inp, doc) if mode == "paragraphs" else _single(session, inp, doc)
+        span.set_attributes({f"letter.{k}": v for k, v in stats.__dict__.items() if isinstance(v, int)})
+        span.set_attribute("letter.words", made.word_count)
+    return made, stats
+
+
+def _single(session: Session, inp: PackInput, doc: TailoredCV) -> tuple[CoverLetter, LetterStats]:
+    """`letters.mode: single` — the whole letter in one `letter.write` call, guarded and repaired.
 
     The guard can drop a paragraph the CV doesn't back. A letter it leaves with fewer than three
     paragraphs, or under LTR-01's 150 words, is asked for once more, told what was cut and why.
     If the second one is no better, the fuller of the two is kept with its violations showing,
     because a short letter the person can see the problem with beats a silent one.
+
+    Two fixes of 20 Nov, kept here although this is no longer the default: a second call that
+    fails outright keeps the first letter rather than losing it (the call had no `try`, so a
+    good first letter went with the error), and "too short" reads what the guard *left*.
     """
     cv = inp.cv
+    stats = LetterStats(mode="single")
     tailored = "\n".join(f"- {b.text}" for _, b in cv_locations(doc))
     keywords = keywords_text(plan(inp.evidence, cv))
     context = context_text(inp.analysis, inp.brief)
@@ -315,22 +389,34 @@ def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
     feedback: str | None = None
 
     for _attempt in range(MAX_LETTER_ATTEMPTS):
-        out = structured(
-            session,
-            "letter.write",
-            LetterOutput,
-            {
-                "cv": cv_text(cv),
-                "job": job_block(inp),
-                "tailored": tailored or "(no lines selected)",
-                "wants": _what_they_want(inp),
-                "note": _letter_note(inp.note, feedback),
-                "keywords": keywords,
-                "context": context,
-            },
-            context={"cv": cv},
-            demo_input=inp,
-        )
+        stats.calls += 1
+        try:
+            out = structured(
+                session,
+                "letter.write",
+                LetterOutput,
+                {
+                    "cv": cv_text(cv),
+                    "job": job_block(inp),
+                    "tailored": tailored or "(no lines selected)",
+                    "wants": _what_they_want(inp),
+                    "note": _letter_note(inp.note, feedback),
+                    "keywords": keywords,
+                    "context": context,
+                },
+                context={"cv": cv},
+                demo_input=inp,
+            )
+        except ApiError as exc:
+            stats.failed_calls += 1
+            if best is None:
+                raise
+            logfire.warn(
+                "Letter for {job_id}: the second attempt failed ({code}); keeping the first", job_id=inp.job.id, code=exc.code
+            )
+            break
+        if best is None:
+            stats.written_words = sum(len(p.text.split()) for p in out.paragraphs)
         candidate = _guard_letter(session, out, inp)
         filler = banned_phrases(candidate)
         # Too few paragraphs left, or a paragraph cut and the letter left under LTR-01's floor.
@@ -340,12 +426,14 @@ def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
         # asked for again, while every four-paragraph letter landed at 153–214.
         cut = any(v.rule == "dropped" for v in candidate.guard.violations)
         dropped = len(candidate.paragraphs) < MIN_PARAGRAPHS or (cut and candidate.word_count < TARGET_MIN_WORDS)
-        written = sum(len(p.text.split()) for p in out.paragraphs)
-        short = not dropped and written < TARGET_MIN_WORDS
-        if not dropped and not filler and not short:
-            return candidate
+        # What the guard left, not what the model wrote (20 Nov): a repair that shrank a paragraph
+        # left a 130-word letter that the model's own 160 words said was long enough.
+        short = not dropped and candidate.word_count < TARGET_MIN_WORDS
         if best is None or _better(candidate, best):
             best = candidate
+        if not dropped and not filler and not short:
+            best = candidate
+            break
         # One reason at a time would waste an attempt: a letter can be both too short and full of
         # filler, and there are only two attempts.
         feedback = " ".join(
@@ -365,7 +453,445 @@ def letter(session: Session, inp: PackInput, doc: TailoredCV) -> CoverLetter:
             filler=len(filler),
         )
 
-    return best  # type: ignore[return-value] — the loop always runs at least once
+    assert best is not None  # the loop's first pass either sets it or raises
+    stats.dropped = sum(1 for v in best.guard.violations if v.rule == "dropped")
+    return best, stats
+
+
+# ---------------------------------------------------------------------------
+# A letter written paragraph by paragraph (`letters.mode: paragraphs`, 20 Nov).
+#
+# On 20 Nov 2 of 7 letters came out at 130–133 words, and only 1 of 13 `letter.write` calls had
+# been cut off. The rest was the guard: a repair could only cut words, lost the company's name
+# and quotes on the way, and a paragraph it couldn't fix was deleted with nothing put back. So
+# here a paragraph that fails is written again, on its own, told why; one that fails twice is
+# built from its own CV lines; and the letter's length is checked after all that, not before.
+
+
+def _by_paragraphs(session: Session, inp: PackInput, doc: TailoredCV) -> tuple[CoverLetter, LetterStats]:
+    stats = LetterStats(mode="paragraphs")
+    cv, job = inp.cv, inp.job
+    post = job.description_md or ""
+    plans = section_plans(cv, doc, inp.evidence, post=post, company=job.company, analysis=inp.analysis, brief=inp.brief)
+
+    def write(p: SectionPlan, feedback: str | None) -> Callable[[Session], Paragraph]:
+        return lambda s: _write_paragraph(s, inp, p, feedback)
+
+    first = _in_parallel(session, [write(p, None) for p in plans])
+    stats.calls += len(plans)
+    stats.failed_calls += sum(isinstance(r, ApiError) for r in first)
+    # Every call failing is the provider, the key or the budget, not the letter: the draft fails
+    # with that code, as a failed `letter.write` does, rather than shipping four templates.
+    if all(isinstance(r, ApiError) for r in first):
+        raise next(r for r in first if isinstance(r, ApiError))
+    written: dict[str, Paragraph | None] = {
+        p.location: r if isinstance(r, Paragraph) else None for p, r in zip(plans, first, strict=True)
+    }
+    stats.written_words = sum(words(p.text) for p in written.values() if p)
+
+    found = _paragraph_violations(session, inp, plans, {k: v for k, v in written.items() if v})
+    failing = [p for p in plans if written[p.location] is None or found.get(p.location)]
+    for p in failing:
+        for rule in {v.rule for v in found.get(p.location, [])} or {"no reply"}:
+            stats.failed_on[rule] = stats.failed_on.get(rule, 0) + 1
+    replaced: dict[str, str] = {}  # location → the reason the written paragraph was replaced
+    if failing:
+        again = _in_parallel(
+            session, [write(p, _rewrite_feedback(written[p.location], found.get(p.location, []))) for p in failing]
+        )
+        stats.calls += len(failing)
+        stats.regenerated += len(failing)
+        stats.failed_calls += sum(isinstance(r, ApiError) for r in again)
+        fresh = {p.location: r for p, r in zip(failing, again, strict=True) if isinstance(r, Paragraph)}
+        second = _paragraph_violations(session, inp, [p for p in failing if p.location in fresh], fresh) if fresh else {}
+        for p in failing:
+            if p.location in fresh and not second.get(p.location):
+                written[p.location] = fresh[p.location]
+                continue
+            written[p.location] = _template(p, inp)
+            replaced[p.location] = _reason(second.get(p.location) or found.get(p.location) or [])
+
+    # LTR-01's floor, on the letter as assembled: once, the paragraph furthest under its own budget.
+    total = sum(words(p.text) for p in written.values() if p)
+    if total < TARGET_MIN_WORDS:
+        p = max(plans, key=lambda p: p.words[0] - words(written[p.location].text if written[p.location] else ""))
+        current = written[p.location]
+        stats.calls += 1
+        stats.lengthened += 1
+        longer = _in_parallel(session, [write(p, _length_feedback(current, p, total))])[0]
+        if isinstance(longer, ApiError):
+            stats.failed_calls += 1
+        elif words(longer.text) > words(current.text if current else "") and not _paragraph_violations(
+            session, inp, [p], {p.location: longer}
+        ).get(p.location):
+            written[p.location] = longer
+            replaced.pop(p.location, None)
+        logfire.info(
+            "Letter for {job_id} came to {total} words; paragraph {n} written again to its budget",
+            job_id=job.id,
+            total=total,
+            n=SECTIONS.index(p.section) + 1,
+        )
+    # And its ceiling (20 Nov: 2 of 20 eval letters came to 233 and 250). The paragraph furthest
+    # over its own budget is written again, told how far; kept only if it comes back shorter and
+    # clean. Up to two paragraphs (21 Nov: one rewrite left 4 of 8 live letters at 231–240).
+    tried: set[str] = set()
+    while total > TARGET_MAX_WORDS and len(tried) < 2:
+        over = [p for p in plans if p.location not in tried and written[p.location]]
+        if not over:
+            break
+        p = max(over, key=lambda p: words(written[p.location].text) - p.words[1])
+        tried.add(p.location)
+        current = written[p.location]
+        stats.calls += 1
+        stats.shortened += 1
+        shorter = _in_parallel(session, [write(p, _length_feedback(current, p, total, over=True))])[0]
+        if isinstance(shorter, ApiError):
+            stats.failed_calls += 1
+        elif words(shorter.text) < words(current.text) and not _paragraph_violations(
+            session, inp, [p], {p.location: shorter}
+        ).get(p.location):
+            written[p.location] = shorter
+        logfire.info(
+            "Letter for {job_id} came to {total} words; paragraph {n} written again to its budget",
+            job_id=job.id,
+            total=total,
+            n=SECTIONS.index(p.section) + 1,
+        )
+        total = sum(words(q.text) for q in written.values() if q)
+    stats.templated = len(replaced)
+    return _assemble(inp, plans, written, replaced, repaired=bool(failing)), stats
+
+
+def _in_parallel[T](session: Session, calls: list[Callable[[Session], T]]) -> list[T | ApiError]:
+    """Each call's result or the `ApiError` it raised, in order.
+
+    Concurrent on Postgres, each call in its own unit of work so its `llm_calls` row commits with
+    it — a session is not shared between threads. One after another in the caller's session on
+    SQLite, as `scoring_workers` is: a second writer there waits on the one write lock.
+    """
+
+    def safe(call: Callable[[Session], T], s: Session) -> T | ApiError:
+        try:
+            return call(s)
+        except ApiError as exc:
+            return exc
+
+    from ..settings import get_settings
+
+    workers = min(len(calls), max(1, wera().letters.workers))
+    # The demo answers from code, so there is no wait to overlap — and the demo's packs are drafted
+    # while the database is still being seeded, inside one uncommitted transaction a second unit of
+    # work can't see: on Postgres every paragraph failed as "not set up yet" (20 Nov).
+    if workers <= 1 or session.get_bind().dialect.name == "sqlite" or get_settings().wera_demo_mode:
+        return [safe(c, session) for c in calls]
+
+    def own(call: Callable[[Session], T]) -> T | ApiError:
+        with transaction() as s:
+            return safe(call, s)
+
+    # Each in a copy of this context, so its `llm` span sits under the letter's in the trace.
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="letter") as pool:
+        futures = [pool.submit(contextvars.copy_context().run, own, c) for c in calls]
+        return [f.result() for f in futures]
+
+
+def _write_paragraph(session: Session, inp: PackInput, p: SectionPlan, feedback: str | None) -> Paragraph:
+    """One `letter.paragraph` call, from its plan alone: its brief, its lines, its quotes."""
+    lines = cv_line_index(inp.cv)
+    shown = [i for i in p.line_ids if i in lines]
+    quotes = "\n".join(f'- {q.label}: "{q.text}"' for q in p.quotes)
+    out = structured(
+        session,
+        "letter.paragraph",
+        LetterParagraphOutput,
+        {
+            "brief": PARAGRAPH_BRIEFS[p.section],
+            "budget": f"{p.words[0]}–{p.words[1]}",
+            "job": job_header(inp),
+            "lines": "\n".join(f"[{i}] {lines[i]['text']}" for i in shown) or "(none: this paragraph cites nothing)",
+            "facts": _facts(inp.cv),
+            "quotes": untrusted("the employer's words", quotes)
+            if quotes
+            else "(none: say nothing about the company beyond its name)",
+            "keywords": section_keywords_text(p, list(inp.evidence.culture)),
+            # Only where the brief asks for it: given to every paragraph, the proof ended on the
+            # applicant's working arrangement (`wera_agent.evaluate letters`, 20 Nov).
+            "wants": _what_they_want(inp) if p.section == "strategic_alignment_and_culture" else "not needed here",
+            "note": _letter_note(inp.note, feedback),
+        },
+        context={"cv": inp.cv, "plan": p},
+        demo_input=inp,
+    )
+    # Only the lines it was shown; none cited means it drew on all of them, and the guard holds it
+    # to all of them — which is what citing nothing used to be dropped for not doing.
+    cited = [i for i in out.source_ids if i in shown] or shown
+    return Paragraph(text=" ".join(out.text.split()), source_ids=cited, section=p.section, theme=None)
+
+
+def _facts(cv: MasterCV) -> str:
+    """What any paragraph may state without citing a line (`vocab.backing_text`'s facts)."""
+    parts = [
+        f"Headline: {cv.person.headline}" if cv.person.headline else "",
+        "Education: " + "; ".join(f"{e.degree}, {e.institution}" for e in cv.education) if cv.education else "",
+        "Roles: " + "; ".join(f"{r.title} at {r.org}" for r in cv.experience) if cv.experience else "",
+        "Skills: " + ", ".join(s.name for s in cv.skills) if cv.skills else "",
+    ]
+    return "\n".join(p for p in parts if p) or "(none)"
+
+
+def _paragraph_violations(
+    session: Session, inp: PackInput, plans: list[SectionPlan], written: dict[str, Paragraph]
+) -> dict[str, list[Violation]]:
+    """The guard over the given paragraphs: the regex rules and the institution check, one
+    `guard.claims` call over all of them, filler, and quotes the post doesn't contain.
+
+    The employer's words are masked first and restored in what is reported, so a number in a
+    quoted sentence never reads as the applicant's — and, unlike `_without`, nothing is lost: the
+    guard only decides, and the paragraph it passes is the one that was written, words and all.
+
+    Each paragraph is held to every line it was shown, not only the ones it cited: it can only have
+    drawn on those, and a claim none of them carries fails either way.
+    """
+    if not written:
+        return {}
+    by_location = {p.location: p for p in plans}
+    post = inp.job.description_md or ""
+    site = inp.brief.site.text if inp.brief and inp.brief.site else ""
+    items: list[tuple[str, Cited]] = []
+    masks: dict[str, dict[str, str]] = {}
+    for location, para in written.items():
+        p = by_location[location]
+        text, masks[location] = mask(para.text, _employer_words(inp, para.text, [q.text for q in p.quotes]))
+        items.append((location, Cited(text=text, source_ids=list(p.line_ids) or para.source_ids)))
+    closes = {loc for loc in written if by_location[loc].section == "call_to_action_and_close"}
+    terms = [k.term for k in inp.evidence.keywords]
+    found = [
+        *check_cited(items, inp.cv, terms, unsourced_ok=closes, names=True).violations,
+        *claim_violations(session, items, inp.cv),
+    ]
+    phrases = [p.strip().lower() for p in wera().letter_banned_phrases if p.strip()]
+    for location, para in written.items():
+        found += [
+            Violation(location=location, rule="filler", detail=f'"{h}" reads like a template')
+            for h in phrases
+            if h in para.text.lower()
+        ]
+        found += [
+            Violation(location=location, rule="quotes", detail=f'"{q}" is in quotation marks, and the post doesn\'t say it')
+            for q in invented_quotes(para.text, post, site, inp.cv)
+        ]
+        if (said := stated_preference(para.text, inp.profile)) is not None:
+            found.append(
+                Violation(location=location, rule="claims", detail=f'"{said}" is a preference your profile doesn\'t state')
+            )
+    out: dict[str, list[Violation]] = {}
+    for v in found:
+        v.detail = unmask(v.detail, masks.get(v.location or "", {}))
+        out.setdefault(v.location or "", []).append(v)
+    return out
+
+
+# A sentence in which the applicant prefers a way of working (20 Nov).
+_PREFERS = re.compile(r"\b(?:my|I)\b[^.!?]{0,40}\b(?:prefer\w*|preference)\b[^.!?]*", re.I)
+_WORK_PATTERN = re.compile(
+    r"\b(?:hybrid|remote|flexib\w*|office|on-?site|from home|working (?:model|pattern|arrangement)s?)\b", re.I
+)
+
+
+def stated_preference(text: str, profile: object | None) -> str | None:
+    """The words in which a paragraph says how the applicant prefers to work, when their profile
+    says no such thing (20 Nov). A profile that is remote-only or office-only has said it."""
+    remote = getattr(profile, "remote", "any")
+    for m in _PREFERS.finditer(text):
+        sentence = m.group(0)
+        if not _WORK_PATTERN.search(sentence):
+            continue
+        if remote == "remote_only" and re.search(r"\b(?:remote|from home|flexib\w*|hybrid)\b", sentence, re.I):
+            continue
+        if remote == "no_remote" and re.search(r"\b(?:office|on-?site)\b", sentence, re.I):
+            continue
+        return sentence.strip()[:120]
+    return None
+
+
+def _employer_words(inp: PackInput, text: str, allowed: list[str]) -> list[str]:
+    """What in this paragraph is the employer speaking, not a claim about the applicant."""
+    post = inp.job.description_md or ""
+    site = inp.brief.site.text if inp.brief and inp.brief.site else ""
+    return [
+        *allowed,
+        inp.evidence.job_quote,
+        *title_forms(inp.job.title),
+        inp.job.company,
+        *_context_quotes(inp),
+        *post_quotes(text, post),
+        *(post_quotes(text, site) if site else []),
+    ]
+
+
+def title_forms(title: str) -> list[str]:
+    """The role as a letter names it: the title, and the title before its first qualifier.
+    "Investment Banking Analyst, Consumer & Retail" is "the Investment Banking Analyst role" in a
+    close, and on 20 Nov that shorter form was read as a skill the CV lacks ("Investment
+    Banking") and the close was replaced."""
+    short = re.split(r",| [-–—] | \(| / ", title, maxsplit=1)[0].strip()
+    return [title, short] if short and short != title else [title]
+
+
+def invented_quotes(text: str, post: str, site: str, cv: MasterCV) -> list[str]:
+    """Spans a paragraph puts in quotation marks that neither the post, the company's site nor
+    the CV says. A quote is a claim about what the employer wrote, and the guard can't check
+    one it doesn't know the source of — so a made-up one is read as made up."""
+    sources = [" ".join(t.split()).casefold() for t in (post, site, master_cv_text(cv)) if t]
+    return [m for m in (" ".join(g.split()) for g in _QUOTED.findall(text)) if not any(quoted_from(m, s) for s in sources)]
+
+
+def _rewrite_feedback(previous: Paragraph | None, violations: list[Violation]) -> str | None:
+    """What a paragraph written again is told: its own words, and what failed in them."""
+    if previous is None:
+        return None  # the call failed; asking again is the whole of the feedback
+    reasons = "; ".join(dict.fromkeys(v.detail for v in violations)) or "a claim the lines it cites don't carry"
+    return (
+        f"WERA's citation check failed the last version of this paragraph — “{previous.text}” — "
+        f"because: {reasons}. Write it again to the same length. Keep what was right; for what "
+        "failed, say only what the lines given say, or leave it out — and if that leaves it short, "
+        "use another of the lines given, never words of your own."
+    )
+
+
+def _length_feedback(current: Paragraph | None, p: SectionPlan, total: int, *, over: bool = False) -> str:
+    n = words(current.text) if current else 0
+    if over:
+        return (
+            f"The letter came to {total} words, over the {TARGET_MAX_WORDS} it may run to, and this paragraph "
+            f"to {n}. Write it at {p.words[0]}–{p.words[1]} words: keep the strongest line and its proof, "
+            "and drop what repeats the rest of the letter."
+        )
+    return (
+        f"The letter came to {total} words, under the {TARGET_MIN_WORDS} it needs, and this paragraph "
+        f"to {n}. Write it at {p.words[0]}–{p.words[1]} words, using more of the lines given — "
+        "never by padding or by adding what they don't say."
+    )
+
+
+def _reason(violations: list[Violation]) -> str:
+    """The first failure, in the person's terms (`nodes.guard.WHY`)."""
+    from .guard import WHY
+
+    rules = {v.rule for v in violations}
+    extra = {"filler": "phrases that read like a template", "quotes": "a quote the post doesn't contain"}
+    return next(
+        (WHY.get(r) or extra[r] for r in ("numbers", "terms", "claims", "names", "quotes", "sources", "filler") if r in rules),
+        "no reply WERA could use",
+    )
+
+
+def _template(p: SectionPlan, inp: PackInput) -> Paragraph:
+    text, cited = template_paragraph(
+        p, inp.cv, title=inp.job.title, company=inp.job.company, intermediary=dedupe.is_intermediary(inp.job.company)
+    )
+    return Paragraph(text=text, source_ids=cited, section=p.section, theme=None)
+
+
+def _assemble(
+    inp: PackInput, plans: list[SectionPlan], written: dict[str, Paragraph | None], replaced: dict[str, str], *, repaired: bool
+) -> CoverLetter:
+    """The letter from its paragraphs, with the greeting and sign-off made here (LTR-05)."""
+    cv, job = inp.cv, inp.job
+    post = job.description_md or ""
+    paragraphs = [para for p in plans if (para := written[p.location]) is not None]
+    text = " ".join(p.text for p in paragraphs)
+    # A quote ending a sentence loses its full stop inside the quotation marks.
+    quotes = [q for p in plans for q in p.quotes if q.text.rstrip(".") in text]
+
+    def used(*kinds: str) -> str:
+        """The quote as the letter has it, so it is still a substring of both letter and post."""
+        found = next((q.text for kind in kinds for q in quotes if q.kind == kind), "")
+        return found if found in text else found.rstrip(".")
+
+    contact = named_contact(post)
+    violations = [
+        Violation(
+            location=location,
+            rule="replaced",
+            detail=f"WERA wrote paragraph {int(location[1:]) + 1} from your CV's own lines instead: the one it drafted "
+            f"had {why}, and writing it again didn't fix that. It is plainer than the rest; worth a read.",
+        )
+        for location, why in sorted(replaced.items())
+    ]
+    return CoverLetter(
+        job_id=job.id,
+        greeting=f"Dear {contact}," if contact else "Dear Hiring Team,",
+        paragraphs=paragraphs,
+        signoff=f"Best regards,\n{display_case(cv.person.name)}",
+        # LTR-02: the post's words the letter really quotes, of those it was given; else any
+        # other span of the post a paragraph quoted.
+        company_fact=CompanyFact(
+            quote=used("company", "requirement") or next((q for para in paragraphs for q in post_quotes(para.text, post)), ""),
+            policy_quote=used("policy"),
+            site_quote=used("site"),
+        ),
+        word_count=words(text),
+        guard=GuardResult(pass_=not violations, violations=violations, repaired=repaired),
+        hook_type="Introduction",
+    )
+
+
+# Tokens the employer's words are held as while the guard reads a paragraph. Words, not numbers
+# or letters: a digit would read as an uncited figure, and a lone "C" or "R" is a language.
+_TOKENS = [
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon",
+    "zeta",
+    "eta",
+    "theta",
+    "iota",
+    "kappa",
+    "lambda",
+    "mu",
+    "nu",
+    "xi",
+    "omicron",
+    "pi",
+    "rho",
+    "sigma",
+    "tau",
+    "upsilon",
+    "phi",
+    "chi",
+    "psi",
+    "omega",
+]
+
+
+def mask(text: str, phrases: list[str]) -> tuple[str, dict[str, str]]:
+    """The text with each phrase held as a token, and the tokens to put back (20 Nov).
+
+    Longest first, so a quote that contains the company's name is held whole. Past the last
+    token a phrase is taken out as `_without` did, which loses it from a repair but never makes
+    it a claim.
+    """
+    mapping: dict[str, str] = {}
+    for phrase in sorted({p for p in phrases if p and p.strip()}, key=len, reverse=True):
+        if phrase not in text:
+            continue
+        if len(mapping) == len(_TOKENS):
+            text = "".join(text.split(phrase))
+            continue
+        token = f"⟦employer-{_TOKENS[len(mapping)]}⟧"
+        mapping[token] = phrase
+        text = text.replace(phrase, token)
+    return text, mapping
+
+
+def unmask(text: str, mapping: dict[str, str]) -> str:
+    for token, phrase in mapping.items():
+        text = text.replace(token, phrase)
+    return text
 
 
 def _better(candidate: CoverLetter, best: CoverLetter) -> bool:
@@ -502,16 +1028,19 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
         quote,
         policy,
         inp.evidence.job_quote,
-        inp.job.title,
+        *title_forms(inp.job.title),
         inp.job.company,
         site,
         *_context_quotes(inp),
         *(q for p in paragraphs for q in post_quotes(p.text, post)),
         *(q for p in paragraphs for q in (post_quotes(p.text, site_text) if site_text else [])),
     ]
+    # Held as tokens rather than cut out (20 Nov): a repair used to be handed the paragraph without
+    # them and printed without them, so a repaired paragraph lost the company's name and its quote.
+    masks = [mask(p.text, quoted) for p in paragraphs]
     result, decisions = guard_and_repair(
         session,
-        [(f"p{i}", Cited(text=_without(p.text, quoted), source_ids=p.source_ids)) for i, p in enumerate(paragraphs)],
+        [(f"p{i}", Cited(text=masks[i][0], source_ids=p.source_ids)) for i, p in enumerate(paragraphs)],
         cv,
         [k.term for k in inp.evidence.keywords],
         # The letter is the one document whose prose a model writes, so it is the one held to the
@@ -527,10 +1056,13 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
             for i, p in enumerate(paragraphs)
             if p.section in ("call_to_action_and_close", "strategic_alignment_and_culture")
         },
+        names=True,
     )
+    for v in result.violations:
+        v.detail = unmask(v.detail, masks[int(v.location[1:])][1] if v.location[1:].isdigit() else {})
     # A paragraph the guard accepted keeps its full wording, quote included. A repaired one keeps
     # the section and theme of the paragraph it replaces: the repair fixes a claim, not its place.
-    kept = [_repaired(p, decisions[f"p{i}"]) if f"p{i}" in decisions else p for i, p in enumerate(paragraphs)]
+    kept = [_repaired(p, decisions[f"p{i}"], masks[i][1]) if f"p{i}" in decisions else p for i, p in enumerate(paragraphs)]
     # LTR-02: the letter always opens by introducing the applicant. When the guard cuts the
     # model's opening — 3 of 6 on 14 Nov, each for a claim like "which aligns with my goal" — the
     # letter used to start on the stack instead, the thing the opening exists to put second.
@@ -545,7 +1077,9 @@ def _guard_letter(session: Session, out: LetterOutput, inp: PackInput) -> CoverL
         job_id=inp.job.id,
         greeting=out.greeting,
         paragraphs=paragraphs,
-        signoff=out.signoff,
+        # The name from the CV, in ordinary case (20 Nov): a CV that writes "ELEANOR VANCE" in its
+        # heading signs its letters "Eleanor Vance".
+        signoff=f"{out.signoff.partition(chr(10))[0]}\n{display_case(cv.person.name)}",
         company_fact=CompanyFact(quote=quote, policy_quote=policy, site_quote=site),
         word_count=words(text),
         guard=result,
@@ -561,10 +1095,11 @@ def plain_introduction(inp: PackInput, quote: str) -> Paragraph:
     about the applicant for the guard to doubt. Plainer than a written one, and always there.
     """
     cv, job = inp.cv, inp.job
-    # No source ids: an education entry isn't a citable line (only its notes are), and the
-    # paragraph quotes its fields rather than claiming anything they would need to back.
+    # Citing the education entry it quotes (20 Nov, when entries became citable lines).
     sentences: list[str] = []
+    cited: list[str] = []
     if cv.education:
+        cited.append(cv.education[0].id)
         first = cv.education[0]
         sentences.append(f"I studied {no_stop(first.degree)} at {no_stop(first.institution)}.")
     elif cv.person.headline:
@@ -572,7 +1107,7 @@ def plain_introduction(inp: PackInput, quote: str) -> Paragraph:
     if quote:
         sentences.append(f"What drew me to {job.company} is how your post puts it: “{no_stop(quote)}”.")
     sentences.append(f"The {job.title} role is the work I want to do next.")
-    return Paragraph(text=" ".join(sentences), source_ids=[], section="opening_hook", theme=None)
+    return Paragraph(text=" ".join(sentences), source_ids=cited, section="opening_hook", theme=None)
 
 
 def _context_quotes(inp: PackInput) -> list[str]:
@@ -583,10 +1118,13 @@ def _context_quotes(inp: PackInput) -> list[str]:
     return [v for v in inp.analysis.strategic_context.model_dump(by_alias=False).values() if v]
 
 
-def _repaired(original: Paragraph, replacement: Cited | None) -> Paragraph | None:
+def _repaired(original: Paragraph, replacement: Cited | None, mapping: dict[str, str] | None = None) -> Paragraph | None:
+    """The repair in the original's place, with the employer's words it held as tokens put back."""
     if replacement is None:
         return None
-    return Paragraph(**replacement.model_dump(by_alias=False), section=original.section, theme=original.theme)
+    fields = replacement.model_dump(by_alias=False)
+    fields["text"] = unmask(fields["text"], mapping or {})
+    return Paragraph(**fields, section=original.section, theme=original.theme)
 
 
 # Text in quotation marks, straight or curly: what a letter says in the post's own words.
@@ -603,11 +1141,18 @@ def post_quotes(text: str, post: str) -> list[str]:
     span the post really contains counts: a quote the post doesn't have is still checked.
     """
     flat = " ".join(post.split()).casefold()
-    return [m for m in (" ".join(g.split()) for g in _QUOTED.findall(text)) if m.casefold() in flat]
+    return [m for m in (" ".join(g.split()) for g in _QUOTED.findall(text)) if quoted_from(m, flat)]
 
 
-def _without(text: str, quoted: list[str]) -> str:
-    for phrase in quoted:
-        if phrase:
-            text = "".join(text.split(phrase))
-    return text
+# What a quotation may add to the words it quotes: the sentence's punctuation at either end, and
+# an ellipsis where it skips some. Measured on 20 Nov's eval: 8 of 24 paragraphs written again
+# had quoted the post with a full stop inside the marks, or with "…" between two exact pieces.
+_ENDS = ".,;:!?'’\"“” "
+_ELLIPSIS = re.compile(r"\s*(?:…|\.\.\.)\s*")
+
+
+def quoted_from(quote: str, flat_source: str) -> bool:
+    """Whether a quotation is word for word in a source (already flattened and case-folded)."""
+    pieces = [p.strip(_ENDS).casefold() for p in _ELLIPSIS.split(quote)]
+    pieces = [p for p in pieces if p]
+    return bool(pieces) and all(p in flat_source for p in pieces)

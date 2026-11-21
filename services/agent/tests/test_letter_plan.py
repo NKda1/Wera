@@ -134,6 +134,10 @@ class TestTheDraftedLetter:
         return app_id, seen
 
     def test_the_letter_is_given_the_plan_and_the_posts_context(self, client, monkeypatch):
+        """`letters.mode: single`'s prompt; the paragraph plan is `test_letter_paragraphs.py`'s."""
+        from wera_agent.config import wera
+
+        monkeypatch.setattr(wera().letters, "mode", "single")
         app_id, seen = self._draft(monkeypatch)
         assert "- Proof:" in seen["keywords"] and "- Opening" not in seen["keywords"]
         with transaction() as session:

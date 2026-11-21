@@ -84,8 +84,36 @@ def _justified() -> frozenset[str]:
     return frozenset(out)
 
 
+# 20 Nov, from the JobLeads review of 19 Nov: section headers set larger than the body, so a
+# recruiter skimming finds Experience and Education at a glance. Every RenderCV 2.8 theme already
+# does (1.2em in `engineeringresumes` and `opal`, up to 1.4em), measured from their defaults; the
+# floor is here so a theme that ships smaller is raised to it rather than passing unnoticed.
+SECTION_TITLE_MIN_EM = 1.2
+
+
+@cache
+def section_title_sizes() -> dict[str, float]:
+    """Each theme's section-title size, in ems of its body text."""
+    with RENDERCV:
+        from rendercv.schema.models.design.built_in_design import discover_other_themes
+        from rendercv.schema.models.design.classic_theme import ClassicTheme
+
+        themes = [ClassicTheme, *discover_other_themes()]
+    out: dict[str, float] = {}
+    for theme in themes:
+        field = theme.model_fields["typography"]
+        typography = field.default_factory() if field.default_factory else field.default  # type: ignore[call-arg]
+        size, body = str(typography.font_size.section_titles), str(typography.font_size.body)
+        if size.endswith("em"):
+            out[theme.model_fields["theme"].default] = float(size[:-2])
+        elif size.endswith("pt") and body.endswith("pt"):
+            out[theme.model_fields["theme"].default] = float(size[:-2]) / float(body[:-2])
+    return out
+
+
 def default_design(theme: str = DEFAULT_THEME, size: PageSize = "a4") -> dict[str, Any]:
-    """The theme with three things turned off.
+    """The theme with three things turned off, and its section headers no smaller than
+    `SECTION_TITLE_MIN_EM`.
 
     - **Hyphenation.** Seven of the nine themes justify their text, and Typst hyphenates
       justified text: "Kuber-netes" across a line end is two words to a parser, and neither is
@@ -96,6 +124,8 @@ def default_design(theme: str = DEFAULT_THEME, size: PageSize = "a4") -> dict[st
     design: dict[str, Any] = {"theme": theme, "page": {"size": size, "show_top_note": False}}
     if theme in _justified():
         design["typography"] = {"alignment": "justified-with-no-hyphenation"}
+    if section_title_sizes().get(theme, SECTION_TITLE_MIN_EM) < SECTION_TITLE_MIN_EM:
+        design.setdefault("typography", {})["font_size"] = {"section_titles": f"{SECTION_TITLE_MIN_EM}em"}
     design["header"] = {"connections": {"show_icons": False}}
     return design
 

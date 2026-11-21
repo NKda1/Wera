@@ -25,8 +25,9 @@ import json
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date
+from typing import Any
 
 import logfire
 from sqlalchemy.orm import Session
@@ -697,9 +698,21 @@ def _excluded(title: str, profile: SearchProfile) -> bool:
     """MATCH-01's title rules, on the title a search result or a link came with — the ones a job
     would be hidden by once read. A title of a word or two ("Apply", "View job") says nothing about
     the job, so the target-title rule only judges a title with something in it."""
-    if filters.excluded_term(title, profile) or filters.too_senior(title, profile):
-        return True
-    return len(filters.title_tokens(title)) >= 2 and filters.title_mismatch(title, profile) is not None
+    return _why_excluded(title, profile) is not None
+
+
+def _why_excluded(title: str, profile: SearchProfile) -> str | None:
+    """Which of `_excluded`'s rules a title falls to: "term" (a word the profile excludes),
+    "senior", or "title" (not one of the target titles, by its words or its meaning). Only a
+    "title" drop can be a near miss for Upskills (UPSK-06): the others are jobs the person said no
+    to, not jobs like theirs."""
+    if filters.excluded_term(title, profile):
+        return "term"
+    if filters.too_senior(title, profile):
+        return "senior"
+    if len(filters.title_tokens(title)) >= 2 and filters.title_mismatch(title, profile) is not None:
+        return "title"
+    return None
 
 
 def _listing_links(url: str, rules: Robots, read: Callable[[str], str | None], out: Discovery) -> list[tuple[str, str]]:
@@ -754,9 +767,116 @@ def _listing_html(url: str) -> str | None:
 
 # A search's searches for snippet leads' originals: their own cap, so they never eat discovery's.
 RESOURCE_QUERIES = 10
+# 20 Nov, live: with the day's Serper allowance spent, 228 snippet leads that passed every filter
+# were never looked for, and "Find more" found nothing to read. They wait here instead, best match
+# first, for the next search that has lookups to spend — "Find more" after midnight, or tomorrow's.
+WAITING_KEY = "wera:waiting:"
+WAITING_TTL_SECONDS = 3 * 24 * 60 * 60
+WAITING_MAX = 300
+
+
+def _waiting_key(queue: object) -> str | None:
+    pool = getattr(queue, "pool", None)
+    return f"{WAITING_KEY}{pool}" if pool and getattr(queue, "r", None) is not None else None
+
+
+def _park(queue: object, parked: list[tuple[float, str, "feeds.FeedQuery", "feeds.Lead"]]) -> int:
+    """Keep leads that passed but couldn't be looked for, scored by their match. Returns how many
+    wait in all. A Redis failure costs the waiting list, never the search."""
+    key = _waiting_key(queue)
+    if key is None:
+        return 0
+    r = queue.r  # type: ignore[attr-defined]
+    try:
+        if parked:
+            r.zadd(key, {json.dumps({"feed": f, "query": asdict(q), "lead": asdict(lead)}): s for s, f, q, lead in parked})
+            r.zremrangebyrank(key, 0, -WAITING_MAX - 1)  # the best `WAITING_MAX` stay
+            r.expire(key, WAITING_TTL_SECONDS)
+        return int(r.zcard(key))
+    except Exception:  # noqa: BLE001
+        logfire.exception("Couldn't keep the leads waiting for lookups")
+        return 0
+
+
+def waiting(queue: object) -> int:
+    """How many leads wait for lookups for this pool (`WAITING_KEY`)."""
+    key = _waiting_key(queue)
+    try:
+        return int(queue.r.zcard(key)) if key else 0  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def look_for_waiting(
+    queue: object, *, profile: SearchProfile | None, sites: list[Site], known_urls: set[str], resource: Serper
+) -> tuple[int, int]:
+    """The waiting leads' originals, looked for with `resource`'s lookups, the found ones queued:
+    what "Find more" reads once the plan has been sent (20 Nov). Returns (looked for, queued)."""
+    from ..sources.feeds import resource as finding
+
+    if getattr(resource, "stopped", None):
+        return 0, 0
+    lookups = getattr(resource, "max_queries", RESOURCE_QUERIES) - getattr(resource, "sent", 0)
+    back = _resume(queue, lookups)
+    known = {canonical_url(u) or u for u in known_urls}
+    found: list[Target] = []
+    for feed_id, query, lead in back:
+        hit = finding.original(lead, serper=resource, sites=sites, gl=query.country, hl="en", exclude=[])  # type: ignore[arg-type]
+        if hit is None or (profile is not None and _excluded(hit.title, profile)) or (canonical_url(hit.url) or hit.url) in known:
+            continue
+        q = f"{feeds.FEEDS[feed_id].name}: {query.title}" + (f" in {query.city}" if query.city else "")
+        found.append(
+            Target(hit.url, host_of(hit.url).removeprefix("www."), "open", q, len(found), hit.title, hit.snippet, lead.date, via=feed_id, country=query.country)
+        )  # fmt: skip
+    return len(back), queue.push(found)  # type: ignore[attr-defined]
+
+
+def _resume(queue: object, n: int) -> list[tuple[str, "feeds.FeedQuery", "feeds.Lead"]]:
+    """Up to `n` waiting leads, best first, taken off the list to be looked for now."""
+    from ..sources import feeds as feed_types
+
+    key = _waiting_key(queue)
+    if key is None or n <= 0:
+        return []
+    r = queue.r  # type: ignore[attr-defined]
+    try:
+        rows = r.zrevrange(key, 0, n - 1)
+        if rows:
+            r.zrem(key, *rows)
+    except Exception:  # noqa: BLE001
+        logfire.exception("Couldn't read the leads waiting for lookups")
+        return []
+    out = []
+    for raw in rows:
+        item = json.loads(raw)
+        out.append((item["feed"], feed_types.FeedQuery(**item["query"]), feed_types.Lead(**item["lead"])))
+    return out
+
+
 # And no date filter on them: the lead's date is the API's, and the employer's page may have been
 # indexed weeks before it (13 Nov: with discovery's three weeks, 10 lookups found no original).
 RESOURCE_WINDOW = ""
+
+
+@dataclass(frozen=True)
+class NearMiss:
+    """A lead the title rule dropped (UPSK-06, 20 Nov): never read, but what it asks for still says
+    what the person's market wants. `score` is `prefilter.lead_ranker`'s, when the search had one."""
+
+    url: str
+    title: str
+    company: str
+    snippet: str
+    feed: str
+    score: float | None = None
+    # What the API's own reader needs for the whole ad (Reed's job id, USAJOBS' card): a snippet
+    # gives a few keywords at most, the full text the post's own list.
+    payload: dict[str, Any] | None = None
+
+
+# The title-dropped leads one search keeps for Upskills to choose from, best match first. Upskills
+# extracts far fewer (`upskills.near_miss_per_search`); this only bounds what is carried around.
+NEAR_MISSES_KEPT = 200
 
 
 @dataclass
@@ -766,8 +886,18 @@ class FeedDiscovery:
     by_feed: dict[str, dict[str, object]] = field(default_factory=dict)
     queued: int = 0
     errors: list[str] = field(default_factory=list)
-    # Leads left out as one more of an agency's reposts (19 Nov).
-    agency_reposts: int = 0
+    # 20 Nov: what became of the leads — the counts the search's report gives, by rule.
+    unique: int = 0
+    passed: int = 0
+    dropped: Counter = field(default_factory=Counter)
+    # Snippet leads that passed but weren't looked for, the lookups' cap being spent on better ones.
+    not_looked_for: int = 0
+    # 20 Nov: those leads, kept for when lookups are back (`WAITING_KEY`): how many wait now, and
+    # how many this search took back out to look for.
+    waiting: int = 0
+    resumed: int = 0
+    # Leads dropped only for their title, best match first: Upskills' near misses (UPSK-06).
+    near_misses: list[NearMiss] = field(default_factory=list)
 
 
 def discover_feeds(
@@ -783,26 +913,28 @@ def discover_feeds(
     resource: Serper | None = None,
     on_step: Step | None = None,
     rank: Ranker | None = None,
-    crowded: frozenset[str] = frozenset(),
 ) -> FeedDiscovery:
     """Ask every job API this search can use, all at once, and queue what they found.
 
     The queries are the plan's titles (tier 1's first), at the person's level, in their city. The
     same rules as `discover` decide what is queued — not known, not LinkedIn, not a title the
-    profile excludes, posted in the last 21 days — and at most `max_queued` a search from each,
-    so the open web and the reviewed boards still get their share of the 8–12. A full-text API's
-    postings are queued to be read from the API; a snippet API's leads are looked for where the
-    employer posted them (`feeds.resource`), with `resource` (a Serper client with its own cap).
+    profile excludes, posted in the last 21 days. A full-text API's postings are queued to be read
+    from the API; a snippet API's leads are looked for where the employer posted them
+    (`feeds.resource`), with `resource` (a Serper client with its own cap).
 
     `on_step(fraction, detail, done, total)` is told each answer as it lands and each original
     looked for, in words naming the API, the title and the place (UX-01).
 
-    With `rank` (17 Nov), every API's leads are taken best match first across every place — so a
-    feed's `max_queued` and the searches for snippet leads' originals go to the best of them, not
-    to whichever country was asked first.
+    **One pool, no share per site (20 Nov).** Every API's leads are ranked together by `rank`
+    (`prefilter.lead_ranker`, CV similarity), and every one that passes is queued: the pool is read
+    best match first, and what a search doesn't read waits for "Find more" and the next search.
+    The per-API `max_queued` and the 19 Nov agency caps are gone — one site can hold a lot of
+    good jobs, and an agency like eFinancialCareers is a main board for finance. A repost of the
+    same job is caught by `dedupe` (its employer named in its title), a weak job by the fit bar.
+    Ranking first also means the Serper lookups for snippet leads' originals go to the best
+    Adzuna and Careerjet leads, whichever country and API they came from.
 
-    An agency is one source whoever it reposts for (19 Nov): at most `agency_per_search` of its
-    leads queued, and none when it is in `crowded` (its jobs already waiting on the shortlist).
+    Leads dropped for their title alone are kept on `near_misses`, best first (UPSK-06).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -879,10 +1011,10 @@ def discover_feeds(
                     len(asks),
                 )
         answers = [(asks[i], results[i]) for i in range(len(asks))]
-        # Leads with no full text, each needing a search for where the employer posted it.
-        to_find = sum(
-            min(len(leads), feeds.config(f).max_queued) for (f, _q), (leads, _h) in answers if not feeds.FEEDS[f].full_text
-        )
+        # Leads with no full text, each needing a search for where the employer posted it — as
+        # many as the lookups' own cap allows, best first.
+        lookups = getattr(resource, "max_queries", RESOURCE_QUERIES) - getattr(resource, "sent", 0)
+        to_find = min(sum(len(leads) for (f, _q), (leads, _h) in answers if not feeds.FEEDS[f].full_text), max(lookups, 0))
         looked = 0
 
         known = {canonical_url(u) or u for u in known_urls}
@@ -890,6 +1022,7 @@ def discover_feeds(
         tried: set[str] = set()  # a lead two APIs (or one API twice) returned is looked for once
         oldest = now - RECENCY_MS["21d"]
         found: list[Target] = []
+        parked: list[tuple[float, str, feeds.FeedQuery, feeds.Lead]] = []
         entries: list[tuple[str, feeds.FeedQuery, feeds.Lead]] = []
         for (feed_id, query), (leads, how) in answers:
             stats = out.by_feed[feed_id]
@@ -897,29 +1030,48 @@ def discover_feeds(
             stats["leads"] += len(leads)  # type: ignore[operator]
             stats["how"][how] += 1  # type: ignore[index]
             entries += [(feed_id, query, lead) for lead in leads]
+        # Leads an earlier search couldn't look for, when there are lookups to spend now (20 Nov).
+        if resource is not None and not getattr(resource, "stopped", None) and lookups > 0:
+            back = [(f, q, lead) for f, q, lead in _resume(queue, lookups) if "skipped" not in out.by_feed.get(f, {"skipped": 1})]
+            out.resumed = len(back)
+            entries = back + entries
+        scores: list[float | None] = [None] * len(entries)
         if rank is not None and entries:
-            scores = rank([(lead.title, lead.snippet) for _f, _q, lead in entries])
-            order = sorted(range(len(entries)), key=lambda i: -scores[i])
-            entries = [entries[i] for i in order]
-        share = wera().source_share
-        by_agency: Counter = Counter()
-        for feed_id, query, lead in entries:
+            ranked = rank([(lead.title, lead.snippet) for _f, _q, lead in entries])
+            order = sorted(range(len(entries)), key=lambda i: -ranked[i])
+            entries, scores = [entries[i] for i in order], [ranked[i] for i in order]
+        if profile is not None:
+            from . import prefilter
+
+            prefilter.warm_titles([*profile.titles, *(lead.title for _f, _q, lead in entries)])
+        for (feed_id, query, lead), score in zip(entries, scores, strict=True):
             stats = out.by_feed[feed_id]
-            cfg, feed = feeds.config(feed_id), feeds.FEEDS[feed_id]
-            if stats["queued"] >= cfg.max_queued:  # type: ignore[operator]
-                continue
-            same = f"{lead.company.lower()}|{lead.title.lower()}"
-            if same in tried or is_denied(lead.url) or (profile is not None and _excluded(lead.title, profile)):
-                continue
-            if lead.date and _ms(lead.date) is not None and _ms(lead.date) < oldest:  # type: ignore[operator]
+            feed = feeds.FEEDS[feed_id]
+            # The same job from two APIs, or an agency's repost of it naming the employer in its
+            # title ("… - Citi"), is one lead (`dedupe.same_posting_key`).
+            same = dedupe.same_posting_key(lead.company, lead.title)
+            if same in tried or is_denied(lead.url):
                 continue
             tried.add(same)
-            agency = dedupe.normalise_company(lead.company) if dedupe.is_agency(lead.company) else None
-            if agency and (agency in crowded or by_agency[agency] >= share.agency_per_search):
-                out.agency_reposts += 1
+            out.unique += 1
+            why = _why_excluded(lead.title, profile) if profile is not None else None
+            if why is not None:
+                out.dropped[why] += 1
+                if why == "title" and len(out.near_misses) < NEAR_MISSES_KEPT:
+                    out.near_misses.append(
+                        NearMiss(lead.url, lead.title, lead.company, lead.snippet, feed_id, score, lead.payload)
+                    )
                 continue
+            if lead.date and _ms(lead.date) is not None and _ms(lead.date) < oldest:  # type: ignore[operator]
+                out.dropped["old"] += 1
+                continue
+            out.passed += 1
             if feed.full_text:
                 url, title, snippet, source, payload = lead.url, lead.title, lead.snippet, "feed", lead.payload
+            elif resource is None or getattr(resource, "stopped", None) or looked >= max(lookups, 0):
+                out.not_looked_for += 1  # the lookups are spent, on better-ranked leads
+                parked.append((score if score is not None else 0.0, feed_id, query, lead))
+                continue
             else:
                 looked += 1
                 tell(
@@ -954,10 +1106,9 @@ def discover_feeds(
                 )
             )
             stats["queued"] += 1  # type: ignore[operator]
-            if agency:
-                by_agency[agency] += 1
 
         out.queued = queue.push(found)
+        out.waiting = _park(queue, parked)
         if resource is not None:
             out.errors += list(resource.errors)
         flat = {
@@ -967,7 +1118,17 @@ def discover_feeds(
         }
         span.set_attributes(
             flat
-            | {"queued": out.queued, "resource_queries": resource.sent if resource else 0, "agency_reposts": out.agency_reposts}
+            | {
+                "queued": out.queued,
+                "resource_queries": resource.sent if resource else 0,
+                "unique": out.unique,
+                "passed": out.passed,
+                "dropped": dict(out.dropped),
+                "not_looked_for": out.not_looked_for,
+                "waiting": out.waiting,
+                "resumed": out.resumed,
+                "near_misses": len(out.near_misses),
+            }
         )
     return out
 

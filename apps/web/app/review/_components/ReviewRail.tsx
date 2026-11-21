@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { upskillAnchor } from "@/lib/format";
-import type { AtsReport, FormatCheck, Pack } from "@/lib/types";
+import type { AtsReport, FormatCheck, Pack, WritingBullet, WritingReport, WritingTarget } from "@/lib/types";
 import { buttonClass } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { Chip, ChipList } from "@/lib/ui/Chip";
@@ -35,6 +35,8 @@ export function ReviewRail({
     <div className="grid items-start gap-4 @2xl:@max-4xl:grid-cols-2">
       {pack.ats.score != null ? <AtsScoreCard ats={pack.ats} /> : null}
       <AtsCard ats={pack.ats} />
+
+      <WritingCard appId={appId} pack={pack} />
 
       <FormatChecksCard docId={`${appId}.cv`} pack={pack} fallback={pack.ats.formatChecks} />
 
@@ -183,28 +185,42 @@ function AtsScoreCard({ ats }: { ats: AtsReport }) {
           : "As high as this CV can score on this post — the rest is skills it doesn't show yet."}
       </p>
       <ul className="mt-3 space-y-2.5">
-        {ats.parts.map((part) => (
-          <li key={part.id}>
-            <div className="flex items-baseline justify-between gap-3 text-[14px]">
-              <span className="font-semibold">{part.label}</span>
-              <span className="tabular-nums text-ink-2">
-                {Math.round(part.points * 10) / 10} / {part.max}
-              </span>
-            </div>
-            <div
-              className="mt-1 h-1.5 overflow-hidden rounded-none bg-mint-100"
-              role="progressbar"
-              aria-label={part.label}
-              aria-valuemin={0}
-              aria-valuemax={part.max}
-              aria-valuenow={part.points}
-            >
-              <div className="h-full rounded-none bg-accent" style={{ width: `${(100 * part.points) / Math.max(part.max, 1)}%` }} />
-            </div>
-            <p className="mt-0.5 text-small text-ink-2">{part.detail}</p>
-          </li>
-        ))}
+        {ats.parts.map((part) =>
+          // 20 Nov: a part with nothing to measure has no points, and its weight went to the others.
+          part.points == null ? (
+            <li key={part.id}>
+              <div className="flex items-baseline justify-between gap-3 text-[14px]">
+                <span className="font-semibold">{part.label}</span>
+                <span className="text-ink-2">not measured</span>
+              </div>
+              <p className="mt-0.5 text-small text-ink-2">{part.detail}</p>
+            </li>
+          ) : (
+            <li key={part.id}>
+              <div className="flex items-baseline justify-between gap-3 text-[14px]">
+                <span className="font-semibold">{part.label}</span>
+                <span className="tabular-nums text-ink-2">
+                  {Math.round(part.points * 10) / 10} / {Math.round(part.max * 10) / 10}
+                </span>
+              </div>
+              <div
+                className="mt-1 h-1.5 overflow-hidden rounded-none bg-mint-100"
+                role="progressbar"
+                aria-label={part.label}
+                aria-valuemin={0}
+                aria-valuemax={part.max}
+                aria-valuenow={part.points}
+              >
+                <div className="h-full rounded-none bg-accent" style={{ width: `${(100 * part.points) / Math.max(part.max, 1)}%` }} />
+              </div>
+              <p className="mt-0.5 text-small text-ink-2">{part.detail}</p>
+            </li>
+          ),
+        )}
       </ul>
+      {ats.parts.some((p) => p.points == null) ? (
+        <p className="mt-2 text-small text-ink-2">Parts that couldn&apos;t be measured don&apos;t count; the others share their points.</p>
+      ) : null}
       {ats.suggestedSkills.length ? (
         <>
           <p className="mt-4 mb-1.5 text-small text-ink-2">
@@ -264,9 +280,17 @@ function AtsCard({ ats }: { ats: AtsReport }) {
         ))}
       </ChipList>
 
+      {/* 20 Nov, named as resume-matcher names them: keywords the CV can back ("injectable")
+          and keywords only new experience can ("non-injectable"). The first is a pack away;
+          the second is Upskills' job. */}
       {backed.length ? (
         <>
-          <p className="mt-4 mb-1.5 text-small text-ink-2">In your CV, not in this pack · {backed.length}</p>
+          <p className="mt-4 mb-1.5 text-small text-ink-2">
+            {ats.bestScore != null && Math.round(ats.bestScore) > Math.round(ats.score ?? 0)
+              ? `Could reach ${Math.round(ats.bestScore)} if you add these from your CV`
+              : "In your CV, not in this pack — add them from your CV"}{" "}
+            · {backed.length}
+          </p>
           <ChipList>
             {backed.map((k) => (
               <Chip key={k.term} variant="outline">
@@ -280,7 +304,7 @@ function AtsCard({ ats }: { ats: AtsReport }) {
       {gaps.length ? (
         <>
           <p className="mt-4 mb-1.5 text-small text-ink-2">
-            Missing · {gaps.length} — add only if true, or <Link href="/upskills" className="underline hover:text-forest-700">see what to learn</Link>
+            Would need new experience · {gaps.length} — add only if true, or <Link href="/upskills" className="underline hover:text-forest-700">see what to learn</Link>
           </p>
           <ChipList>
             {gaps.map((k) => (
@@ -293,5 +317,107 @@ function AtsCard({ ats }: { ats: AtsReport }) {
         </>
       ) : null}
     </Card>
+  );
+}
+
+const ISSUE: Record<WritingBullet["issues"][number], string> = {
+  weak_verb: "Opens weakly",
+  no_verb: "No action verb",
+  no_number: "No number",
+};
+
+/**
+ * ATSC-09 (20 Nov): how the CV reads, from the JobLeads review of 19 Nov — lines that open with
+ * an action verb and say how much, a 50–100 word summary, 8–15 skills. Suggestions only, and
+ * not part of the score: nothing is rewritten, and a figure is only ever asked for, never
+ * offered. The "how much?" prompts are the results `cv.profile` read in each line.
+ */
+function WritingCard({ appId, pack }: { appId: string; pack: Pack }) {
+  const [state, setState] = useState<{ report: WritingReport } | { error: string } | null>(null);
+  const [all, setAll] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    api.getWriting(appId).then(
+      (report) => live && setState({ report }),
+      (e: unknown) => live && setState({ error: e instanceof Error ? e.message : "Couldn't read the CV." }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [appId, pack.cv, pack.cvFile]);
+
+  if (state === null || "error" in state) {
+    return (
+      <Card className="p-5">
+        <h2 className="text-[16px] font-bold">Writing</h2>
+        <p className="mt-1 text-small text-ink-2">{state === null ? "Reading the CV…" : `Couldn't read the CV (${state.error}).`}</p>
+      </Card>
+    );
+  }
+  const { report } = state;
+  const shown = all ? report.bullets : report.bullets.slice(0, 4);
+  return (
+    <Card className="p-5">
+      <h2 className="text-[16px] font-bold">Writing</h2>
+      <p className="mt-1 text-small text-ink-2">
+        Suggestions only; they don&apos;t change the ATS score. {Math.round(report.actionShare * 100)}% of {report.bulletCount} lines open with an action verb, {Math.round(report.numberShare * 100)}% give a number.
+      </p>
+      <ul className="mt-2.5 space-y-1.5 text-[14px]">
+        <TargetRow target={report.summary} />
+        <TargetRow target={report.skills} />
+      </ul>
+      {report.bullets.length ? (
+        <>
+          <p className="mt-4 mb-1.5 text-small text-ink-2">Lines to look at · {report.bullets.length}</p>
+          <ul className="space-y-3">
+            {shown.map((b, i) => (
+              <li key={`${b.sourceId ?? "line"}-${i}`} className="border-l-2 border-amber-100 pl-3">
+                <p className="text-[14px] [overflow-wrap:anywhere]">{b.text}</p>
+                <p className="mt-0.5 text-small text-ink-2">
+                  {b.issues.map((x) => ISSUE[x]).join(" · ")}
+                  {b.sourceId ? <span className="ml-1.5 font-mono text-tag">{b.sourceId}</span> : null}
+                </p>
+                {b.weakPhrase && b.suggestions.length ? (
+                  <p className="mt-0.5 text-small text-ink-2">
+                    Instead of &ldquo;{b.weakPhrase}&rdquo;, try {b.suggestions.slice(0, -1).join(", ")}
+                    {b.suggestions.length > 1 ? " or " : ""}
+                    {b.suggestions[b.suggestions.length - 1]}, if it&apos;s true.
+                  </p>
+                ) : null}
+                {b.figurePrompt ? (
+                  <p className="mt-0.5 text-small text-amber-700">How much, or how many? &ldquo;{b.figurePrompt}&rdquo; — add the figure if you know it.</p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {report.bullets.length > 4 ? (
+            <button type="button" onClick={() => setAll((v) => !v)} className="mt-2 min-h-9 text-small font-semibold text-forest-700 hover:text-forest-900 pointer-coarse:min-h-11">
+              {all ? "Show fewer" : `Show all ${report.bullets.length}`}
+            </button>
+          ) : null}
+          <p className="mt-2 text-small text-ink-2">
+            Change a line on <a href="/cv" className="underline hover:text-forest-700">your CV</a>, so every pack gets it.
+          </p>
+        </>
+      ) : (
+        <p className="mt-3 text-small text-ink-2">Every line opens with an action verb and gives a number.</p>
+      )}
+    </Card>
+  );
+}
+
+function TargetRow({ target }: { target: WritingTarget }) {
+  return (
+    <li className="flex items-start gap-2.5">
+      {target.ok ? (
+        <Check className="mt-0.5 size-4 shrink-0 text-forest-700" strokeWidth={2.6} aria-label="On target" />
+      ) : (
+        <span className="mt-px w-4 shrink-0 text-center font-bold text-amber-500" aria-label="Off target">
+          !
+        </span>
+      )}
+      <span className="min-w-0">{target.message}</span>
+    </li>
   );
 }

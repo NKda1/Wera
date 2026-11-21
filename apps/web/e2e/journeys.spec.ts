@@ -216,6 +216,26 @@ test("The CV file: a theme, a rewrite that locks line editing, and back (EXP-01)
   await expect(page.getByRole("button", { name: "Edit summary" })).toBeVisible();
 });
 
+test("Job vs CV: the ad beside the CV, keywords highlighted as the ATS card counts them (ATSC-08, 20 Nov)", async ({ page }) => {
+  await page.goto("/review");
+  await page.getByRole("link", { name: "Graduate AI Engineer" }).click();
+  await expect(page.getByText("Gate 2 · needs your approval")).toBeVisible();
+  // ATSC-09: the Writing card sits in the rail on every tab, and scores nothing.
+  await expect(page.getByRole("heading", { name: "Writing" })).toBeVisible();
+
+  await page.getByRole("tab", { name: "Job vs CV" }).click();
+  await expect(page.getByRole("heading", { name: "Job ad", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your CV", exact: true })).toBeVisible();
+  const key = page.getByRole("list", { name: "Colour key" });
+  await expect(key).toContainText("On your CV");
+  await expect(key).toContainText("Not in your CV");
+  await expect(page.getByRole("progressbar", { name: "Keyword match" })).toBeVisible();
+  // The stats bar's percentage is the ATS card's coverage, to the point.
+  const card = await page.getByRole("progressbar", { name: "ATS keyword coverage" }).getAttribute("aria-valuenow");
+  await expect(page.getByRole("progressbar", { name: "Keyword match" })).toHaveAttribute("aria-valuenow", card!);
+  await expect(page.locator("mark").first()).toBeVisible();
+});
+
 test("Learn about the company, then rewrite the letter with it (18 Nov)", async ({ page }) => {
   await page.goto("/review");
   await page.getByRole("link", { name: "Graduate AI Engineer" }).click();
@@ -278,6 +298,34 @@ test("The search profile can't be saved without a title (PRF-03)", async ({ page
   }
   await dialog.getByRole("button", { name: "Save profile" }).click();
   await expect(dialog.getByText("Add at least 1 target title")).toBeVisible();
+});
+
+test("Upskills: only what I'm missing, and charts that filter the page (UPSK-04, 20 Nov)", async ({ page }) => {
+  await page.goto("/upskills");
+  await expect(page.getByRole("heading", { name: "Upskills", level: 1 })).toBeVisible();
+  const demand = page.getByRole("region", { name: /matter most in these jobs/ });
+  await expect(demand.getByRole("img", { name: /^Python:/ })).toBeVisible(); // the demo CV lists Python
+
+  const onlyMissing = page.getByRole("switch", { name: "Only what I'm missing" });
+  await onlyMissing.click();
+  await expect(onlyMissing).toHaveAttribute("aria-checked", "true");
+  await expect(page).toHaveURL(/view=missing/);
+  await expect(demand.getByRole("img", { name: /^Python:/ })).toHaveCount(0); // covered skills are hidden
+
+  // A gap's bar jumps to its row in the table.
+  await demand.getByRole("button", { name: /^Docker:/ }).click();
+  await expect(page.locator("#skill-docker")).toHaveAttribute("aria-current", "true");
+
+  // A category bar scopes the page to that kind of skill; a second click shows them all again.
+  const other = page.getByRole("region", { name: "Where the gap is" }).getByRole("button", { name: /^Other:/ });
+  await other.click();
+  await expect(other).toHaveAttribute("aria-pressed", "true");
+  await expect(page).toHaveURL(/category=other/);
+
+  // The view is in the URL, so it survives a reload.
+  await page.reload();
+  await expect(page.getByRole("switch", { name: "Only what I'm missing" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("button", { name: "Other", exact: true })).toHaveAttribute("aria-pressed", "true");
 });
 
 // Last: it throws away a pack the journeys above read.

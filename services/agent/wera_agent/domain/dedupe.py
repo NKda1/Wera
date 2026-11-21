@@ -107,12 +107,14 @@ def key_for(job: Job) -> str:
 
 
 def is_near_duplicate(left: Job, right: Job) -> bool:
-    """NORM-06: the same job posted under a slightly different title."""
-    if normalise_company(left.company) != normalise_company(right.company):
+    """NORM-06: the same job posted under a slightly different title — or reposted by an agency
+    under the employer's name (20 Nov): eFinancialCareers' "Investment Banking Analyst, M&A - Citi"
+    is Citi's "Investment Banking Analyst, M&A" (`employer_key`, `bare_title`)."""
+    if employer_key(left.company, left.title) != employer_key(right.company, right.title):
         return False
     if (left.location.city or "").lower() != (right.location.city or "").lower():
         return False
-    if title_similarity(left.title, right.title) < NEAR_TITLE:
+    if title_similarity(bare_title(left.company, left.title), bare_title(right.company, right.title)) < NEAR_TITLE:
         return False
     return abs(parse_ms(left.first_seen) - parse_ms(right.first_seen)) <= NEAR_WINDOW_MS
 
@@ -135,6 +137,10 @@ INTERMEDIARIES = frozenset(
         "efinancialcareers", "reed", "reed uk", "hays", "michael page", "robert half", "randstad",
         "harnham", "hamilton barnes", "jobleads", "bebee", "adzuna", "careerjet", "totaljobs", "cv library",
         "jobserve", "glassdoor", "indeed", "monster", "linkedin",
+        # 20 Nov: finance's recruiters, named in eFinancialCareers' titles as if they were employers
+        # ("Analyst, Portfolio Valuation - Goodman Masson").
+        "goodman masson", "morgan mckinley", "selby jennings", "hays specialist recruitment", "page group",
+        "pagegroup", "robert walters", "korn ferry", "oliver james", "sanderson", "investigo", "barclay simpson",
     }
 )  # fmt: skip
 
@@ -155,6 +161,60 @@ _AGENCY = re.compile(
 def is_agency(company: str) -> bool:
     """A board or a recruiter rather than the employer: a named one, or one named like an agency."""
     return is_intermediary(company) or bool(_AGENCY.search(company))
+
+
+# The end of an agency's title that names the employer: "… - Citi", "… | Barings", "… – PIMCO".
+_EMPLOYER_TAIL = re.compile(r"\s+(?:-|–|—|\|)\s+([^-–—|]+?)\s*$")
+# A tail that is about the job rather than who it is for: "… - Summer 2027", "… - Graduate Scheme".
+# A year or a bare number is the job's; a digit inside a name is not (20 Nov: "Educate2trade Ltd").
+_NOT_AN_EMPLOYER = re.compile(
+    r"\b(?:19|20)\d{2}\b|(?<![A-Za-z])\d+(?![A-Za-z])|\b(intern(ship)?s?|graduate|grad|junior|senior|entry|level|programme|program|scheme|placement|summer|"
+    r"analyst|associate|engineer|developer|manager|remote|hybrid|contract|permanent|temporary|part[- ]time|full[- ]time|"
+    r"london|new york|toronto|uk|usa?|canada|england|europe|emea)\b",
+    re.I,
+)
+
+
+def employer_named(company: str, title: str) -> str | None:
+    """The employer an agency's title names, or None (20 Nov).
+
+    Only for an agency (`is_agency`): an employer's own "Analyst - Capital Solutions" names a team,
+    not a company. The tail must read as a name — a few words, no digits, no level, place or job
+    word — so "Analyst - Summer 2027" and "Engineer - London" name no one.
+    """
+    if not is_agency(company):
+        return None
+    found = _EMPLOYER_TAIL.search(title)
+    if found is None or found.start() == 0:
+        return None
+    name = found.group(1).strip()
+    if not name or len(name.split()) > 5 or _NOT_AN_EMPLOYER.search(name) or is_agency(name):
+        return None
+    return name
+
+
+def employer_key(company: str, title: str) -> str:
+    """Whom a job is for, as `normalise_company` writes it: the employer an agency's title names,
+    else the company the source gave."""
+    return normalise_company(employer_named(company, title) or company)
+
+
+def bare_title(company: str, title: str) -> str:
+    """The title without the employer an agency added to it: "Investment Banking Analyst, M&A".
+    An employer's own title that ends in its own name ("… - Barings", from Adzuna) loses it too."""
+    found = _EMPLOYER_TAIL.search(title)
+    if found is None or found.start() == 0:
+        return title
+    if employer_named(company, title) or normalise_company(found.group(1)) == normalise_company(company):
+        return title[: found.start()].strip()
+    return title
+
+
+def same_posting_key(company: str, title: str) -> str:
+    """One key for one job, whoever posted it: the employer and the title without its name, so the
+    job APIs' copies of a posting (an agency's repost through Reed, the employer's own through
+    Adzuna) are looked at once (SRCH-31, 20 Nov)."""
+    return f"{employer_key(company, title)}|{normalise_title(bare_title(company, title))}"
 
 
 def _host(url: str | None) -> str:
@@ -210,8 +270,10 @@ def is_copy_elsewhere(left: Job, right: Job) -> bool:
     # "Graduate Machine Learning Engineer 2027" against "Graduate Software Engineer (AI ML Test
     # Systems) 2027" at 1.0. Sorted-token similarity counts the extra words (63 there; 85–100
     # for the real copies seen on 13 Nov).
-    same_words = title_similarity_sorted(left.title, right.title) >= COPY_TITLE
-    return same_words and _same_kind(left.title, right.title) and is_near_duplicate(left, right)
+    # An agency's copy is compared without the employer's name it adds to the title (20 Nov).
+    left_title, right_title = bare_title(left.company, left.title), bare_title(right.company, right.title)
+    same_words = title_similarity_sorted(left_title, right_title) >= COPY_TITLE
+    return same_words and _same_kind(left_title, right_title) and is_near_duplicate(left, right)
 
 
 def merge_sources(into: Job, other: Job) -> Job:

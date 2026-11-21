@@ -1,0 +1,40 @@
+WERA
+Copyright 2026 the WERA authors
+
+This product includes ideas and code adapted from the following third-party work.
+
+------------------------------------------------------------------------------
+Resume Matcher
+https://github.com/srbhr/resume-matcher
+Licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0)
+
+Adapted on 20 Nov 2026 (SPEC ATSC-07, ATSC-08):
+
+- apps/backend/app/services/ats.py `compute_ats_score`: a score part that can't
+  be measured returns None and the score is rescaled over the parts that were
+  measured; the role title graded 100 in the headline, 75 in the summary,
+  otherwise by word overlap. WERA: services/agent/wera_agent/nodes/ats.py
+  (`ats_score`, `title_grade`).
+- apps/backend/app/services/text_match.py `keyword_in_text`: a keyword matches
+  only with no word character touching it. WERA:
+  services/agent/wera_agent/domain/vocab.py (`_alias_re`).
+- apps/backend/app/services/refiner.py `analyze_keyword_gaps`: missing keywords
+  split into those the master CV can supply ("injectable") and those it can't,
+  and the match the CV could reach. WERA: nodes/ats.py (`compare`) and
+  apps/web/app/review/_components/ReviewRail.tsx.
+- apps/frontend/components/builder/jd-comparison-view.tsx and
+  apps/frontend/lib/utils/keyword-matcher.ts: the job description beside the
+  CV with keywords highlighted, longest first, a stats bar with the match
+  percentage, and colour bands at 80% and 60%. WERA:
+  apps/web/app/review/_components/JobVsCv.tsx and highlight.ts.
+
+Changes were made: the scoring parts, weights, matcher (synonym groups,
+case-sensitive and ambiguous aliases) and interface are WERA's own.
+
+------------------------------------------------------------------------------
+Resume-ATS (no licence file)
+
+Ideas only; no code was copied. The weak-verb to strong-verb suggestions and
+the share of lines that open with an action verb or state a number, in
+services/agent/wera_agent/domain/writing.py, follow its approach.

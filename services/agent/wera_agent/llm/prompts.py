@@ -86,8 +86,10 @@ def cv_text(cv: Any, *, home: bool = True) -> str:
             lines.append(f"- {role.title} at {role.org}{where} ({role.start} to {role.end}) [role id: {role.id}]")
             lines += [f"    [{b.id}] {b.text}" for b in role.bullets]
     if cv.education:
+        # With its id (20 Nov): an education entry is a citable line now (`vocab.cv_line_index`),
+        # so a letter's opening can cite the degree it introduces the applicant by.
         lines += ["", "Education:"]
-        lines += [f"- {e.degree}, {e.institution} ({e.start or '?'} to {e.end or '?'})" for e in cv.education]
+        lines += [f"- [{e.id}] {e.degree}, {e.institution} ({e.start or '?'} to {e.end or '?'})" for e in cv.education]
     if cv.skills:
         # With the person's level (18 Nov), proficient when they haven't said: a skill on a CV is
         # one they claim, and the fit scorer reads the level.
@@ -191,8 +193,13 @@ KEYWORDS_EXTRACT = ChatPromptTemplate.from_messages(
             # read 7%, and the applicant was shown "Fast feedback" as a skill to go and acquire.
             # They have their own category now, split off in code before coverage sees the list.
             "Each term gets a `category`:\n"
-            "- `hard_skill` — a language, field of study, qualification or core technical "
-            "competence (Python, Financial modelling, Contract law, CPA).\n"
+            "- `hard_skill` — a language or core technical competence (Python, Financial "
+            "modelling, Contract law, Valuation).\n"
+            # 20 Nov: degrees came back as hard skills, and Upskills showed "Bachelor's Degree" and
+            # "Business Administration" as gaps to a CV with a BSc in Economics. A degree is now
+            # `education`, compared with the CV's education in code (`domain.degrees`).
+            "- `qualification` — a professional certification or licence (CFA, ACA, ACCA, CPA, "
+            "PMP, CIPD, a practising certificate).\n"
             "- `methodology` — a named method, process or framework (Scrum, TDD, IFRS, GDPR "
             "compliance).\n"
             # API styles named explicitly: with only "protocol" to go on, the live model dropped
@@ -208,6 +215,11 @@ KEYWORDS_EXTRACT = ChatPromptTemplate.from_messages(
             "values or traits (those are `soft_skill`); activities with no tool named, like "
             "writing clean code or reducing technical debt; salary, benefits, perks, visa or "
             "location terms (those are not terms at all — leave them out).\n\n"
+            "**A degree is never a keyword.** Put the degree the post asks for in `education`: "
+            "`level` (`bachelor`, `master`, `phd`, or `none` when it names no level), `subjects` — "
+            "the fields of study it names, each written as the post writes it (Finance, Economics, "
+            "Computer Science, a related field) — and `required`, true only when the degree is "
+            "stated as essential. Leave `education` out when the post asks for no degree.\n\n"
             "If the post is mostly culture writing and names only three technologies, return three "
             "checkable terms. A short, true list is the correct answer; padding it misreports the "
             "applicant's gaps.\n\n"
@@ -489,7 +501,9 @@ SUMMARY_WRITE = ChatPromptTemplate.from_messages(
             # be vouched for. The fallback chain stays honest: the applicant's own summary, then a
             # composed and guarded one, then nothing.
             "Write the professional profile for the top of this applicant's CV, for this job. "
-            "Two or three sentences, 40–60 words, third-person-implied with no pronoun — the form "
+            # 50–90 since 20 Nov (was 40–60): the JobLeads review (19 Nov) put a profile at 50–100
+            # words, and 40–60 read as a line rather than a profile. `SummaryDraft` takes 40–100.
+            "Two to four sentences, 50–90 words, third-person-implied with no pronoun — the form "
             'a CV uses: "Computer Science finalist with internship experience in distributed '
             'systems…", not "I am a…".\n\n'
             "It must be built from the CV lines below and cite the ids of every line it draws on. "
@@ -532,6 +546,21 @@ _LETTER_VOICE = (
     "What this must not read like: a status report, a performance review, a press release, or a "
     "template with the company's name dropped into it. If a sentence would survive unchanged in a "
     "letter to a different company, it is doing no work — cut it or make it specific."
+)
+
+# 20 Nov: a live letter called "London School of Economics and Political Science (LSE)" "the
+# LSE School of Economics" — a name no one writes, in the line a reader checks first. No example
+# name here: an example in a prompt is read as text to reuse (see the opening's note below).
+# `domain.guard.institution_violations` checks it in code too.
+_NAMES_RULE = (
+    "Name the applicant's university, school or college exactly as their CV writes it: in full, "
+    "or in a shorter form only where the CV itself uses that form. Never mix a short form into "
+    "the full name, translate it, or make up an abbreviation. WERA checks every institution name "
+    "against the CV.\n\n"
+    # 20 Nov: a letter claimed the right to work from where the applicant studied. WERA holds no
+    # work-authorisation field (PRIV-02), so no line can carry such a claim either way.
+    "Never say anything about the applicant's right to work, visa, sponsorship, nationality or "
+    "security clearance, and never quote what the post says about them."
 )
 
 LETTER_WRITE = ChatPromptTemplate.from_messages(
@@ -579,8 +608,8 @@ LETTER_WRITE = ChatPromptTemplate.from_messages(
             # question is who this is and why here; the technical case is paragraph 2's job.
             "**Paragraph 1 — the opening (`opening_hook`).** Three or four sentences that introduce "
             "the applicant before any technical detail. First, who they are: their stage and field "
-            "and what they focus on, as their headline, education or summary puts it (cite that "
-            "line). Then why they suit *this* company: tie them to what the post says the company "
+            "and what they focus on, as their headline, education or summary puts it (cite the "
+            "education or summary line by its id). Then why they suit *this* company: tie them to what the post says the company "
             "is doing or the problem the role exists to solve — `company_initiative_or_market` or "
             "`company_problem_to_solve` when given — quote the post's words exactly, in "
             "quotation marks, rather than describing the company yourself. Claim nothing about "
@@ -661,7 +690,7 @@ LETTER_WRITE = ChatPromptTemplate.from_messages(
             "**The close (`call_to_action_and_close`).** Say the CV is attached, ask for a "
             "conversation about the role by its title, and stop. Two sentences. No summary "
             "of the letter, no restating the thesis, no gratitude for being considered.\n\n"
-            f"{_LETTER_VOICE}\n\n"
+            f"{_LETTER_VOICE}\n\n{_NAMES_RULE}\n\n"
             "`greeting` addresses a named person if the post names one — 'Dear Priya Raman,' — and "
             "otherwise 'Dear Hiring Team,'. Never 'To Whom It May Concern' and never 'Dear Sir or "
             "Madam'. `signoff` is exactly one of 'Sincerely', 'Best regards' or 'Respectfully', "
@@ -682,6 +711,103 @@ LETTER_WRITE = ChatPromptTemplate.from_messages(
             "CV:\n{cv}\n\n{job}\n\nThe tailored CV this letter goes with:\n{tailored}\n\n"
             "ATS keywords for this letter:\n{keywords}\n\n"
             "What the post says about why the role exists:\n{context}\n\n"
+            "What the applicant is looking for: {wants}\n\nWhat the applicant asked for: {note}",
+        ),
+    ]
+)
+
+# ---- letter.paragraph (`letters.mode: paragraphs`, 20 Nov) ----
+#
+# The letter one paragraph per call. `letter.write` asked for the whole letter in one strict JSON
+# reply, and what came back was rarely cut off (one in 13 calls on 20 Nov) — the short letters were
+# the guard's doing afterwards, deleting or shrinking paragraphs with nothing to put back. Written
+# separately, each call sees only its own brief, its own CV lines and its own employer quotes, so
+# the plan the long prompt asked the model to hold in its head (which line where, which quote
+# where) is made in code (`nodes.letter_plan.section_plans`), and a paragraph that fails the guard
+# is written again on its own rather than cut.
+#
+# Each brief is the matching paragraph of `LETTER_WRITE`, reworded for a call that sees nothing
+# else. The rules that cost paragraphs before are kept word for word in substance.
+PARAGRAPH_BRIEFS = {
+    "opening_hook": (
+        "This is paragraph 1 of 4, the opening. Three or four sentences that introduce the "
+        "applicant before any technical detail. First, who they are: their stage and field and "
+        "what they focus on, as the CV lines below put it — cite the line you use. Then why they "
+        "suit this company: tie them to what the employer's words below say the company is doing "
+        "or the problem the role exists to solve, quoting those words exactly, in quotation "
+        "marks, rather than describing the company yourself. Then name the role in a sentence of "
+        "your own that ties it to what you opened with — what the role would let them do, what "
+        "they want to learn there, or which part of the post they'd start on.\n\n"
+        "No tools, languages or stack here: they belong to paragraph 2. Claim nothing about the "
+        "applicant beyond what the line you cite says, and never say the company 'aligns with' "
+        "their goals, values or focus — no CV line carries that. Never 'I am applying', 'I am "
+        "writing' or 'my thesis'; never a label like a thesis, a summary or a pitch."
+    ),
+    "core_value_proposition": (
+        "This is paragraph 2 of 4, the proof. Match the post to the CV: name what the post needs "
+        "— in the employer's words below when they are given — then say what the applicant did "
+        "that answers it, in the substance of the CV lines below. One competency, the one the "
+        "post most needs. Lead with a result when a line states one.\n\n"
+        "**Add nothing the lines don't say** — no outcome, scale, users, adoption, purpose or "
+        "'which shows that…' of your own. **Every number must appear in a line you cite**, "
+        "exactly: not rounded, not inferred from two lines put together. Where a line carries no "
+        "number, be concrete with what it does say — what was built or done, with what, for "
+        "whom, as the line puts it."
+    ),
+    "strategic_alignment_and_culture": (
+        "This is paragraph 3 of 4, why this company. Take something the employer's words below "
+        "say about how the company works — how it builds, how it treats people, how it is "
+        "structured, its stated policy on remote or hybrid working, learning, sponsorship, the "
+        "problem it has chosen — quote those words exactly, in quotation marks, and say why that "
+        "suits this applicant with a CV line below that shows it (cite it, and say only what it "
+        "says). Paragraph 1 already said what the company is doing; this one is about how it "
+        "works.\n\n"
+        "Say nothing about the company that the employer's words below don't say: no guesses "
+        "about its culture, funding, reputation or plans, and no praise of it. Why it suits this "
+        "applicant comes from their CV lines or from what they told you they want. Never say it "
+        "'aligns with' or 'matches' their experience, goals or values: say what the line shows, "
+        "and let the reader make the link.\n\n"
+        # 20 Nov, live: three letters said a hybrid policy "suits my preference for flexible
+        # arrangements" for a person whose profile is open to any — a preference nobody stated.
+        "Never state where or how the applicant prefers to work — hybrid, remote, office, flexible "
+        "hours — unless what they told you they want says it in those terms."
+    ),
+    "call_to_action_and_close": (
+        "This is paragraph 4 of 4, the close. Say the CV is attached, ask for a conversation "
+        "about the role by its title, and stop. Two sentences. No summary of the letter, no "
+        "restating what it argued, no gratitude for being considered, and no claim about the "
+        "applicant."
+    ),
+}
+
+LETTER_PARAGRAPH = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "Write one paragraph of a cover letter. The other three are written separately, each "
+            "from its own lines, so keep to this paragraph's job.\n\n"
+            "{brief}\n\n"
+            # The budget is the paragraph's alone, so the model can hit it while it writes; a
+            # total it could only check afterwards (see `LETTER_WRITE`'s length note).
+            "Length: {budget} words. Fill a short paragraph by using another of the lines given "
+            "that answers the post, never by padding or by adding what the lines don't say.\n\n"
+            f"{_LETTER_VOICE}\n\n{_NAMES_RULE}\n\n"
+            "Use the keywords given where they read naturally, in the post's spelling; skipping "
+            "one is fine, forcing one in is not. Never claim one listed under 'never claim'. "
+            # 20 Nov: a quote with one word changed reads as invented, and is written again.
+            "Quote the employer only from the words given, exactly, in quotation marks; if you "
+            "change or add a single word, leave the quotation marks off.\n\n"
+            # WERA checks the reply against these ids, so citing what was used is how a paragraph
+            # keeps its claims; citing nothing is read as "I used all of them".
+            "Reply with `text`, the paragraph, and `sourceIds`, the ids of the CV lines it uses.\n\n"
+            f"{_HONESTY}\n\n" + _DATA_RULE,
+        ),
+        (
+            "human",
+            "{job}\n\nCV lines this paragraph may use:\n{lines}\n\n"
+            "Facts about the applicant it may state without citing:\n{facts}\n\n"
+            "The employer's words it may quote:\n{quotes}\n\n"
+            "Keywords to land here:\n{keywords}\n\n"
             "What the applicant is looking for: {wants}\n\nWhat the applicant asked for: {note}",
         ),
     ]
@@ -709,7 +835,13 @@ GUARD_REPAIR = ChatPromptTemplate.from_messages(
             "claim it makes is carried by the cited lines, keeping the same meaning and length.\n\n"
             "Fix it by removing or softening what isn't supported — never by citing a different line "
             "to justify what the text says. If the line can't be supported by its sources, return "
-            "`null` for `item` and WERA will drop it and tell the applicant.\n\n" + _HONESTY,
+            "`null` for `item` and WERA will drop it and tell the applicant.\n\n"
+            # 20 Nov: the employer's words used to be cut out of the line before it came here,
+            # and the rewrite was printed without them — a repaired paragraph lost the company's
+            # name and its quote. They are held as tokens now and put back afterwards.
+            "A token in double brackets, like ⟦employer-alpha⟧, stands for the employer's own "
+            "words — their name, the role, a quote from the post. Keep every token exactly as it "
+            "is, where it is; WERA puts the words back.\n\n" + _HONESTY,
         ),
         ("human", "The line:\n{text}\n\nIt cites these master-CV entries:\n{sources}\n\nWhat failed:\n{violations}"),
     ]
@@ -729,7 +861,8 @@ GUARD_CLAIMS = ChatPromptTemplate.from_messages(
             "labelled set', 'used by every customer' — even if it sounds plausible.\n\n"
             "Not claims, so never list them: what the post or company says; what the applicant "
             "wants, prefers or would like to do; plain restatements of a cited line in other "
-            "words; and the opening or closing courtesies.\n\n"
+            "words; and the opening or closing courtesies. A token in double brackets, like "
+            "⟦employer-alpha⟧, stands for the employer's own words: never list it.\n\n"
             "For each finding give the paragraph's `location` exactly as shown and `claim`: the "
             "unsupported words copied exactly from that paragraph, a few words to a clause. An "
             "empty list is the right answer for a letter that only says what its lines say.\n\n" + _DATA_RULE,
@@ -744,6 +877,7 @@ TEMPLATES: dict[str, ChatPromptTemplate] = {
     "cv.tailor": CV_TAILOR,
     "summary.write": SUMMARY_WRITE,
     "letter.write": LETTER_WRITE,
+    "letter.paragraph": LETTER_PARAGRAPH,
     "answers.draft": ANSWERS_DRAFT,
     "guard.repair": GUARD_REPAIR,
     "guard.claims": GUARD_CLAIMS,

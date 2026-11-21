@@ -30,7 +30,7 @@ from .cv_file import CvFile, CvFileIn, CvPreview
 from .cv_profile import CvProfile
 from .jobs import FitEvidence, FitReport, FitWeights, Job, ScoredJob
 from .learning import SuggestionList
-from .pack import AnswerItem, AtsReport, CoverLetter, JobAnalysis, Pack, TailoredCV
+from .pack import AnswerItem, AtsCompare, AtsReport, CoverLetter, JobAnalysis, Pack, TailoredCV, WritingReport
 from .profile import SavedProfile, SearchProfile
 from .runs import ChannelSummary, Estimate, IntakeRun, RunIds
 from .settings import Settings, SettingsPatch, SettingsResponse
@@ -58,6 +58,8 @@ RESPONSES = [
     TailoredCV,
     CoverLetter,
     AtsReport,
+    AtsCompare,
+    WritingReport,
     AnswerItem,
     JobAnalysis,
     Pack,

@@ -11,12 +11,13 @@ decide. Silently dropping a job they might have wanted is the worse failure.
 """
 
 import hashlib
+import html
 import re
 from typing import Any
 
 from ..clock import iso, parse_ms
 from ..domain import dedupe, places
-from ..domain.text import is_linkedin_url
+from ..domain.text import display_case, is_linkedin_url
 from ..schemas.jobs import Ats, Job, JobSource, Location, PostedPrecision, Salary
 from ..sources.ats_feeds import FeedJob
 
@@ -202,7 +203,28 @@ def _located(location: Location) -> Location:
     taken from the city as the source wrote it, before this, so no saved job's key changes.
     """
     country = places.country_code(location.raw, location.country)
-    return location.model_copy(update={"country": country, "city": places.city_name(location.city, country)})
+    return location.model_copy(update={"country": country, "city": city_of(location.city, country)})
+
+
+# Words a source puts where the city goes that name no place (20 Nov): "Not stated", "Hybrid",
+# "Remote". The Jobs screen's Where filter offered each as a city.
+_NO_PLACE = re.compile(
+    r"\b(not stated|not specified|unspecified|hybrid|remote|remotely|flexible|flexible working|anywhere|"
+    r"multiple locations|various locations|various|several locations|location flexible|nationwide|"
+    r"in office|office based|on-?site|onsite|work from home|wfh|tbc|tbd|n/a)\b",
+    re.I,
+)
+
+
+def city_of(city: str | None, country: str | None = None) -> str | None:
+    """The city as it is saved: one spelling (`places.city_name`), or None when the words name no
+    one place — a working pattern ("Hybrid", "Remote"), "Not stated", or a choice of two ("London
+    or Manchester"), which is no single city to file the job under (20 Nov). The words themselves
+    stay in `location.raw`."""
+    text = " ".join((city or "").split())
+    if not _NO_PLACE.sub(" ", text).strip(" ,;/-–·|()[]") or re.search(r"\s+or\s+", text, re.I):
+        return None
+    return places.city_name(text, country)
 
 
 def _job(
@@ -222,6 +244,17 @@ def _job(
     posted_precision: PostedPrecision | None = None,
     closes_at: str | None = None,
 ) -> Job:
+    # An agency's repost that names its employer is the employer's job, posted by the agency
+    # (20 Nov): "Investment Banking Analyst, M&A - Citi" from eFinancialCareers is Citi's
+    # "Investment Banking Analyst, M&A", and the card says who reposted it.
+    title, company = html.unescape(title).strip(), html.unescape(company).strip()
+    posted_by = None
+    if (employer := dedupe.employer_named(company, title)) is not None:
+        title, posted_by, company = dedupe.bare_title(company, title), company, employer
+    else:
+        # A title that ends in the poster's own name ("… Investment Analyst - eFinancialCareers") is
+        # the title without it (20 Nov); `bare_title` changes nothing else.
+        title = dedupe.bare_title(company, title)
     key = dedupe.dedupe_key(ats=ats, apply_url=apply_url, company=company, title=title, city=location.city)
     # Every builder funnels through here, so every posted date is one WERA can read — and every
     # one carries where it came from. A caller that knows better (`from_feed`) says so.
@@ -229,8 +262,12 @@ def _job(
     return Job(
         id=job_id(key),
         dedupe_key=key,
-        title=title.strip(),
-        company=company.strip(),
+        # A board's HTML entities as the characters they stand for: Reed sent "Wells &amp; Co." (20 Nov).
+        title=title,
+        # "NATIONAL BANK OF CANADA" as "National Bank of Canada"; "AECOM" and "CITI" as they are
+        # (20 Nov). `dedupe_key` above is taken from the company as written, and lower-cases it.
+        company=display_case(company, brand=True),
+        posted_by=posted_by,
         # The country as an ISO code, whatever the source wrote, so jobs can be counted by country.
         location=_located(location),
         remote=remote,

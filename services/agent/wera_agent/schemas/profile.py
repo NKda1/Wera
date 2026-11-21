@@ -26,8 +26,13 @@ class ProfileChannels(Model):
     watchlist: bool
 
 
+MAX_TITLES = 12
+
+
 class SearchProfile(Model):
-    titles: Annotated[list[Term], count(1, 8, "Add at least 1 target title", "Use at most 8 target titles")]
+    # 12, not 8 (20 Nov): a profile generated from the CV fills all 8, and the titles WERA keeps
+    # nearly matching ("Private Equity Associate" for a finance CV) had nowhere to go.
+    titles: Annotated[list[Term], count(1, MAX_TITLES, "Add at least 1 target title", f"Use at most {MAX_TITLES} target titles")]
     skills: Annotated[list[Term], count(1, 15, "Add at least 1 skill", "Use at most 15 skills")]
     # No lower bound any more: `countries` carries "where", and a profile that wants every city
     # in a country shouldn't have to invent one to list.

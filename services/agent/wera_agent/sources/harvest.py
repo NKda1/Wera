@@ -31,8 +31,12 @@ the front of the queue rather than being lost.
 """
 
 import contextlib
+import dataclasses
+import queue as queues
+import threading
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -55,8 +59,13 @@ if TYPE_CHECKING:
     from .targets import TargetQueue
 
 # Postings read per round. Small, so scoring starts on the first few while the rest wait — and so
-# the 8–12 rule (SRCH-26) stops reading close to where it stops needing to.
-BATCH = 4
+# the 8–12 rule (SRCH-26) stops reading close to where it stops needing to. 6 since 20 Nov: two
+# rounds of `READERS`.
+BATCH = 6
+# Postings read at once (20 Nov). Reading was 129–162 s of a 4–6 minute search, one posting after
+# another, each mostly waiting on someone else's server. Three, not more: they are other people's
+# sites, and the fast model reading a page is a call each. 1 on SQLite (one writer).
+READERS = 3
 # SRCH-23: less than this is a cookie banner or a teaser, not a posting anyone can judge.
 MIN_DESCRIPTION = 200
 # SRCH-24: the oldest posting worth reading.
@@ -94,24 +103,49 @@ def harvest(
     parse: Callable[[str], dict[str, Any] | None] | None = None,
     redis: Any | None = None,
     on_read: Callable[[Target], None] | None = None,
+    readers: int | None = None,
 ) -> HarvestOutcome:
     """Read and check each target. `spend` carries the run's Firecrawl accounting across rounds.
-    `on_read` is told each posting as it is about to be read, for the run's progress (UX-01)."""
+    `on_read` is told each posting as it is about to be read, for the run's progress (UX-01).
+
+    Up to `readers` postings are read at once (20 Nov), and checked in the order given, so what is
+    kept doesn't depend on which site answered first. Each read keeps its own Firecrawl tally and
+    adds it to `spend` when it lands: the caps are checked against what had landed when a read
+    began, so three paid reads at once can pass a cap by two pages at most — as three scoring
+    workers can pass the weekly budget by two calls. `fetch_html` must be safe to call from any
+    thread (a `BrowserLane`'s is)."""
     rules = robots or Robots()
     declined = {s.domain.lower().removeprefix("www.") for s in sites if s.declined_on is not None}
     out = HarvestOutcome()
     unread: list[Target] = []
+    lock = threading.Lock()
 
-    for target in targets:
+    def read(target: Target) -> tuple[str | None, dict[str, Any] | None, str]:
         reason = _gate(target, rules, declined, sites)
+        if reason is not None:
+            return reason, None, ""
+        if on_read is not None:
+            on_read(target)
+        if target.source == "feed":
+            card, how = _from_feed(target, redis)
+            return None, card, how
+        with lock:
+            mine = dataclasses.replace(spend, errors=[])
+        before = dataclasses.replace(mine)
+        card = scrape_card(target.url, CARD_SCHEMA, mine, caps, cache=cache, fetch_html=fetch_html, parse=parse)
+        with lock:
+            _add(spend, mine, before)
+        return None, card, mine.last_how
+
+    workers = max(1, min(readers if readers is not None else _readers(), len(targets)))
+    if workers == 1:
+        answers = [read(t) for t in targets]
+    else:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="harvest") as pool:
+            answers = list(pool.map(read, targets))
+
+    for target, (reason, card, how) in zip(targets, answers, strict=True):
         if reason is None:
-            if on_read is not None:
-                on_read(target)
-            if target.source == "feed":
-                card, how = _from_feed(target, redis)
-            else:
-                card = scrape_card(target.url, CARD_SCHEMA, spend, caps, cache=cache, fetch_html=fetch_html, parse=parse)
-                how = spend.last_how
             if card is None:
                 reason = how or "unreadable"
                 if how == "capped":
@@ -138,6 +172,71 @@ def harvest(
         rejected=dict(out.rejected),
     )
     return out
+
+
+def _readers() -> int:
+    from ..db.session import engine
+
+    return 1 if engine().dialect.name == "sqlite" else READERS
+
+
+# `SearchOutcome`'s tallies: what one read adds to the run's.
+_TALLIES = tuple(f.name for f in dataclasses.fields(SearchOutcome) if f.name not in ("errors", "capped", "last_how"))
+
+
+def _add(spend: SearchOutcome, mine: SearchOutcome, before: SearchOutcome) -> None:
+    """What one read spent, added to the run's: the difference its own tally made."""
+    for name in _TALLIES:
+        setattr(spend, name, getattr(spend, name) + getattr(mine, name) - getattr(before, name))
+    spend.errors += mine.errors
+    spend.capped = spend.capped or mine.capped
+    spend.last_how = mine.last_how
+
+
+class BrowserLane:
+    """The browser on one thread of its own, so postings read at once can share it (20 Nov).
+
+    Playwright's sync API belongs to the thread that started it (`browser.session`), and reading
+    three postings at once means three threads asking it to render. Here one thread opens the
+    session, renders whatever is asked, and closes it, and `fetch` hands it a URL from any thread
+    and waits for the page. Renders take turns; the plain-HTTP rungs, which are most reads, don't.
+    """
+
+    def __init__(self, opener: Callable[[], Any] | None = None) -> None:
+        from . import browser
+
+        self._open = opener or browser.session
+        self._asks: queues.Queue[tuple[str, Future] | None] = queues.Queue()
+        self._thread = threading.Thread(target=self._serve, name="browser-lane", daemon=True)
+
+    def _serve(self) -> None:
+        with self._open() as fetch_html:
+            while (ask := self._asks.get()) is not None:
+                url, answer = ask
+                try:
+                    answer.set_result(fetch_html(url))
+                except Exception as exc:  # noqa: BLE001 — the caller gets it, as if it had called
+                    answer.set_exception(exc)
+
+    def fetch(self, url: str) -> str | None:
+        answer: Future = Future()
+        self._asks.put((url, answer))
+        return answer.result()
+
+    def __enter__(self) -> Callable[[str], str | None]:
+        self._thread.start()
+        return self.fetch
+
+    def __exit__(self, *_exc: object) -> None:
+        self._asks.put(None)
+        self._thread.join(timeout=30)
+
+
+@contextlib.contextmanager
+def browser_lane() -> Iterator[Callable[[str], str | None]]:
+    """`browser.session()`, for readers on several threads."""
+    with BrowserLane() as fetch:
+        yield fetch
 
 
 def _from_feed(target: Target, redis: Any | None) -> tuple[dict[str, Any] | None, str]:

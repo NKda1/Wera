@@ -94,8 +94,8 @@ class TestKeywordMatrix:
         with transaction() as session:
             store = Store(session)
             job = store._job(store._job_row("job-fernhill-mle"))
-            keywords, culture = keywords_for(session, job, store.cv())
-        assert keywords and all(k.category in ("hard_skill", "methodology", "tool") for k in keywords)
+            keywords, culture, _education = keywords_for(session, job, store.cv())
+        assert keywords and all(k.category in ("hard_skill", "methodology", "tool", "qualification") for k in keywords)
         assert "good docs" in culture
         assert not {c.casefold() for c in culture} & {k.term.casefold() for k in keywords}
 

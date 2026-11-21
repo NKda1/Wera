@@ -71,7 +71,8 @@ export function JobCard({
   // live card carried a liveness note, the one job WERA couldn't confirm would be invisible.
   const liveness = formatLiveness(job);
   const meta = [
-    job.company,
+    // 20 Nov: an agency's repost reads under the employer it names, with the agency beside it.
+    job.postedBy ? `${job.company} (via ${job.postedBy})` : job.company,
     formatLocation(job),
     formatInternational(job),
     formatSalary(job.salary),

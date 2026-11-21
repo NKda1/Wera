@@ -634,7 +634,11 @@ class Store:
         profile = self._profile()
         learned = learning.learn(self.s, self.cv().version, profile)
         dismissed = set(get_kv(self.s, learning.DISMISSED_KEY) or [])
-        return SuggestionList(items=learning.suggestions(learned, profile, dismissed), decisions=learned.decisions)
+        items = learning.suggestions(learned, profile, dismissed)
+        # 20 Nov: and the titles WERA keeps nearly matching, after what the decisions say.
+        have = {s.id for s in items}
+        items += [s for s in learning.near_miss_titles(self.s, profile, dismissed) if s.id not in have]
+        return SuggestionList(items=items, decisions=learned.decisions)
 
     def _suggestion(self, suggestion_id: str) -> Suggestion:
         found = next((s for s in self.learning_suggestions().items if s.id == suggestion_id), None)
@@ -1441,18 +1445,6 @@ class Store:
         listed = self.list_jobs("new")
         return self.fit_bar([(j.id, j.fit.total) for j in listed if not j.fit.stale], apply=apply)
 
-    def crowded_agencies(self) -> frozenset[str]:
-        """The agencies with `source_share.agency_shortlist` or more jobs on the shortlist waiting
-        for a decision, as `dedupe.normalise_company` names them. A search queues no more of their
-        reposts until the person has worked through some (19 Nov)."""
-        waiting = Counter(
-            dedupe.normalise_company(company)
-            for company in self.s.scalars(select(JobRow.company).where(JobRow.status == "new")).all()
-            if company and dedupe.is_agency(company)
-        )
-        limit = wera().source_share.agency_shortlist
-        return frozenset(name for name, n in waiting.items() if n >= limit)
-
     def known_apply_urls(self) -> set[str]:
         """Every apply URL WERA already has, so a search doesn't scrape them again (SRCH-05).
 
@@ -1595,8 +1587,10 @@ class Store:
         # NORM-06 against what is saved, not only within the batch: the same job found on another
         # site (bebee's copy, then the employer's own posting via Adzuna) is one job, not two.
         by_company: dict[str, list[tuple[str, str]]] = {}
+        # By employer: an agency's repost naming the employer in its title is indexed under the
+        # employer, with that name off the title, so it meets the employer's own posting (20 Nov).
         for job_id, _, company, title in index:
-            by_company.setdefault(dedupe.normalise_company(company), []).append((job_id, title))
+            by_company.setdefault(dedupe.employer_key(company, title), []).append((job_id, dedupe.bare_title(company, title)))
         for job in jobs:
             existing = (
                 self.s.get(JobRow, job.id)
@@ -1611,7 +1605,9 @@ class Store:
                 new_ids.add(job.id)
                 stored.append(job)
                 by_key[job.dedupe_key] = job.id
-                by_company.setdefault(dedupe.normalise_company(job.company), []).append((job.id, job.title))
+                by_company.setdefault(dedupe.employer_key(job.company, job.title), []).append(
+                    (job.id, dedupe.bare_title(job.company, job.title))
+                )
                 continue
             merged = dedupe.merge_sources(self._job(existing), job)
             merged.last_seen = iso(self.now)
@@ -1638,8 +1634,8 @@ class Store:
         against every new job from that employer, and building each as a `Job` to find the titles
         differ was the slow part.
         """
-        for job_id, title in by_company.get(dedupe.normalise_company(job.company), []):
-            if dedupe.title_similarity_sorted(title, job.title) < dedupe.COPY_TITLE:
+        for job_id, title in by_company.get(dedupe.employer_key(job.company, job.title), []):
+            if dedupe.title_similarity_sorted(title, dedupe.bare_title(job.company, job.title)) < dedupe.COPY_TITLE:
                 continue
             row = self.s.get(JobRow, job_id)
             if row is not None and dedupe.is_copy_elsewhere(self._job(row), job):
@@ -2085,6 +2081,42 @@ class Store:
             text=cv_yaml.text(document),
             pages=pages,
         )
+
+    def remeasure_ats(self, *, apply: bool = False) -> list[tuple[str, str, float, float]]:
+        """Every drafted pack's ATS report measured again with today's matcher (20 Nov).
+
+        A report is a measurement taken when the pack was drafted or last edited, so a matcher that
+        learns new spellings (UPSK-01: "Financial Modeling" for "financial modelling", DCF for
+        discounted cash flow) leaves older reports counting fewer keywords than the Job vs CV tab
+        shows. No model call: the CV, letter and job are as they were. Returns (application, company,
+        old score, new score) for each report whose score moves.
+        """
+        moved: list[tuple[str, str, float, float]] = []
+        rows = self.s.scalars(select(ApplicationRow).where(ApplicationRow.status.notin_(("drafting", "discarded")))).all()
+        for app in rows:
+            pack = self._load_pack(app.id)
+            if pack is None or pack.ats is None:
+                continue
+            job = self._job(self._job_row(app.job_id))
+            fresh = self._measure_ats(app, pack, job)
+            if fresh.score != pack.ats.score or fresh.coverage != pack.ats.coverage:
+                moved.append((app.id, job.company, pack.ats.score, fresh.score))
+                if apply:
+                    pack.ats = fresh
+                    self._save_pack(app.id, pack, ("ats",))
+        self.s.flush()
+        return moved
+
+    def ats_view(self, app_id: str) -> tuple[Pack, Job, TailoredCV, str]:
+        """(20 Nov) A pack as `_measure_ats` reads it, for the side-by-side view and the Writing
+        card (ATSC-08/09): the pack, its job, the CV as a tailored CV (the person's rewritten
+        file read back as one, if they rewrote it), and the text the CV file prints. Read only."""
+        from ..export import cv_yaml
+
+        app, pack, job = self._reviewable(app_id)
+        document, own, _ = self._cv_document(app, pack, job)
+        doc = cv_yaml.as_tailored(document, pack.cv, self.cv()) if own is not None else pack.cv
+        return pack, job, doc, cv_yaml.text(document)
 
     def cv_file(self, app_id: str) -> CvFile:
         from ..export import cv_yaml
@@ -2591,6 +2623,7 @@ class Store:
         "listing": "Not a job posting: a page of results",
         "closed": "Not a job posting: the page is gone",
         "other": "Not a job posting",
+        "scheme": filters.SCHEME,
     }
     TOO_THIN = "Not a job posting: too little description to judge"
 
@@ -2612,6 +2645,8 @@ class Store:
             kind = classify(job.apply_url or "", title=job.title)
             if kind == "posting" and is_closed_page(job.title, ""):
                 kind = "closed"
+            if kind == "posting" and filters.scheme_reason(job):
+                kind = "scheme"  # 20 Nov: a paid trading scheme or a visa offer
             if kind == "posting":
                 continue
             if row.id in applied or job.status == "in_application":
@@ -2658,7 +2693,7 @@ class Store:
             job = self._job(row)
             if (job.hidden_reason or "").startswith(("Not a job posting", "Duplicate")):
                 continue
-            by_company.setdefault(dedupe.normalise_company(row.company), []).append(job)
+            by_company.setdefault(dedupe.employer_key(row.company, row.title), []).append(job)
 
         def busy(job: Job) -> bool:
             return job.id in applied or job.status == "in_application"
@@ -2796,19 +2831,53 @@ class Store:
         `location.city` changes: the words stay in `location.raw`, and `dedupe_key` is left alone
         (it lowercases the city, and a key that moved would stop a re-read matching the saved job).
         """
-        from ..domain import places
+        from ..sources.normalise import city_of
 
         moves: Counter = Counter()
         rows = self.s.scalars(select(JobRow)).all()
         for row in rows:
             location = row.data.get("location") or {}
-            city = places.city_name(location.get("city"), location.get("country"))
+            # 20 Nov: and no city at all for words that name no place ("Hybrid", "Not stated").
+            city = city_of(location.get("city"), location.get("country"))
             if city != location.get("city"):
                 moves[(location.get("city"), city)] += 1
                 if apply:
                     row.data = {**row.data, "location": {**location, "city": city}}
         self.s.flush()
         return moves, len(rows)
+
+    def name_employers(self, *, apply: bool = False) -> Counter:
+        """Every saved job under its employer's name, as a job saved today is (20 Nov).
+
+        An agency's repost that names its employer ("Investment Banking Analyst, M&A - Citi" from
+        eFinancialCareers) becomes the employer's job with the agency in `posted_by`, and a company
+        written all in capitals reads in ordinary case. Returns (old company, new company) → jobs.
+        `dedupe_key` is left alone, as `respell_cities` leaves it: a key that moved would stop a
+        re-read matching the saved job.
+        """
+        from ..domain import dedupe
+        from ..domain.text import display_case
+
+        moves: Counter = Counter()
+        for row in self.s.scalars(select(JobRow)).all():
+            company, title = str(row.data.get("company") or ""), str(row.data.get("title") or "")
+            update: dict[str, str] = {}
+            if (employer := dedupe.employer_named(company, title)) is not None and not row.data.get("postedBy"):
+                update = {"postedBy": company, "title": dedupe.bare_title(company, title), "company": employer}
+            elif (bare := dedupe.bare_title(company, title)) != title:
+                update = {"title": bare}  # the poster's own name off the end of its title
+            shown = display_case(update.get("company", company), brand=True)
+            if shown != update.get("company", company) or update:
+                update["company"] = shown
+            if not update:
+                continue
+            moves[(company, update["company"])] += 1
+            if apply:
+                row.data = {**row.data, **update}
+                row.company = update["company"]
+                row.title = update.get("title", row.title)
+        self.s.flush()
+        return moves
 
     def tidy_saved(self, *, apply: bool = False) -> list[dict[str, str]]:
         """Today's reading rules applied to what was saved before them (12 Nov review).

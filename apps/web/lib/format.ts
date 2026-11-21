@@ -239,3 +239,27 @@ export function formatInternational(job: Pick<ScoredJob, "international">): stri
 export function formatEvergreen(job: Pick<ScoredJob, "evergreen">): string {
   return job.evergreen ? "open 60+ days — may be a standing advert" : "";
 }
+
+const SMALL_WORDS = new Set(["of", "and", "the", "for", "de", "du", "la", "le", "von", "van", "der", "da", "di", "y", "&"]);
+
+/** A name written all in capitals, in ordinary case (20 Nov): "ELEANOR VANCE" → "Eleanor Vance".
+ *  The agent's `text.display_case`, so a sign-off reads the same on the page and in the PDF. Only
+ *  text that is *all* capitals changes; capital words of two letters, or with no vowel, are
+ *  acronyms and stay. With `brand`, a single capitalised word stays too ("AECOM", "KPMG"). */
+export function displayCase(s: string, { brand = false }: { brand?: boolean } = {}): string {
+  const text = s.split(/\s+/).filter(Boolean).join(" ");
+  if (!/\p{L}/u.test(text) || text !== text.toUpperCase()) return text;
+  const words = text.split(" ");
+  if (brand && words.length === 1) return text;
+  return words
+    .map((word, i) => {
+      const bare = word.replace(/[^A-Za-z]/g, "");
+      if (i > 0 && SMALL_WORDS.has(word.toLowerCase())) return word.toLowerCase();
+      if (words.length > 1 && bare && (bare.length <= 2 || (bare.length <= 5 && !/[AEIOU]/.test(bare)))) return word;
+      return word
+        .toLowerCase()
+        .replace(/(^|[^\p{L}])(\p{L})/gu, (_m, pre: string, ch: string) => pre + ch.toUpperCase())
+        .replace(/(?<=['’])S\b/g, "s");
+    })
+    .join(" ");
+}

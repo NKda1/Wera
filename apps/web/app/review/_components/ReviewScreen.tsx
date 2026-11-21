@@ -21,10 +21,11 @@ import { CompanyPanel } from "./CompanyPanel";
 import { CvFileEditor } from "./CvFileEditor";
 import { AnswerPack, CvPaper, LetterPaper } from "./Documents";
 import { DraftProgress } from "./DraftProgress";
+import { JobVsCv } from "./JobVsCv";
 import { ReviewRail } from "./ReviewRail";
 import type { CvLines } from "./SourceTag";
 
-type Tab = "cv" | "letter" | "answers" | "company";
+type Tab = "cv" | "compare" | "letter" | "answers" | "company";
 type CvView = "lines" | "file";
 
 /** The note `Store.rewrite_letter` leaves on an application while its letter is redrafted alone. */
@@ -182,6 +183,8 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
               onChange={setTab}
               tabs={[
                 { id: "cv", label: "Tailored CV" },
+                // ATSC-08 (20 Nov): the job ad beside the CV, keywords highlighted on both.
+                { id: "compare", label: "Job vs CV" },
                 { id: "letter", label: "Cover letter" },
                 { id: "answers", label: `Answer pack · ${answersCount}` },
                 { id: "company", label: "Company" },
@@ -214,6 +217,8 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
                     />
                   )}
                 </>
+              ) : tab === "compare" ? (
+                <JobVsCv appId={app.id} ats={pack.ats} />
               ) : tab === "company" ? (
                 <CompanyPanel
                   app={app}

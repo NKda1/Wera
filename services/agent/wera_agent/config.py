@@ -266,35 +266,50 @@ class SurfaceConfig(BaseModel):
     A search stops reading postings once `max` are scored, and if fewer than `min` are, it goes on
     to the Strategist's next tier of queries until it reaches `min` or a cap. What it found and
     didn't read waits in the queue for "Find more". Small on purpose: a shortlist someone reads
-    end to end beats forty jobs they skim, and every job past the twelfth is a read and a score
-    paid for before anyone wanted it.
+    end to end beats forty jobs they skim. 20, up from 12 (20 Nov): a search found 140 postings
+    that passed every filter and showed 12, and the person asked for more of what was found. The
+    day's scoring cap (`max_scored_per_day`) still bounds what that costs.
     """
 
     min: int = 8
-    max: int = 12
+    max: int = 20
     # MATCH-01 (19 Nov): a job scored under this is hidden, not listed at the bottom — on 18 Nov,
     # 30 of the 59 on the list scored under 5. Only jobs above it count towards `min`. 0 is off.
     min_fit: float = 4.0
 
 
 class SourceShareConfig(BaseModel):
-    """SRCH-26 (18 Nov): how a search's reads are shared between its sources and places.
+    """SRCH-26: how a search's reads are shared between its places.
 
-    The best match is read first, within two soft limits: each ticked country gets about
-    `surface.max ÷ countries` of the reads, and no single source (an API, or Google) more than
-    `ceiling` of them — a source with nothing better gives its share up rather than leave a slot
-    empty. On 18 Nov, 9 of 16 jobs left were one agency's London reposts through Reed.
+    The best match is read first, with one soft limit: each ticked country gets about `surface.max
+    ÷ countries` of the reads, and gives its share up rather than leave a slot empty. The per-source
+    ceiling (18 Nov) and the agency caps (19 Nov) went on 20 Nov, at the person's word: "one site
+    could actually contain a lot of quality jobs". Reposts of one job are caught by `dedupe`, weak
+    jobs by the fit bar (`surface.min_fit`).
     """
 
-    ceiling: float = 0.4
     # Firecrawl's search, asked instead of Serper when Serper's day is spent or it is failing, at
     # most this many a search (each costs `SEARCH_CREDITS`, inside the run's credit cap).
     firecrawl_searches: int = 6
-    # 19 Nov: an agency's reposts (eFinancialCareers: 15 of the 53 on the list, fit 2–3.6) count as
-    # one source. At most `agency_per_search` of one agency's jobs queued from the job APIs a search,
-    # and none while `agency_shortlist` of its jobs are already on the list waiting for a decision.
-    agency_per_search: int = 1
-    agency_shortlist: int = 3
+
+
+class UpskillsConfig(BaseModel):
+    """UPSK-06 (20 Nov): the jobs a CV nearly matched, read for what they ask.
+
+    A near miss is a lead or a saved job the title rule dropped — not an excluded word, not too
+    senior — whose CV similarity (`prefilter.lead_ranker`) is at least `near_miss_min_similarity`.
+    The best `near_miss_per_search` of them a search have their keywords extracted (fast tier,
+    about $0.0001 each); Upskills counts each at `near_miss_weight` of a scored job. 0 turns it off.
+    """
+
+    near_miss_per_search: int = 40
+    # From the 20 Nov finance leads: above 0.70 the title drops are finance's next door (summer
+    # analysts, quant, credit and restructuring analysts); below it, operations and IT analysts and
+    # a business teacher. About 75 of a search's 374 title drops clear it.
+    near_miss_min_similarity: float = 0.70
+    near_miss_weight: float = 0.5
+    # Extractions at once: each is a short fast-tier call. 1 on SQLite, whatever this says.
+    near_miss_workers: int = 6
 
 
 class CompanyBriefConfig(BaseModel):
@@ -308,6 +323,21 @@ class CompanyBriefConfig(BaseModel):
     serper_queries: int = 1
     # How much of the page the brief reads: About pages are short, and the rest is navigation.
     max_chars: int = 4000
+
+
+class LettersConfig(BaseModel):
+    """LTR-01 (20 Nov): how a cover letter is written.
+
+    `paragraphs` writes each of the four paragraphs in its own `letter.paragraph` call, from a
+    plan made in code, and writes a paragraph the guard fails again rather than cutting it.
+    `single` is the one `letter.write` call that wrote every letter before, kept for rollback and
+    for comparing the two (`python -m wera_agent.evaluate letters`).
+    """
+
+    mode: Literal["paragraphs", "single"] = "paragraphs"
+    # Paragraph calls in flight at once, on Postgres. SQLite runs them one after another in the
+    # caller's session, as `scoring_workers` does: it has one write lock to share.
+    workers: int = 4
 
 
 class MarketsConfig(BaseModel):
@@ -418,12 +448,9 @@ class FeedConfig(BaseModel):
 
     enabled: bool = True
     terms_reviewed_on: date | None = None
-    # Searches one search may send to it, one per title (and city). Reading a posting's full text
-    # (Reed's details call) is bounded by `max_queued` instead: only queued postings are read.
+    # Searches one search may send to it, one per title (and city). There is no cap on what it may
+    # queue (20 Nov): every API's leads join one pool ranked by CV similarity, read best first.
     max_searches: int = 3
-    # Its postings one search may queue. Small on purpose: the APIs are asked before Serper, and a
-    # search should still read the open web and the reviewed boards, not one API's results only.
-    max_queued: int = 6
 
 
 class WeraConfig(BaseModel):
@@ -455,7 +482,9 @@ class WeraConfig(BaseModel):
     search_progress: SearchProgress = SearchProgress()
     markets: MarketsConfig = MarketsConfig()
     source_share: SourceShareConfig = SourceShareConfig()
+    upskills: UpskillsConfig = UpskillsConfig()
     company_brief: CompanyBriefConfig = CompanyBriefConfig()
+    letters: LettersConfig = LettersConfig()
     # SRCH-30: hosts an open search often returns, each with a posting path there, whose robots.txt
     # is asked before a search alongside the boards'. Those that refuse it are left out.
     unreadable_hint: dict[str, str] = {}
@@ -701,6 +730,37 @@ def write_sites(data: SitesFile) -> Path:
     sites_file.cache_clear()
     sites.cache_clear()
     return path
+
+
+class DegreeField(BaseModel):
+    """One field's starter programmes (UPSK-05): `match` words find it in the search plan's field."""
+
+    match: list[str] = []
+    programmes: list[str] = []
+
+
+class DegreesFile(BaseModel):
+    """config/degrees.yaml: the programmes each field's employers most often name, shown on
+    Upskills until the postings read name `starter_until` of their own."""
+
+    starter_until: int = 5
+    fields: dict[str, DegreeField] = {}
+
+    def for_field(self, field: str | None) -> list[str]:
+        """The starter programmes for a plan's field, by the first field whose words it contains."""
+        text = (field or "").lower()
+        for entry in self.fields.values():
+            if any(word.lower() in text for word in entry.match):
+                return list(entry.programmes)
+        return []
+
+
+@lru_cache
+def degrees() -> DegreesFile:
+    try:
+        return DegreesFile.model_validate(_load("degrees.yaml"))
+    except FileNotFoundError:
+        return DegreesFile()
 
 
 @lru_cache

@@ -31,7 +31,7 @@ from ..db.models import DecisionRow
 from ..domain import filters
 from ..schemas.jobs import Job, ScoredJob
 from ..schemas.learning import LearnedRank, ReasonCode, Suggestion
-from ..schemas.profile import SearchProfile
+from ..schemas.profile import MAX_TITLES, SearchProfile
 
 # The reject dialog's chips, as they were sent before codes existed (and still are, by an old tab).
 REASON_FROM_NOTE: dict[str, ReasonCode] = {
@@ -62,6 +62,11 @@ OLDER_CV_WEIGHT = 0.5
 EXCLUDE_AFTER = 3
 REMOVE_TITLE_AFTER = 3
 ADD_TITLE_AFTER = 2
+# A title WERA nearly matched (UPSK-06) at least this many times, from this many employers, at
+# this closeness to the CV: "Private Equity Associate" for a finance CV, 0.72 by meaning against
+# a target title's 0.80 (20 Nov). Offered as a title to add, never added on its own.
+NEAR_TITLE_AFTER = 3
+NEAR_TITLE_MIN_SIMILARITY = 0.72
 ADD_LOCATION_AFTER = 2
 
 DISMISSED_KEY = "learningDismissed"
@@ -252,7 +257,7 @@ def suggestions(learned: Learned, profile: SearchProfile, dismissed: set[str]) -
 
     # Titles approved or brought back that no target covers.
     for key, n in learned.approved_titles.most_common():
-        if n >= ADD_TITLE_AFTER and len(profile.titles) < 8:
+        if n >= ADD_TITLE_AFTER and len(profile.titles) < MAX_TITLES:
             title = next(t for t in learned.approved_title_list if _title_key(t) == key)
             out.append(
                 Suggestion(
@@ -279,6 +284,46 @@ def suggestions(learned: Learned, profile: SearchProfile, dismissed: set[str]) -
             )
 
     return [s for s in out if s.id not in dismissed]
+
+
+def near_miss_titles(session: Session, profile: SearchProfile, dismissed: set[str]) -> list[Suggestion]:
+    """Titles WERA keeps nearly matching, offered as titles to search for (20 Nov).
+
+    Near misses (`job_signals`, UPSK-06) are jobs the title rule dropped though the CV is close to
+    them. A kind of title seen from `NEAR_TITLE_AFTER` employers is one the person may simply not
+    have thought to name — and adding it is what moves those jobs from Upskills onto the list.
+    """
+    from ..db.models import JobSignalRow
+    from ..domain import dedupe
+
+    if len(profile.titles) >= MAX_TITLES:
+        return []
+    rows = session.scalars(select(JobSignalRow).where(JobSignalRow.similarity >= NEAR_TITLE_MIN_SIMILARITY)).all()
+    seen: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        title = _clean_title(dedupe.bare_title(row.company, row.title))
+        key = _title_key(title)
+        if not key or filters.matches_a_target(title, profile.titles):
+            continue
+        entry = seen.setdefault(key, {"titles": Counter(), "companies": set()})
+        entry["titles"][title] += 1
+        entry["companies"].add(dedupe.employer_key(row.company, row.title))
+    out: list[Suggestion] = []
+    for key, entry in sorted(seen.items(), key=lambda kv: -len(kv[1]["companies"])):
+        n = len(entry["companies"])
+        if n < NEAR_TITLE_AFTER or f"add_title:{key}" in dismissed:
+            continue
+        title = entry["titles"].most_common(1)[0][0]
+        out.append(
+            Suggestion(
+                id=f"add_title:{key}",
+                kind="add_title",
+                value=title,
+                message=f"Also search for “{title}” — WERA nearly matched {n} jobs like it, from {n} employers.",
+                evidence=n,
+            )
+        )
+    return out
 
 
 def apply_suggestion(profile: SearchProfile, suggestion: Suggestion) -> SearchProfile:

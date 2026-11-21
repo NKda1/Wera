@@ -117,3 +117,40 @@ sites:
   examples:
   - https://www.cwjobs.co.uk/jobs/contract/graduate-software-developer
   - https://www.cwjobs.co.uk/jobs/junior-software-engineer/in-london?salary=35&salarytypeid=5
+- domain: www.thestudentroom.co.uk
+  name: The Student Room Jobs
+  terms_reviewed_on: null
+  countries:
+  - GB
+  discovered_on: '2026-11-20'
+  matched: 'Strategist: investment banking and corporate finance'
+  robots_ok: true
+  examples:
+  - https://www.thestudentroom.co.uk/
+  sectors:
+  - graduate
+  - finance
+  - consulting
+- domain: www.visionaries.com
+  name: Visionaries
+  terms_reviewed_on: null
+  countries:
+  - GB
+  discovered_on: '2026-11-20'
+  matched: 'Strategist: investment banking and corporate finance'
+  robots_ok: true
+  examples:
+  - https://www.visionaries.com/
+  sectors:
+  - finance
+  - investment banking
+  - corporate finance
+- domain: www.efinancialcareers.com
+  name: www.efinancialcareers.com
+  terms_reviewed_on: null
+  discovered_on: '2026-11-20'
+  matched: Corporate Finance Analyst
+  robots_ok: true
+  examples:
+  - https://www.efinancialcareers.com/jobs/investment-banking-analyst/in-london
+  - https://www.efinancialcareers.com/jobs/investment-banking-analyst

@@ -174,12 +174,13 @@ class TestTheOrder:
 
 
 class TestEightToTwelve:
-    def test_thirty_queued_twelve_read_eighteen_left_and_none_paid_for(self, world):
+    def test_thirty_queued_twenty_read_ten_left_and_none_paid_for(self, world):
+        """`surface.max` is 20 since 20 Nov (12 before)."""
         world.answers({1: [posting(i) for i in range(30)]})
         out = world.run()
-        assert out.surfaced == wera().surface.max == 12
-        assert len(world.read) == 12, "postings past the twelfth were read"
-        assert out.queued == 18 and world.queue().size() == 18
+        assert out.surfaced == wera().surface.max == 20
+        assert len(world.read) == 20, "postings past the twentieth were read"
+        assert out.queued == 10 and world.queue().size() == 10
         assert out.spend.credits_used == 0 and out.short is None
 
     def test_short_of_eight_the_next_tier_is_sent(self, world):
@@ -242,10 +243,10 @@ class TestEightToTwelve:
     def test_find_more_with_enough_waiting_never_searches(self, world):
         world.answers({1: [posting(i) for i in range(30)]})
         queue = world.queue()
-        queue.push([Target(posting(100 + i), "builtinlondon.uk", "board", "q", i, "Graduate", "", None) for i in range(20)])
+        queue.push([Target(posting(100 + i), "builtinlondon.uk", "board", "q", i, "Graduate", "", None) for i in range(28)])
         queue.mark_tier_sent(1)
         out = world.run(mode="more")
-        assert out.surfaced == 12 and out.tiers == [] and world.serper.asked == []
+        assert out.surfaced == 20 and out.tiers == [] and world.serper.asked == []
         assert world.queue().size() == 8
 
 
@@ -307,14 +308,14 @@ class TestFindMoreSaysWhenItIsUsedUp:
 class TestTheRunRow:
     def test_a_board_search_records_what_it_surfaced_and_queued(self, world, monkeypatch):
         monkeypatch.setattr(intake, "sites_due", lambda *_a: False)  # SRCH-12 is its own test
-        world.answers({1: [posting(i) for i in range(20)]})
+        world.answers({1: [posting(i) for i in range(28)]})
         with transaction() as session:
             ids = Store(session).start_runs(["board_search"], scheduled=True)
         intake.run(["board_search"], ids)
         with transaction() as session:
             row = session.get(IntakeRunRow, ids["board_search"])
             assert (row.status, row.queued, row.queries) == ("succeeded", 8, world.serper.sent)
-            assert row.new_jobs == 12
+            assert row.new_jobs == 20
 
 
 def test_the_stages_keep_to_their_own_modules():
@@ -473,3 +474,41 @@ class TestFirecrawlTakesOver:
         monkeypatch.setattr(search_pipeline, "Serper", capped)
         world.run()
         assert asked == []
+
+
+class TestADryCountryIsToppedUp:
+    """20 Nov: with no share by site, Reed's 22 London postings filled a search and it ended with
+    the US and Canada at 0 and 1 of their 6. A ticked country that runs dry under its floor gets
+    the next tier's searches for it — and only for it — once, before the search ends."""
+
+    def test_the_next_tiers_searches_for_the_dry_country_only(self, world, monkeypatch):
+        with transaction() as session:
+            store = Store(session)
+            store.put_profile(store.get_profile().model_copy(update={"countries": ["GB", "US"], "locations": ["London"]}))
+        monkeypatch.setattr(search_pipeline.feeds, "skipped", lambda f, **_k: None if f == "reed" else "off")
+
+        def from_apis(planned, profile, *, queue, **_kw):
+            queue.push([Target(posting(i), "builtinlondon.uk", "open", "Reed: x", i, "Graduate Software Engineer", "", None, via="reed", country="gb") for i in range(10)])  # fmt: skip
+            return search_pipeline.strategist.FeedDiscovery(by_feed={"reed": {"queued": 10}}, queued=10)
+
+        monkeypatch.setattr(search_pipeline.strategist, "discover_feeds", from_apis)
+        world.answers({1: []})
+        asked: list[str] = []
+        make = search_pipeline.Serper
+
+        def recording(**kw):
+            serper = make(**kw)
+            real = serper.search
+
+            def search(q, *, gl, hl, page=1):
+                asked.append(gl)
+                return real(q, gl=gl, hl=hl, page=page)
+
+            serper.search = search
+            return serper
+
+        monkeypatch.setattr(search_pipeline, "Serper", recording)
+        out = world.run()
+        assert out.surfaced == 10
+        assert asked and set(asked) == {"us"}
+        assert 1 not in world.queue().tiers_sent()  # tier 1 is still to send in full

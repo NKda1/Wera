@@ -65,8 +65,16 @@ def main(argv: list[str] | None = None) -> int:
     bar.add_argument("--apply", action="store_true", help="hide them (default: only list them)")
     countries = jobs_sub.add_parser("countries", help="store every saved job's country as an ISO code")
     countries.add_argument("--apply", action="store_true", help="store them (default: only count them)")
-    cities = jobs_sub.add_parser("cities", help="spell every saved job's city one way (London, not london)")
+    cities = jobs_sub.add_parser(
+        "cities", help="spell every saved job's city one way (London, not london), and none for Hybrid or Not stated"
+    )
     cities.add_argument("--apply", action="store_true", help="store them (default: only list what would change)")
+    employers = jobs_sub.add_parser(
+        "employers", help="show an agency's reposts under the employer they name, and companies in capitals in ordinary case"
+    )
+    employers.add_argument("--apply", action="store_true", help="store them (default: only list what would change)")
+    ats = jobs_sub.add_parser("ats", help="measure every drafted pack's ATS report again with today's matcher (no model calls)")
+    ats.add_argument("--apply", action="store_true", help="store the new reports (default: only list the scores that move)")
     tg = sub.add_parser("targets", help="the Strategist's job discovery: Serper searches into the Redis queue (SRCH-20)")
     tg_sub = tg.add_subparsers(dest="targets_cmd", required=True)
     tg_disc = tg_sub.add_parser("discover", help="send the planned queries and queue the postings they find")
@@ -216,6 +224,10 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _countries(args.apply)
         if args.jobs_cmd == "cities":
             return _cities(args.apply)
+        if args.jobs_cmd == "employers":
+            return _employers(args.apply)
+        if args.jobs_cmd == "ats":
+            return _remeasure_ats(args.apply)
         if args.jobs_cmd == "fit-bar":
             return _fit_bar(args.apply)
         return _refilter(args.apply) if args.jobs_cmd == "refilter" else _audit_listings(args.apply)
@@ -567,7 +579,9 @@ def _countries(apply: bool) -> int:
 
 
 def _cities(apply: bool) -> int:
-    """Each saved job's city in one spelling (19 Nov). Lists by default; `--apply` stores them."""
+    """Each saved job's city in one spelling (19 Nov), and no city where the words name no place —
+    "Hybrid", "Remote", "Not stated", "London or Manchester" (20 Nov), which the Where filter listed
+    as cities. Lists by default; `--apply` stores them."""
     from .db.session import transaction
     from .services.store import Store
 
@@ -579,6 +593,40 @@ def _cities(apply: bool) -> int:
     print(f"\n{changed} of {total} saved job(s) {'changed' if apply else 'to change'}.")
     if not apply and changed:
         print("Run again with --apply to store them. Nothing else about the jobs changes.")
+    return 0
+
+
+def _employers(apply: bool) -> int:
+    """Saved jobs under their employer's name (20 Nov): an agency's repost naming its employer is
+    shown as the employer's, posted by the agency; companies in capitals read in ordinary case.
+    Lists by default; `--apply` stores them."""
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        moves = Store(session).name_employers(apply=apply)
+    for (old, new), n in moves.most_common():
+        print(f"  {old!r:32} -> {new!r:32} {n}")
+    changed = sum(moves.values())
+    print(f"\n{changed} saved job(s) {'changed' if apply else 'to change'}.")
+    if not apply and changed:
+        print("Run again with --apply to store them. Nothing else about the jobs changes.")
+    return 0
+
+
+def _remeasure_ats(apply: bool) -> int:
+    """Each drafted pack's ATS report measured again (20 Nov), so a report taken before the matcher
+    learned a spelling counts what the Job vs CV tab shows. Lists by default; `--apply` stores."""
+    from .db.session import transaction
+    from .services.store import Store
+
+    with transaction() as session:
+        moved = Store(session).remeasure_ats(apply=apply)
+    for app_id, company, old, new in moved:
+        print(f"  {app_id:24} {company[:28]:28} {old:>5.0f} -> {new:>5.0f}")
+    print(f"\n{len(moved)} report(s) {'measured again' if apply else 'would change'}.")
+    if not apply and moved:
+        print("Run again with --apply to store them. The CV, letter and answers don't change.")
     return 0
 
 

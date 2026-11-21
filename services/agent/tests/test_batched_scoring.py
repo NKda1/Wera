@@ -164,7 +164,7 @@ class TestTheDailyCapStillBounds:
 
 class TestScoreMore:
     def test_it_picks_up_where_the_run_stopped(self, client, pool):
-        pool(30)
+        pool(45)  # two searches' worth and more: `surface.max` is 20 since 20 Nov
         intake.judge([], now=NOW, run_ids={})
         before = awaiting()
 

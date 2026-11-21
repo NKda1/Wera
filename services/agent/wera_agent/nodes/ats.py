@@ -4,17 +4,44 @@ import math
 import re
 import unicodedata
 
+from ..domain import vocab
+from ..domain.degrees import looks_like_degree
 from ..domain.filters import title_tokens
 from ..domain.scoring import ats_coverage, js_round
-from ..domain.vocab import NOT_A_SKILL, education_text, group_key, master_cv_text, role_header, skill_text, text_has_term
+from ..domain.vocab import (
+    education_text,
+    group_key,
+    master_cv_text,
+    normalise_text,
+    not_a_skill,
+    role_header,
+    skill_text,
+    text_has_term,
+)
 from ..schemas.cv import MasterCV
 from ..schemas.jobs import FitEvidence, Job
-from ..schemas.pack import AtsKeyword, AtsPart, AtsReport, Cited, CoverLetter, FormatCheck, TailoredCV
+from ..schemas.pack import (
+    AtsCompare,
+    AtsKeyword,
+    AtsPart,
+    AtsReport,
+    AtsSpan,
+    Cited,
+    CompareKeyword,
+    CoverLetter,
+    FormatCheck,
+    TailoredCV,
+)
 
 # Roughly two lines of skills per page, at `estimate_pages`' 95 characters a line. A character
 # budget rather than a count, because ten long skill names and ten short ones are not the same
 # amount of page.
 SKILLS_LINE_CHARS = 190
+# And a count as well (20 Nov): the JobLeads review of 19 Nov asked for 8–15 skills, tailored per
+# job, and two lines of short names held up to 25. More than 15 reads as a list of everything,
+# which is the opposite of tailored. It was 25, and only in the score (`ats_score`'s length part);
+# now `reconcile_skills` stops at it too, so WERA no longer writes a line it then marks down.
+MAX_SKILLS = 15
 
 
 def tailored_text(doc: TailoredCV, cv: MasterCV) -> str:
@@ -89,7 +116,8 @@ def _skill_for_term(cv: MasterCV, term: str) -> str | None:
 
 
 def _fit_line(names: list[str], cv_pages: int) -> list[str]:
-    """As many skills as the line has room for, in the order given.
+    """As many skills as the line has room for, and never more than `MAX_SKILLS`, in the order
+    given.
 
     Order is therefore load-bearing: whatever `reconcile_skills` puts first is what survives.
     """
@@ -98,7 +126,7 @@ def _fit_line(names: list[str], cv_pages: int) -> list[str]:
     length = 0
     for name in names:
         extra = len(name) + (3 if out else 0)  # the " · " separator
-        if out and length + extra > budget:
+        if out and (length + extra > budget or len(out) >= MAX_SKILLS):
             break
         out.append(name)
         length += extra
@@ -306,7 +334,7 @@ def suggested_skills(cv: MasterCV, keywords: list[AtsKeyword]) -> list[str]:
         if not k.in_master_cv or _skill_for_term(cv, k.term) is not None:
             continue
         key = group_key(k.term)
-        if k.term.lower() in NOT_A_SKILL or key in NOT_A_SKILL or key in seen:
+        if not_a_skill(k.term) or looks_like_degree(k.term) or key in seen:
             continue
         seen.add(key)
         out.append(k.term)
@@ -325,7 +353,6 @@ PART_MAX = {"keywords": 45.0, "evidence": 20.0, "alignment": 15.0, "structure": 
 CATEGORY_WEIGHT = {"methodology": 0.75}
 # More than this and a term reads as stuffing to the human who sees the CV after the parser.
 MAX_REPEATS = 4
-MAX_SKILLS = 25
 
 
 def _weighted(keywords: list[AtsKeyword], hit) -> float:  # noqa: ANN001 — a predicate on a keyword
@@ -341,20 +368,63 @@ def _occurrences(text: str, term: str) -> int:
     return len(re.findall(rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])", text.lower()))
 
 
+def title_grade(title: str, headline: str | None, summary: str) -> tuple[float | None, str]:
+    """How plainly the CV says it is for this role, 0–100, and why (20 Nov).
+
+    Graded as resume-matcher's `compute_ats_score` grades it (Apache-2.0, see NOTICE): 100 when
+    the role is in the headline, 75 when it is in the summary, otherwise half the share of the
+    role's words that appear in either. "The role" is what the title is about (`title_tokens`:
+    no level, no brackets, one spelling per word), so "Senior Data Analyst (Hybrid)" is in a
+    headline that reads "Data analyst".
+
+    It was the share of words alone, which put a headline naming the role level with a summary
+    that happened to use its words in passing — a recruiter's eye goes to the headline first.
+    None when the title has no words to look for: there is nothing to measure.
+    """
+    wanted = sorted(title_tokens(title))
+    if not wanted:
+        return None, "The job title has no words to look for"
+
+    def has(text: str, word: str) -> bool:
+        # Read the way the title was: "ML Engineer" in a headline is "machine learning engineer"
+        # to `title_tokens`, so a headline repeating the post's title has every word it wants.
+        return word in title_tokens(text) or text_has_term(text, word)
+
+    role = " ".join(wanted)
+    if headline and all(has(headline, w) for w in wanted):
+        return 100.0, f"The role ({role}) is in your headline"
+    if summary and all(has(summary, w) for w in wanted):
+        return 75.0, f"The role ({role}) is in your summary, not your headline"
+    top = f"{headline or ''}\n{summary}"
+    found = [w for w in wanted if has(top, w)]
+    share = len(found) / len(wanted)
+    if not found:
+        return 0.0, f"None of the role's words ({', '.join(wanted)}) in your headline or summary"
+    return 50.0 * share, f"{len(found)} of {len(wanted)} of the role's words ({', '.join(wanted)}) in your headline or summary"
+
+
 def ats_score(
     doc: TailoredCV, cv: MasterCV, keywords: list[AtsKeyword], *, job: Job, fits: bool, file_ok: bool, text: str | None = None
 ) -> tuple[float, float, list[AtsPart]]:
-    """The score, the best this CV could score with every keyword it backs placed, and the parts."""
+    """The score, the best this CV could score with every keyword it backs placed, and the parts.
+
+    20 Nov: a part that can't be measured is None, and the score is the measured parts' points
+    over their own weight, scaled to 100 (resume-matcher's `compute_ats_score`, Apache-2.0). A
+    post that names no keywords used to give the keywords part full marks — 45 points for a
+    measurement nobody made, on exactly the posts where WERA knows least. Each part's `max` is
+    its weight rescaled, so the card's "points / max" still adds up to the score and to 100.
+    """
     bullets = {i.role_id: [b.text for b in i.bullets] for s in doc.sections for i in s.items}
     bullet_text = "\n".join(t for texts in bullets.values() for t in texts)
     latest = max(cv.experience, key=lambda r: r.start or "", default=None)
     latest_text = "\n".join(bullets.get(latest.id, [])) if latest else ""
 
-    keyword_share = _weighted(keywords, lambda k: k.matched)
-    best_share = _weighted(keywords, lambda k: k.matched or k.in_master_cv)
+    keyword_share: float | None = _weighted(keywords, lambda k: k.matched) if keywords else None
+    best_share = _weighted(keywords, lambda k: k.matched or k.in_master_cv) if keywords else None
     shown = [k for k in keywords if k.matched and k.weight == "required"] or [k for k in keywords if k.matched]
+    evidence: float | None
     if not keywords:
-        evidence, evidence_why = 1.0, "The post names no keywords to evidence."
+        evidence, evidence_why = None, "Not measured: the post names no keywords to show in your work."
     elif not shown:
         evidence, evidence_why = 0.0, "None of the post's keywords is on the CV yet."
     else:
@@ -363,15 +433,12 @@ def ats_score(
         evidence = 0.75 * in_lines + 0.25 * in_latest
         evidence_why = f"{round(in_lines * len(shown))} of {len(shown)} matched {'required ' if shown[0].weight == 'required' else ''}keywords shown in a line of work, not only the skills list"
 
-    wanted = title_tokens(job.title)
-    top = f"{cv.person.headline or ''} {doc.summary.text}"
-    title_share = (sum(text_has_term(top, w) for w in wanted) / len(wanted)) if wanted else 1.0
     has_summary = bool(doc.summary.text.strip())
-    alignment = (10 * title_share + (5 if has_summary else 0)) / 15
-    alignment_why = (
-        f"{'All' if title_share == 1 else 'Some' if title_share else 'None'} of the role's words "
-        f"({', '.join(sorted(wanted)) or 'none'}) in the headline or summary; {'a' if has_summary else 'no'} summary"
-    )
+    grade, grade_why = title_grade(job.title, cv.person.headline, doc.summary.text)
+    # The title is 10 of this part's 15 and a summary the other 5. A title with no words leaves
+    # the summary to measure, so the part is the summary alone rather than unmeasured.
+    alignment = (10 * grade / 100 + (5 if has_summary else 0)) / 15 if grade is not None else (1.0 if has_summary else 0.0)
+    alignment_why = f"{grade_why}; {'a' if has_summary else 'no'} summary"
 
     sections = {"summary": has_summary, "experience": any(s.kind == "experience" for s in doc.sections),
                 "education": bool(cv.education), "skills": bool(doc.skills)}  # fmt: skip
@@ -390,20 +457,171 @@ def ats_score(
          (f"{len(doc.skills)} skills listed" + ("" if len(doc.skills) <= MAX_SKILLS else f", more than {MAX_SKILLS}"))]
     )  # fmt: skip
 
-    shares = {"keywords": keyword_share, "evidence": evidence, "alignment": alignment, "structure": structure, "length": length}
+    shares: dict[str, float | None] = {"keywords": keyword_share, "evidence": evidence, "alignment": alignment, "structure": structure, "length": length}  # fmt: skip
     labels = {"keywords": "Keywords", "evidence": "Shown in your work", "alignment": "Aimed at this role", "structure": "Sections and format", "length": "Length and density"}  # fmt: skip
     hits = sum(k.matched for k in keywords)
     whys = {
-        "keywords": f"{hits} of {len(keywords)} of the post's keywords on the CV",
+        "keywords": f"{hits} of {len(keywords)} of the post's keywords on the CV"
+        if keywords
+        else "Not measured: the post names no keywords.",
         "evidence": evidence_why,
         "alignment": alignment_why,
         "structure": structure_why,
         "length": length_why,
     }
-    parts = [AtsPart(id=pid, label=labels[pid], points=js_round(PART_MAX[pid] * shares[pid] * 10) / 10, max=PART_MAX[pid], detail=whys[pid]) for pid in PART_MAX]  # fmt: skip
-    score = js_round(sum(p.points for p in parts))
-    best = js_round(score - PART_MAX["keywords"] * keyword_share + PART_MAX["keywords"] * best_share)
+    scored = sum(PART_MAX[pid] for pid, share in shares.items() if share is not None)
+    scale = 100.0 / scored  # structure and length are always measured, so never zero
+    weight = {pid: (PART_MAX[pid] * scale if shares[pid] is not None else 0.0) for pid in PART_MAX}
+    parts = [
+        AtsPart(
+            id=pid,  # type: ignore[arg-type] — PART_MAX's keys are AtsPart's ids
+            label=labels[pid],
+            points=None if (share := shares[pid]) is None else js_round(weight[pid] * share * 10) / 10,
+            max=js_round(weight[pid] * 10) / 10,
+            detail=whys[pid],
+        )
+        for pid in PART_MAX
+    ]
+    score = js_round(sum(p.points or 0.0 for p in parts))
+    best = score
+    if keyword_share is not None and best_share is not None:
+        best = js_round(score + weight["keywords"] * (best_share - keyword_share))
     return float(score), float(best), parts
+
+
+# ---------------------------------------------------------------------------
+# ATSC-08 (20 Nov): the job ad beside the CV, after resume-matcher's `jd-comparison-view`
+# (Apache-2.0, see NOTICE). Each of the post's keywords is highlighted where it is, on both
+# pages, by the matcher every number on the ATS card comes from.
+
+
+def display_text(text: str) -> str:
+    """A page as the side-by-side view shows it, and as `term_spans` reads it: one spelling per
+    character (`vocab.normalise_text`) line by line, single spaces, no blank lines.
+
+    Normalised before it is shown, rather than mapped back afterwards, because the matcher reads
+    the normalised form: a span on this text is a span on what was matched. And it keeps
+    `term_spans` exact — this text with its line breaks read as spaces *is* `normalise_text` of
+    it, which is what `text_has_term` searches.
+    """
+    lines = (normalise_text(line) for line in unicodedata.normalize("NFKC", text).splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+_MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MD_MARKS = re.compile(r"\*\*|__|`")
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+", re.M)
+_MD_BULLET = re.compile(r"^\s*[*+-]\s+", re.M)
+
+
+def ad_text(markdown: str | None) -> str:
+    """A post's description as plain text: Markdown's links, emphasis and heading marks taken
+    out, list items kept as "• ". Every mark it removes is punctuation, which the matcher reads
+    as a word boundary already, so no keyword is found or lost by it."""
+    text = _MD_LINK.sub(r"\1", markdown or "")
+    text = _MD_BULLET.sub("• ", _MD_HEADING.sub("", text))
+    return display_text(_MD_MARKS.sub("", text))
+
+
+def _searchable(text: str) -> tuple[str, list[int], list[int]]:
+    """`text` as `text_has_term` searches it — lower case, one spelling per word — with where
+    each of its characters came from: `[lo[i], hi[i])` in `text`.
+
+    `_one_spelling` turns "modelling" into "modeling", so the searched text is not the shown
+    text character for character, and a span found in one has to be carried back to the other.
+    A respelt word maps as a whole, which is all a match can touch: the boundary keeps a match
+    from starting or ending inside a word.
+    """
+    lowered = text.lower()
+    if len(lowered) != len(text):  # "İ" lowers to two characters; per character keeps the count
+        lowered = "".join(c.lower()[:1] for c in text)
+    out: list[str] = []
+    lo: list[int] = []
+    hi: list[int] = []
+    at = 0
+    for m in vocab._SPELLING_RE.finditer(lowered):
+        out.append(lowered[at : m.start()])
+        lo.extend(range(at, m.start()))
+        hi.extend(range(at + 1, m.start() + 1))
+        new = vocab._SPELLINGS[m.group(1)]
+        out.append(new)
+        lo.extend([m.start()] * len(new))
+        hi.extend([m.end()] * len(new))
+        at = m.end()
+    out.append(lowered[at:])
+    lo.extend(range(at, len(lowered)))
+    hi.extend(range(at + 1, len(lowered) + 1))
+    return "".join(out), lo, hi
+
+
+def term_spans(text: str, term: str) -> list[AtsSpan]:
+    """Every place `vocab.text_has_term(text, term)` would match, as spans in `text`.
+
+    The same aliases, in the same order of rules — ambiguous words only as the post wrote them,
+    proper nouns only capitalised, everything else by `_alias_re` on the lower-cased text — so
+    this finds a span exactly when `text_has_term` says the term is there. `text` is expected in
+    `display_text`'s form; `tests/test_compare.py` holds the two to the same answers.
+    """
+    flat = text.replace("\n", " ")
+    hay, lo, hi = _searchable(flat)
+    own = set(vocab._reductions(vocab.normalise_term(term))[:2])
+    found: set[tuple[int, int]] = set()
+    for alias in vocab.aliases_for(term):
+        if alias in vocab.AMBIGUOUS_ALIASES and alias not in own:
+            continue
+        if alias in vocab.CASE_SENSITIVE_ALIASES:
+            # Its groups are the boundary characters either side; the word is between them.
+            for m in vocab._proper_noun_re(alias).finditer(flat):
+                found.add((m.end(1), m.start(2)))
+        else:
+            for m in vocab._alias_re(alias).finditer(hay):
+                found.add((lo[m.start()], hi[m.end() - 1]))
+    # One span per place: where aliases overlap ("rest api" inside "rest apis"), the longest.
+    out: list[AtsSpan] = []
+    for start, end in sorted(found, key=lambda p: (p[0], -p[1])):
+        if out and start < out[-1].end:
+            continue
+        out.append(AtsSpan(start=start, end=end))
+    return out
+
+
+def compare(job: Job, keywords: list[AtsKeyword], cv_text: str, *, master: str) -> AtsCompare:
+    """The side-by-side view of a pack: its ATS report's keywords, found on the ad, on `cv_text`
+    (the text that report measures — the CV file's) and on `master` (`vocab.master_cv_text`).
+
+    Each keyword's status is measured again here, by the spans themselves, rather than copied
+    from the stored report — so a keyword is green exactly when it is highlighted on the CV. The
+    two only differ when the matcher has learnt a spelling since the report was stored: the live
+    check on 20 Nov found "Financial Modeling", "comps" and "PitchBook" unmatched on packs
+    measured that morning, before their synonym groups existed. `stale` says so, and the card
+    catches up on the pack's next edit (`Store._measure_ats`).
+    """
+    job_text = ad_text(job.description_md)
+    cv_text = display_text(cv_text)
+    rows: list[CompareKeyword] = []
+    measured: list[AtsKeyword] = []
+    for k in keywords:
+        cv_spans = term_spans(cv_text, k.term)
+        now = k.model_copy(update={"matched": bool(cv_spans), "in_master_cv": text_has_term(master, k.term)})
+        measured.append(now)
+        rows.append(
+            CompareKeyword(
+                term=k.term,
+                weight=k.weight,
+                status="matched" if now.matched else "in_cv" if now.in_master_cv else "missing",
+                job_spans=term_spans(job_text, k.term),
+                cv_spans=cv_spans,
+            )
+        )
+    return AtsCompare(
+        job_text=job_text,
+        cv_text=cv_text,
+        keywords=rows,
+        coverage=ats_coverage(measured),
+        potential_coverage=ats_coverage([k.model_copy(update={"matched": k.matched or k.in_master_cv}) for k in measured]),
+        description_status=job.description_status,
+        stale=any((a.matched, a.in_master_cv) != (b.matched, b.in_master_cv) for a, b in zip(keywords, measured, strict=True)),
+    )
 
 
 def _num(n: float) -> str:

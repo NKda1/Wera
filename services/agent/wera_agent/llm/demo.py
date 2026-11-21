@@ -255,7 +255,8 @@ def _sentence_list(items: list[str]) -> str:
     return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
-def _named_contact(description: str | None) -> str | None:
+def named_contact(description: str | None) -> str | None:
+    """LTR-05: the person a post names to write to, or None for "Dear Hiring Team"."""
     m = re.search(r"hiring manager(?: is|:)\s+([A-Z][a-z]+ [A-Z][a-z]+)", description or "", re.I)
     return m.group(1) if m else None
 
@@ -342,7 +343,7 @@ def _build_letter(inp: PackInput, doc: TailoredCV) -> CoverLetter:
         Paragraph(text=closing, source_ids=[cv.summary.id] if cv.summary else [], section="call_to_action_and_close")
     )
 
-    contact = _named_contact(job.description_md)
+    contact = named_contact(job.description_md)
     letter = CoverLetter(
         job_id=job.id,
         greeting=f"Dear {contact}," if contact else "Dear Hiring Team,",
@@ -533,9 +534,9 @@ def _summary_output(inp: PackInput) -> dict:
     if overlap:
         parts.append(f"Works in {_sentence_list(overlap)}.")
     text = " ".join(parts)
-    # The 20–90 word band `SummaryDraft` enforces. Trimming the last sentence is better than
-    # trimming mid-clause, which is what a character budget would do.
-    while words(text) > 90 and len(parts) > 2:
+    # The 40–100 word band `SummaryDraft` enforces (20 Nov, from 20–90). Trimming the last
+    # sentence is better than trimming mid-clause, which is what a character budget would do.
+    while words(text) > 100 and len(parts) > 2:
         parts.pop(-2)
         text = " ".join(parts)
     return {"text": text, "sourceIds": [sid for b in picked for sid in [b.id]]}
@@ -553,6 +554,22 @@ def _letter_output(inp: PackInput) -> dict:
         "companyQuote": letter.company_fact.quote,
         "policyQuote": letter.company_fact.policy_quote,
     }
+
+
+def _paragraph_output(inp: PackInput, context: dict | None) -> dict:
+    """One letter paragraph, as `letter.paragraph` would return it (20 Nov): the paragraph WERA
+    builds from the plan's own lines when a written one fails twice. The same discipline as the
+    demo letter — the CV's words and the post's, nothing else — so it passes the guard as a
+    careful model's paragraph would, and the tests that spoil one see it written again."""
+    from ..domain.dedupe import is_intermediary
+    from ..nodes.letter_plan import template_paragraph
+
+    p = (context or {}).get("plan")
+    if p is None:
+        raise KeyError("letter.paragraph needs its section plan in validation context")
+    job = inp.job
+    text, cited = template_paragraph(p, inp.cv, title=job.title, company=job.company, intermediary=is_intermediary(job.company))
+    return {"text": text, "sourceIds": cited}
 
 
 def _answers_output(inp: PackInput) -> dict:
@@ -602,6 +619,22 @@ DEMO_CATEGORY = {
 }
 # Culture phrases the demo posts really use, so the soft-skill bucket has something true in it.
 DEMO_CULTURE = ("curiosity", "ownership", "collaboration", "communication", "mentoring", "end to end", "good docs")
+
+
+def _demo_education(post: str) -> dict[str, object] | None:
+    """The degree a demo post asks for, read off its sentence that names one (UPSK-05)."""
+    from ..domain.degrees import level_of
+
+    sentence = next((part for part in re.split(r"(?<=[.!?\n])\s+", post) if re.search(r"\bdegree\b", part, re.I)), None)
+    if sentence is None:
+        return None
+    level = level_of(sentence)
+    found = re.search(r"\bdegree in ([A-Z][\w &]+?)(?:[,.;]| or |$)", sentence)
+    return {
+        "level": level if level != "none" else "bachelor",
+        "subjects": [found.group(1).strip()] if found else [],
+        "required": bool(re.search(r"\b(required|must|essential)\b", sentence, re.I)),
+    }
 
 
 def _demo_keywords(job_text: str, cv: MasterCV) -> list[dict]:
@@ -907,7 +940,8 @@ def respond(task: str, variables: dict, context: dict | None, demo_input: PackIn
     if task == "keywords.extract":
         if cv is None:
             raise KeyError("keywords.extract needs the master CV in validation context")
-        return {"keywords": _demo_keywords(str(variables.get("job") or ""), cv)}
+        job_text = str(variables.get("job") or "")
+        return {"keywords": _demo_keywords(job_text, cv), "education": _demo_education(job_text)}
     if task == "fit.score":
         if cv is None:
             raise KeyError("fit.score needs the master CV in validation context")
@@ -944,6 +978,8 @@ def respond(task: str, variables: dict, context: dict | None, demo_input: PackIn
         return _summary_output(demo_input)
     if task == "letter.write":
         return _letter_output(demo_input)
+    if task == "letter.paragraph":
+        return _paragraph_output(demo_input, context)
     if task == "answers.draft":
         return _answers_output(demo_input)
     raise KeyError(f"No demo responder for task {task!r}. Add one here, next to the real prompt.")

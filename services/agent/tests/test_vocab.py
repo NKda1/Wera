@@ -7,6 +7,8 @@ CV listed Git, SQL and C++, and every one of the eight came back both unmatched 
 so they were shown to the applicant as skills to go and acquire.
 """
 
+import pytest
+
 from wera_agent.domain.vocab import aliases_for, text_has_term
 
 
@@ -61,6 +63,21 @@ class TestTheGroupsThatWereMissing:
 
     def test_a_degree_subject_matches_how_a_cv_writes_it(self):
         assert text_has_term("BA (Hons) in Computer Science (Tripos)", "Computer Science")
+
+
+class TestTypographyNeverDecides:
+    """20 Nov: "Bachelor’s Degree" (a curly apostrophe) slipped past `NOT_A_SKILL`'s straight one
+    and was shown as a gap to a CV with a BSc. Every comparison sees one spelling per character."""
+
+    def test_a_curly_apostrophe_is_a_straight_one(self):
+        from wera_agent.domain.vocab import not_a_skill
+
+        assert not_a_skill("Bachelor\u2019s Degree") and not_a_skill("Bachelor's Degree")
+
+    def test_a_term_matches_across_quotes_dashes_and_ligatures(self):
+        assert text_has_term("Built the \ufb01nancial model end\u2013to\u2013end", "financial model")
+        assert text_has_term("Owner\u2019s equity reporting", "owner's equity")
+        assert text_has_term("Python\u00a0developer", "Python developer")
 
 
 class TestGroupsStayHonest:
@@ -173,3 +190,27 @@ class TestWholeWordsOnly:
 
     def test_a_term_inside_a_longer_word_is_not_a_match(self):
         assert not text_has_term("Reactive streams with RxJava", "React")
+
+
+class TestFinanceWritesInAbbreviations:
+    """20 Nov, the finance CV's Upskills: "discounted cash flow", "comps" and "Financial Modeling"
+    were gaps to a CV built on "DCF valuations", comparable-company benchmarking and "financial
+    models" — one spelled British, the methods written as abbreviations."""
+
+    CV = "Built 3-statement financial models, DCF valuations and LBO tables in Excel; comparable company benchmarking."
+
+    @pytest.mark.parametrize(
+        "term",
+        ["Financial Modeling", "financial modelling", "discounted cash flow", "comps", "Leveraged Buyout", "Excel modeling"],
+    )
+    def test_the_cv_shows_it(self, term):
+        assert text_has_term(self.CV, term)
+
+    def test_british_and_american_spellings_meet(self):
+        assert text_has_term("Optimised the organisation's reporting", "optimized")
+        assert text_has_term("analyzed customer behavior", "behavioural analysis") is False  # one word is not the phrase
+        assert text_has_term("analysed spend", "analyzed")
+
+    def test_excel_the_verb_is_not_excel_the_tool(self):
+        assert not text_has_term("You excel under pressure", "Excel")
+        assert text_has_term("Advanced Excel and VBA", "Excel")

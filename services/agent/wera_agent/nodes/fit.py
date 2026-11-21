@@ -11,19 +11,21 @@ shows a stale score for a CV the person has since rewritten.
 """
 
 import hashlib
+from typing import NamedTuple
 
 import logfire
 from sqlalchemy.orm import Session
 
 from ..clock import iso
 from ..db.models import FitReportRow
+from ..domain.degrees import looks_like_degree
 from ..domain.scoring import build_fit_report
 from ..domain.vocab import in_post, text_has_term
 from ..errors import ApiError
 from ..llm.gateway import structured
 from ..llm.prompts import cv_text, untrusted
 from ..schemas.cv import MasterCV
-from ..schemas.jobs import FitEvidence, FitReport, FitWeights, Job, JobKeyword
+from ..schemas.jobs import EducationAsk, FitEvidence, FitReport, FitWeights, Job, JobKeyword
 from ..schemas.llm_outputs import CULTURE_LIMIT, KEYWORD_LIMIT, FitScoreOutput, KeywordList
 
 # The scoring rubric's version (MATCH-04). Bump it when `FIT_SCORE` changes what a score means, and
@@ -123,12 +125,23 @@ def _job_block(job: Job) -> str:
     return f"{header}\n{untrusted('job post', job.description_md or '(no description available)')}"
 
 
-def keywords_for(session: Session, job: Job, cv: MasterCV) -> tuple[list[JobKeyword], list[str]]:
-    """ATSC-01: what the ad asks for, on the fast tier — the checkable keywords, and its culture.
+class PostAsks(NamedTuple):
+    """What a post asks for, as `keywords.extract` reads it: the checkable keywords, its culture
+    words, and the degree it asks for (UPSK-05)."""
+
+    keywords: list[JobKeyword]
+    culture: list[str]
+    education: EducationAsk | None = None
+
+
+def keywords_for(session: Session, job: Job, cv: MasterCV) -> PostAsks:
+    """ATSC-01: what the ad asks for, on the fast tier — the checkable keywords, its culture, and
+    the degree it asks for.
 
     Split here and nowhere else, so that every reader of `FitEvidence.keywords` gets only terms a
     CV can name: the coverage denominator, the skills line and the citation guard all read that
-    list, and none of them should ever see "ownership".
+    list, and none of them should ever see "ownership" — or "Bachelor's degree", which is an
+    education requirement (`domain.degrees`), not a skill.
     """
     out = structured(
         session,
@@ -139,13 +152,13 @@ def keywords_for(session: Session, job: Job, cv: MasterCV) -> tuple[list[JobKeyw
         # on the strength of the job title it wrote, which is not the post asking for it.
         context={"cv": cv, "post": job.description_md or ""},
     )
-    checkable = [k for k in out.keywords if k.category != "soft_skill"]
+    checkable = [k for k in out.keywords if k.category != "soft_skill" and not looks_like_degree(k.term)]
     culture = [k.term for k in out.keywords if k.category == "soft_skill"]
     keywords = [JobKeyword(term=k.term, weight=k.weight, category=k.category) for k in checkable[:KEYWORD_LIMIT]]
-    return keywords, culture[:CULTURE_LIMIT]
+    return PostAsks(keywords, culture[:CULTURE_LIMIT], out.education)
 
 
-def known_keywords(session: Session, job: Job) -> tuple[list[JobKeyword], list[str]] | None:
+def known_keywords(session: Session, job: Job) -> PostAsks | None:
     """The keywords a fit report already holds for this very post, when it has any.
 
     What a post asks for is a fact about the post: `keywords.extract` reads the ad alone (the CV
@@ -160,7 +173,7 @@ def known_keywords(session: Session, job: Job) -> tuple[list[JobKeyword], list[s
     if not stored.keywords:
         return None
     logfire.info("Keywords for {job_id} reused from its last report", job_id=job.id)
-    return in_post(stored.keywords, job.description_md), stored.culture
+    return PostAsks(in_post(stored.keywords, job.description_md), stored.culture, stored.education)
 
 
 def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidence:
@@ -172,7 +185,7 @@ def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidenc
         {"cv": cv_text(cv, home=False), "job": _job_block(job)},
         context={"cv": cv},
     )
-    keywords, culture = known_keywords(session, job) or (keywords_for(session, job, cv) if job.description_md else ([], []))
+    asks = known_keywords(session, job) or (keywords_for(session, job, cv) if job.description_md else PostAsks([], []))
     return FitEvidence(
         core=verdict.core,
         adjacent=verdict.adjacent,
@@ -181,8 +194,9 @@ def score(session: Session, job: Job, cv: MasterCV, *, model: str) -> FitEvidenc
         reason=verdict.reason,
         job_quote=verdict.job_quote,
         cv_bullet_ids=verdict.cv_bullet_ids,
-        keywords=keywords,
-        culture=culture,
+        keywords=asks.keywords,
+        culture=asks.culture,
+        education=asks.education,
         model=model,
         rubric=RUBRIC,
     )

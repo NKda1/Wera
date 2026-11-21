@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, formatTime, isNew, upskillAnchor } from "./format";
+import { displayCase, formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, formatTime, isNew, upskillAnchor } from "./format";
 
 describe("new jobs (SRCH-25)", () => {
   const foundBy = { runId: "run-7", channel: "board_search" as const, at: "2026-11-11T08:00:00Z" };
@@ -54,5 +54,18 @@ describe("stale jobs (LIFE-02…04)", () => {
   it("says why a job is on the possibly-closed list, and flags a standing advert", () => {
     expect(formatLiveness({ liveness: "unverified", possiblyClosed: true }, now)).toBe("not confirmed open in over a week");
     expect(formatEvergreen({ evergreen: true })).toMatch(/standing advert/);
+  });
+});
+
+describe("displayCase", () => {
+  it.each([
+    ["ELEANOR VANCE", false, "Eleanor Vance"],
+    ["SEAN O'BRIEN", false, "Sean O'Brien"],
+    ["NATIONAL BANK OF CANADA", true, "National Bank of Canada"],
+    ["HSBC UK", true, "HSBC UK"],
+    ["AECOM", true, "AECOM"],
+    ["McLean Capital", true, "McLean Capital"],
+  ])("%s", (raw, brand, shown) => {
+    expect(displayCase(raw, { brand })).toBe(shown);
   });
 });

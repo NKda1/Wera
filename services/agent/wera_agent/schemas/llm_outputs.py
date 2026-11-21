@@ -22,9 +22,9 @@ from typing import Annotated, Any, Literal
 from pydantic import ValidationInfo, field_validator, model_validator
 
 from ..domain.verbatim import appears_in, quoted_in, stems_of, supported
-from ..domain.vocab import in_post
+from ..domain.vocab import in_post, text_has_term
 from .base import Model, Opt, check, count, fail, required
-from .jobs import Location, RemoteMode, Salary, SubScore
+from .jobs import EducationAsk, Location, RemoteMode, Salary, SubScore
 from .pack import HookType, LetterSection, StrategicContext
 from .profile import Seniority
 
@@ -65,8 +65,11 @@ def _cv(info: ValidationInfo) -> Any | None:
 
 
 def _known_bullet_ids(cv: Any) -> set[str]:
+    """The ids a written line may cite: `vocab.cv_line_index`'s keys. Education entries are among
+    them since 20 Nov, so a letter's opening can cite the degree it introduces the applicant by."""
     return (
         {b.id for r in [*cv.experience, *cv.projects] for b in r.bullets}
+        | {e.id for e in cv.education}
         | {b.id for e in cv.education for b in (e.notes or [])}
         | ({cv.summary.id} if cv.summary else set())
     )
@@ -268,7 +271,7 @@ class ExtractedKeyword(Model):
 
     term: Term
     weight: Literal["required", "nice"]
-    category: Literal["hard_skill", "methodology", "tool", "soft_skill"]
+    category: Literal["hard_skill", "methodology", "tool", "qualification", "soft_skill"]
 
 
 class KeywordList(Model):
@@ -276,6 +279,19 @@ class KeywordList(Model):
     # in one run, leaving a job unscored. `fit.keywords_for` already keeps the first
     # `KEYWORD_LIMIT` checkable terms and `CULTURE_LIMIT` soft ones, and `max_tokens` bounds the rest.
     keywords: list[ExtractedKeyword]
+    # The degree the post asks for, out of the keyword list (UPSK-05). Optional so a reply without
+    # it still parses: a post that names no degree has nothing to say here.
+    education: Opt[EducationAsk] = None
+
+    @field_validator("education")
+    @classmethod
+    def _subjects_from_the_post(cls, v: EducationAsk | None, info: ValidationInfo) -> EducationAsk | None:
+        """Subjects the post doesn't name are dropped, as keywords are: "Finance" invented for a
+        post that says "a numerate degree" would send the applicant after the wrong programme."""
+        post = (info.context or {}).get("post") if info.context else None
+        if v is None or post is None:
+            return v
+        return v.model_copy(update={"subjects": [s for s in v.subjects if text_has_term(post, s)]})
 
     @field_validator("keywords")
     @classmethod
@@ -634,9 +650,16 @@ class TailorSelection(Model):
         screen offers the person a bullet they can't add back."""
         cv = _cv(info)
         if cv is not None:
-            known = _known_bullet_ids(cv)
+            # Not an education entry (20 Nov, when they became citable): the tailored CV prints
+            # education whole, so there is no entry to leave out or put back.
+            known = _known_bullet_ids(cv) - {e.id for e in cv.education}
             return [i for i in v if i in known]
         return v
+
+
+# TAIL-07's profile length, as `SummaryDraft` holds a reply to it (20 Nov, from 20–90).
+SUMMARY_MIN_WORDS = 40
+SUMMARY_MAX_WORDS = 100
 
 
 class SummaryDraft(Cites):
@@ -650,13 +673,18 @@ class SummaryDraft(Cites):
 
     The word bound is a validator for the same reason `LetterOutput._length` is: strict mode
     ignores `maxLength`, and a profile that runs to a paragraph stops being a profile.
+
+    40–100 since 20 Nov (was 20–90). The JobLeads review (19 Nov) put a CV profile at 50–100
+    words, and `SUMMARY_WRITE` now asks for 50–90; the bound is wider than the ask on both sides
+    so a profile a few words off is kept rather than paid for twice, while a two-line stub — the
+    20-word floor allowed one — is asked for again.
     """
 
     @model_validator(mode="after")
     def _length(self) -> "SummaryDraft":
         n = len(self.text.split())
-        if not 20 <= n <= 90:
-            raise fail("length", f"The profile is {n} words; write between 20 and 90")
+        if not SUMMARY_MIN_WORDS <= n <= SUMMARY_MAX_WORDS:
+            raise fail("length", f"The profile is {n} words; write between {SUMMARY_MIN_WORDS} and {SUMMARY_MAX_WORDS}")
         return self
 
 
@@ -738,6 +766,34 @@ class LetterOutput(Model):
                 "length",
                 f"The letter is {count_} words; write between {LETTER_MIN_WORDS} and {LETTER_MAX_WORDS}",
             )
+        return self
+
+
+# ---- letter.paragraph (LTR-01, 20 Nov) ----
+
+# A paragraph reply past this is not a paragraph: the longest budget is 90 words, and 400 output
+# tokens is roughly 300. Rejected rather than cut, because a cut paragraph ends mid-sentence.
+PARAGRAPH_MAX_WORDS = 140
+
+
+class LetterParagraphOutput(Cites):
+    """One paragraph of a cover letter, written in a call of its own (`letters.mode: paragraphs`).
+
+    Only `text` and `sourceIds`: everything else a `LetterOutput` carries — which section this is,
+    the greeting, the sign-off, the hook, which employer words may be quoted — is decided in code
+    before the call (`nodes.letter_plan.section_plans`), so the model has nothing to get wrong
+    there. A reply that leaves out `section` can no longer default into the proof paragraph and be
+    cut for citing nothing, which is one of the ways 20 Nov's letters lost a paragraph.
+
+    `Cites` drops an id the CV doesn't have; `nodes.tailor` then keeps only the ids this section
+    was given, so a paragraph can cite nothing it wasn't shown.
+    """
+
+    @model_validator(mode="after")
+    def _length(self) -> "LetterParagraphOutput":
+        n = len(self.text.split())
+        if n > PARAGRAPH_MAX_WORDS:
+            raise fail("length", f"The paragraph is {n} words; keep it to its budget")
         return self
 
 

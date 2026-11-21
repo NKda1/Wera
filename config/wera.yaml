@@ -121,6 +121,10 @@ tasks:
   # doesn't carry — the claim check (`guard.claims`) catches. A cut-off `on` task still retries
   # without thinking (gateway `cut_off`), should this go back to `on`.
   letter.write: { tier: writing, max_tokens: 1500, reasoning: "off" }
+  # One paragraph of a letter (`letters.mode: paragraphs`, 20 Nov): four at once, then one more
+  # for any the guard fails. The longest budget is 90 words — about 130 tokens of JSON — so 400 is
+  # three times the reply, and a reply that small can't run away the way a whole letter could.
+  letter.paragraph: { tier: writing, max_tokens: 400, reasoning: "off" }
   # `reasoning: off`, and the measurement that forced it: this task was given an average of 429
   # input tokens — one line, its source lines, and what failed — and emitted an average of **972
   # output tokens over 16.8 seconds** to rewrite a single sentence. The sentence is forty tokens.
@@ -206,8 +210,8 @@ guard:
 # SRCH-31/32: the job APIs, asked before Serper's first tier (they are "tier 0"). Keys go in
 # .env.local. `terms_reviewed_on` IS THE GATE, as in sites.yaml: null means WERA never calls it.
 # Set it to the date you read that API's terms. `max_searches`: searches a search may send it (one
-# per title, best first); `max_queued`: its postings a search may queue, kept small so the open
-# web and the reviewed boards still get their share of the 8–12.
+# per title, best first). 20 Nov: no cap on what one API may queue — every API's leads join one
+# pool ranked by CV similarity, read best first, and the rest wait for "Find more".
 #
 # * Reed (UK) and USAJOBS (US federal) give the full text, read from the API.
 # * Adzuna and Careerjet give a snippet behind a tracked link that WERA never opens; each lead's
@@ -217,32 +221,27 @@ guard:
 #   and browser on every call, so scheduled runs skip it, and its key works only from the IPs
 #   registered on the publisher account.
 feeds:
+  # 20 Nov: 8, up from 3 — the plan's tier-1 and tier-2 titles, not only the first three.
   reed:
     enabled: true
     terms_reviewed_on: 2026-11-13
-    max_searches: 3
-    # 3, down from 6 (14 Nov): on 13 Nov the Reed jobs WERA queued were almost all eFinancialCareers
-    # reposts, and the 3 scored came in at 2.0–3.6 of 10. Its graduate filter is loose (AECOM
-    # was 49 of 71 fresh results), so fewer places for it leaves more for sources that score.
-    max_queued: 3
+    max_searches: 8
   usajobs:
     enabled: true
     terms_reviewed_on: 2026-11-13
     max_searches: 3
-    max_queued: 6
-  # 17 Nov: up from 3 and 2. They are asked title by title in every ticked country, in the
-  # profile's order, and their leads are taken best match first across all of them, so more
-  # searches widen where WERA looks rather than deepening one country.
-  adzuna: 
+  # 17 Nov: up from 3 and 2; 20 Nov: doubled again, to 20 and 12. They are asked title by title in
+  # every ticked country, in the profile's order, and their leads are taken best match first across
+  # all of them, so more searches widen where WERA looks rather than deepening one country. Adzuna
+  # answers 50 a search, its most (`adzuna.PER_SEARCH`).
+  adzuna:
     enabled: true
     terms_reviewed_on: 2026-11-13
-    max_searches: 10
-    max_queued: 6
-  careerjet: 
+    max_searches: 20
+  careerjet:
     enabled: true
     terms_reviewed_on: 2026-11-13
-    max_searches: 6
-    max_queued: 6
+    max_searches: 12
   # SRCH-35: UN agencies, international organisations and NGOs, with each posting's full text.
   # Needs RELIEFWEB_APPNAME (an approved appname, from apidoc.reliefweb.int) and its terms read:
   # https://reliefweb.int/terms-conditions.
@@ -250,7 +249,6 @@ feeds:
     enabled: true
     terms_reviewed_on: null
     max_searches: 3
-    max_queued: 6
 
 # SRCH-10: a short-term cache in front of Firecrawl, so a run doesn't pay for the last one's
 # answers again. `known_urls` (SRCH-05) already stops a job being re-scraped; this covers the two
@@ -291,14 +289,21 @@ discovery_max_queries: 8
 # weekly budget, which still stops everything first (COST-01).
 max_scored_per_day: 70
 
-# SRCH-26 (18 Nov): best match first, with each ticked country's share and no source above
-# `ceiling` of a search's reads; Firecrawl searches when Serper's day is spent.
+# SRCH-26: best match first, with each ticked country's share; Firecrawl searches when Serper's
+# day is spent. 20 Nov: no per-source ceiling and no agency caps — "one site could actually contain
+# a lot of quality jobs". Reposts of one job are merged (`dedupe`), weak jobs hidden by the fit bar.
 source_share:
-  ceiling: 0.4
   firecrawl_searches: 6
-  # 19 Nov: one agency's reposts are one source — one a search, none while 3 wait on the list.
-  agency_per_search: 1
-  agency_shortlist: 3
+
+# UPSK-06 (20 Nov): the jobs a CV nearly matched — a title the filter dropped, never an excluded
+# word or a too-senior one — feed Upskills. Of each search's near misses at least
+# `near_miss_min_similarity` like the CV, the best `near_miss_per_search` have their keywords read
+# (fast tier, about $0.0001 each), counted at `near_miss_weight` of a scored job. 0 turns it off.
+upskills:
+  near_miss_per_search: 40
+  near_miss_min_similarity: 0.70
+  near_miss_weight: 0.5
+  near_miss_workers: 6
 
 # "Learn about the company" on the review screen (18 Nov): one About page, read with plain HTTP
 # after robots.txt, and one Serper search at most to find the site. Off turns the button off.
@@ -318,9 +323,10 @@ scoring_workers: 3
 # stops it. The postings it found and didn't read wait in the queue for "Find more", so the
 # twelfth job isn't paid for until someone has read the eleventh. Inbox and watchlist runs score
 # up to `max` of what they found, the same ceiling.
+# 20 Nov: 20, up from 12 — a search found 140 postings that passed every filter and showed 12.
 surface:
   min: 8
-  max: 12
+  max: 20
   # 19 Nov: a job scored under 4 is hidden with its score as the reason ("Unhide" brings it back),
   # and only jobs at 4 or more count towards the 8. 0 turns it off.
   min_fit: 4
@@ -337,6 +343,16 @@ unreadable_hint:
   milkround.com: /job/x/x-job1
   cwjobs.co.uk: /job/x/x-job1
   totaljobs.com: /job/x/x-job1
+
+# LTR-01 (20 Nov): how a letter is written. `paragraphs` — four `letter.paragraph` calls in
+# parallel from a plan made in code, a paragraph the guard fails written again with the reason,
+# and a paragraph built from the CV's own lines if that fails too — is the default. `single` is
+# the one `letter.write` call before it, kept for rollback and A/B
+# (`python -m wera_agent.evaluate letters`). 20 Nov: 2 of 7 single-call letters came out at
+# 130–133 words, the guard having cut or shrunk paragraphs with nothing to put back.
+letters:
+  mode: paragraphs
+  workers: 4
 
 # LTR-04: phrases that make a cover letter read like a form. A hit triggers one rewrite, and the
 # phrase is quoted back so the model knows which words to lose rather than guessing at "be less

@@ -1026,3 +1026,381 @@ def packs_out(model: str) -> Path:
     from .settings import get_settings
 
     return get_settings().data_dir / "eval" / f"packs-{slug(model)}.md"
+
+
+# ---------------------------------------------------------------------------
+# Letters: paragraph by paragraph against the one call (`letters.mode`, 20 Nov)
+#
+# `python -m wera_agent.evaluate letters` — with DATABASE_URL pointing at a `*_eval` database.
+# Reads real jobs and CVs from the live database, read-only, and writes nothing there: the model
+# calls are recorded in the eval database, and the letters go to the report and nowhere else.
+#
+# Not the golden set: those twenty ads are one career, and the letter's failures on 20 Nov were
+# on a finance CV. Each job's letter is written in both modes from the same tailored CV, the same
+# analysis and the same evidence, so the mode is the only thing that differs.
+
+LETTER_TASKS = ("letter.write", "letter.paragraph", "guard.claims", "guard.repair")
+
+
+@dataclass
+class LetterRow:
+    job_id: str
+    title: str
+    company: str
+    career: str
+    mode: str
+    error: str | None = None
+    words: int = 0
+    paragraphs: int = 0
+    calls: int = 0  # every model call the letter made, guard included
+    truncations: int = 0  # replies cut off, retried or not
+    failures: int = 0  # calls that ended in an error code
+    dropped: int = 0
+    regenerated: int = 0
+    templated: int = 0
+    lengthened: int = 0
+    shortened: int = 0
+    # 20 Nov: whether the letter speaks about visas, sponsorship or the right to work — which it
+    # may never do, whatever the post says (LTR-02).
+    work_rights: bool = False
+    repairs: int = 0
+    seconds: float = 0.0
+    cost_usd: float = 0.0
+    guard_pass: bool = False
+    failed_on: dict[str, int] = field(default_factory=dict)  # first-round guard failures, by rule
+    violations: list[str] = field(default_factory=list)  # what the stored letter shows the person
+    text: str = ""
+
+
+@dataclass
+class LettersReport:
+    ran_at: str
+    writing_model: str
+    rows: list[LetterRow] = field(default_factory=list)
+    setup_cost_usd: float = 0.0  # tailoring, analysis and scoring, shared by both modes
+
+    def of(self, mode: str, career: str | None = None) -> list[LetterRow]:
+        return [r for r in self.rows if r.mode == mode and r.error is None and (career is None or r.career == career)]
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def run_letters(
+    *, source_url: str, finance: int = 10, cs: int = 10, finance_cv: int = 9, cs_cv: int = 8, visa: bool = False
+) -> LettersReport:
+    """Write each job's letter both ways and measure what it took.
+
+    `finance` jobs are the ones the live database scored against the finance CV (version
+    `finance_cv`), with their stored evidence; `cs` jobs are software roles, scored here against
+    the CS CV (`cs_cv`) since the live scores for that CV were cleared when it was replaced.
+    """
+    from dataclasses import replace
+
+    import logfire
+    from sqlalchemy import text
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.orm import Session
+
+    from .clock import iso, now_ms
+    from .db import state
+    from .db.models import JobRow
+    from .db.session import make_engine, transaction
+    from .errors import ApiError
+    from .llm import gateway
+    from .llm.demo import PackInput
+    from .main import ensure_database
+    from .nodes import fit
+    from .nodes.analyse import analyse
+    from .nodes.tailor import tailor, write_letter
+    from .schemas.cv import MasterCV
+    from .schemas.jobs import FitEvidence, Job
+    from .schemas.pack import JobAnalysis
+    from .schemas.profile import SearchProfile
+    from .services.store import current_view
+    from .settings import get_settings
+
+    target = make_url(get_settings().db_url)
+    if not (target.database or "").endswith("_eval") or make_url(source_url).database == target.database:
+        raise SystemExit(f"Refusing to run: DATABASE_URL must name an *_eval database, not {target.database!r}.")
+    if get_settings().wera_demo_mode:
+        raise SystemExit("Demo mode answers from the demo responders; run this with WERA_DEMO_MODE=false.")
+    ensure_database()
+    now = now_ms()
+
+    # Every call this process makes, as the gateway records it: other processes may be using the
+    # same eval database, so its `llm_calls` table can't say which calls were these.
+    seen: list[dict[str, Any]] = []
+    publish = gateway._publish
+
+    def keep(row: dict[str, Any]) -> None:
+        seen.append(row)
+        publish(row)
+
+    gateway._publish = keep  # type: ignore[assignment]
+
+    source = make_engine(source_url)
+    with Session(source) as live:
+        live.execute(text("SET TRANSACTION READ ONLY"))
+        cvs = {
+            v: MasterCV.model_validate(d)
+            for v, d in live.execute(
+                text("SELECT version, data FROM master_cv WHERE version IN (:a, :b)"), {"a": finance_cv, "b": cs_cv}
+            )
+        }
+        models = (live.execute(text("SELECT data FROM settings ORDER BY id LIMIT 1")).scalar() or {}).get("models")
+        profile_data = live.execute(text("SELECT data FROM search_profile ORDER BY id DESC LIMIT 1")).scalar()
+        profile = SearchProfile.model_validate(profile_data) if profile_data else None
+        analyses = {
+            job_id: content
+            for job_id, content in live.execute(
+                text(
+                    "SELECT a.job_id, d.content FROM documents d JOIN applications a ON a.id = d.application_id "
+                    "WHERE d.kind = 'analysis' ORDER BY d.version"
+                )
+            )
+        }
+        scored = live.execute(
+            text(
+                "SELECT j.id, f.evidence FROM fit_reports f JOIN jobs j ON j.id = f.job_id "
+                "WHERE f.cv_version = :v AND length(j.data->>'descriptionMd') > 800 ORDER BY j.first_seen DESC"
+            ),
+            {"v": finance_cv},
+        ).all()
+        software = live.execute(
+            text(
+                "SELECT id FROM jobs WHERE title ~* '(engineer|developer|data scientist)' "
+                "AND title !~* '(senior|staff|principal|lead|manager|head|director|sales|hardware|mechanical|civil)' "
+                "AND length(data->>'descriptionMd') > 1500 "
+                # `visa`: only posts that talk about sponsorship or the right to work, the case a
+                # letter once answered with a claim the CV never made (20 Nov).
+                + ("AND data->>'descriptionMd' ~* '(visa|sponsor|right to work|work permit)' " if visa else "")
+                + "ORDER BY first_seen DESC"
+            )
+        ).all()
+
+        def distinct(ids: list[str], n: int) -> list[Job]:
+            out: list[Job] = []
+            if n <= 0:
+                return out
+            companies: set[str] = set()
+            for job_id in ids:
+                row = live.get(JobRow, job_id)
+                if row is None or row.company.casefold() in companies:
+                    continue
+                companies.add(row.company.casefold())
+                out.append(current_view(Job.model_validate(row.data)))
+                if len(out) == n:
+                    break
+            return out
+
+        finance_jobs = distinct([r[0] for r in scored], finance)
+        cs_jobs = distinct([r[0] for r in software], cs)
+        evidence = {r[0]: r[1] for r in scored}
+        live.rollback()
+    source.dispose()
+
+    with transaction() as session:
+        data = state.settings_data(session)
+        if models:
+            data["models"] = {**data["models"], **models}
+            state.save_settings_data(session, data)
+        writing = data["models"]["writing"]
+        scoring = data["models"]["scoring"]
+        pages = data.get("cvPages", 1)
+
+    report = LettersReport(ran_at=iso(now), writing_model=writing)
+    jobs = [("finance", j, cvs[finance_cv]) for j in finance_jobs] + [("cs", j, cvs[cs_cv]) for j in cs_jobs]
+    for index, (career, job, cv) in enumerate(jobs):
+        _tick(index, len(jobs), f"{job.title} — {job.company}")
+        before = len(seen)
+        try:
+            with transaction() as session:
+                if job.id in evidence:
+                    ev = fit.with_posted_keywords(FitEvidence.model_validate(evidence[job.id]), job)
+                else:
+                    ev = fit.with_posted_keywords(fit.score(session, job, cv, model=scoring), job)
+                found = analyses.get(job.id)
+                analysis = JobAnalysis.model_validate(found) if found else _try(lambda s=session, j=job, e=ev: analyse(s, j, e))
+                inp = PackInput(job=job, evidence=ev, questions=[], cv=cv, cv_pages=pages, profile=profile, analysis=analysis)
+                doc = tailor(session, inp)
+        except ApiError as exc:
+            for mode in ("paragraphs", "single"):
+                report.rows.append(LetterRow(job.id, job.title, job.company, career, mode, error=exc.code))
+            continue
+        report.setup_cost_usd += sum(r["cost_usd"] or 0 for r in seen[before:])
+        inp = replace(inp, doc=doc)
+        for mode in ("paragraphs", "single"):
+            row = LetterRow(job.id, job.title, job.company, career, mode)
+            mark = len(seen)
+            started = time.monotonic()
+            try:
+                with transaction() as session:
+                    made, stats = write_letter(session, inp, doc, mode=mode)
+                row.words, row.paragraphs = made.word_count, len(made.paragraphs)
+                row.dropped, row.regenerated, row.templated, row.lengthened, row.shortened = (
+                    stats.dropped,
+                    stats.regenerated,
+                    stats.templated,
+                    stats.lengthened,
+                    stats.shortened,
+                )
+                row.guard_pass = made.guard.pass_
+                # The role's own title may say "ICAEW Sponsorship"; naming the role is not a claim.
+                body = " ".join(p.text for p in made.paragraphs).replace(job.title, " ")
+                row.work_rights = bool(_WORK_RIGHTS.search(body))
+                row.failed_on = dict(stats.failed_on)
+                row.violations = [f"{v.location} {v.rule}: {v.detail}" for v in made.guard.violations]
+                row.text = "\n\n".join([made.greeting, *(p.text for p in made.paragraphs), made.signoff])
+            except ApiError as exc:
+                row.error = exc.code
+            except Exception as exc:  # noqa: BLE001 — one bad letter must not end the eval
+                row.error = type(exc).__name__
+                logfire.warn("Letter eval {id} raised {kind}", id=job.id, kind=type(exc).__name__)
+            row.seconds = round(time.monotonic() - started, 1)
+            calls = [r for r in seen[mark:] if r["task"] in LETTER_TASKS]
+            row.calls = len(calls)
+            row.truncations = sum(1 for r in calls if r["code"] == gateway.TRUNCATED)
+            row.failures = sum(1 for r in calls if not r["ok"])
+            row.repairs = sum(1 for r in calls if r["task"] == "guard.repair")
+            row.cost_usd = sum(r["cost_usd"] or 0 for r in calls)
+            report.rows.append(row)
+        _tick(index + 1, len(jobs), f"{job.title} — {job.company}")
+
+    gateway._publish = publish  # type: ignore[assignment]
+    gateway.flush_unrecorded()
+    return report
+
+
+def _try(call: Any) -> Any:
+    """A call whose failure leaves the letter without it, as `drafting._analyse` does."""
+    from .errors import ApiError
+
+    try:
+        return call()
+    except ApiError:
+        return None
+
+
+_WORK_RIGHTS = re.compile(
+    r"\b(visas?|sponsor(ship|ed)?|right to work|work permit|eligible to work|work authori[sz]ation)\b", re.I
+)
+
+
+def letters_as_markdown(report: LettersReport) -> str:
+    modes = ("paragraphs", "single")
+
+    def line(label: str, fn: Any) -> str:
+        return f"| {label} | " + " | ".join(fn(m) for m in modes) + " |"
+
+    def words(m: str) -> list[int]:
+        return [r.words for r in report.of(m)]
+
+    attempted = {m: [r for r in report.rows if r.mode == m] for m in modes}
+    out = [
+        "# Letters: paragraph by paragraph vs one call",
+        "",
+        f"{report.ran_at} · writing model `{report.writing_model}` · "
+        f"{len({r.job_id for r in report.rows})} jobs ({len({r.job_id for r in report.rows if r.career == 'finance'})} finance, "
+        f"{len({r.job_id for r in report.rows if r.career == 'cs'})} CS)",
+        "",
+        "| | paragraphs | single |",
+        "|---|---:|---:|",
+        line("Letters written", lambda m: f"{len(report.of(m))} of {len(attempted[m])}"),
+        line("Words, mean", lambda m: f"{_mean(words(m)):.0f}"),
+        line("Words, min – max", lambda m: f"{min(words(m), default=0)} – {max(words(m), default=0)}"),
+        line("Under 150 words", lambda m: str(sum(1 for w in words(m) if w < 150))),
+        line("Over 230 words", lambda m: str(sum(1 for w in words(m) if w > 230))),
+        line("Four paragraphs", lambda m: str(sum(1 for r in report.of(m) if r.paragraphs == 4))),
+        line("Guard pass", lambda m: str(sum(1 for r in report.of(m) if r.guard_pass))),
+        line("Paragraphs dropped", lambda m: str(sum(r.dropped for r in report.of(m)))),
+        line("Paragraphs repaired (`guard.repair` calls)", lambda m: str(sum(r.repairs for r in report.of(m)))),
+        line("Paragraphs written again", lambda m: str(sum(r.regenerated for r in report.of(m)))),
+        line("Paragraphs from the CV's lines (template)", lambda m: str(sum(r.templated for r in report.of(m)))),
+        line("Letters lengthened", lambda m: str(sum(r.lengthened for r in report.of(m)))),
+        line("Letters shortened", lambda m: str(sum(r.shortened for r in report.of(m)))),
+        line("Letters speaking of visas or the right to work", lambda m: str(sum(r.work_rights for r in report.of(m)))),
+        line("Model calls", lambda m: str(sum(r.calls for r in attempted[m]))),
+        line("Truncated replies", lambda m: str(sum(r.truncations for r in attempted[m]))),
+        line("Failed calls", lambda m: str(sum(r.failures for r in attempted[m]))),
+        line("Seconds a letter, mean", lambda m: f"{_mean([r.seconds for r in report.of(m)]):.1f}"),
+        line("Seconds a letter, max", lambda m: f"{max([r.seconds for r in report.of(m)], default=0):.1f}"),
+        line("Cost", lambda m: f"${sum(r.cost_usd for r in attempted[m]):.4f}"),
+        "",
+        f"Setup shared by both modes (tailoring, analysis, scoring the CS jobs): ${report.setup_cost_usd:.4f}.",
+        "",
+        "Paragraph mode, why first-round paragraphs were written again: "
+        + (
+            ", ".join(
+                f"{rule} × {n}"
+                for rule, n in sorted(
+                    {
+                        k: sum(r.failed_on.get(k, 0) for r in report.of("paragraphs"))
+                        for k in {k for r in report.of("paragraphs") for k in r.failed_on}
+                    }.items(),
+                    key=lambda kv: -kv[1],
+                )
+            )
+            or "none"
+        )
+        + ".",
+        "",
+        "## By career",
+        "",
+        "| Career | Mode | Letters | Words, mean | Under 150 | Written again | Template | Secs, mean |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for career in ("finance", "cs"):
+        for m in modes:
+            rows = report.of(m, career)
+            out.append(
+                f"| {career} | {m} | {len(rows)} | {_mean([r.words for r in rows]):.0f} | "
+                f"{sum(1 for r in rows if r.words < 150)} | {sum(r.regenerated for r in rows)} | "
+                f"{sum(r.templated for r in rows)} | {_mean([r.seconds for r in rows]):.1f} |"
+            )
+    out += [
+        "",
+        "## Per letter",
+        "",
+        "| Job | Career | Mode | Words | Paras | Calls | Trunc | Dropped | Again | Template | Secs | Cost | Outcome |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for r in report.rows:
+        out.append(
+            f"| {r.title} — {r.company} | {r.career} | {r.mode} | {r.words} | {r.paragraphs} | {r.calls} | "
+            f"{r.truncations} | {r.dropped} | {r.regenerated} | {r.templated} | {r.seconds} | ${r.cost_usd:.4f} | "
+            f"{r.error or ('pass' if r.guard_pass else 'flagged')} |"
+        )
+    out += ["", "## The letters", ""]
+    for r in report.rows:
+        if r.text:
+            out += [f"### {r.title} — {r.company} ({r.career}, {r.mode}, {r.words} words)", "", r.text, ""]
+            out += [f"> {v}" for v in r.violations] + ([""] if r.violations else [])
+    return "\n".join(out)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    os.environ.setdefault("LOGFIRE_IGNORE_NO_CONFIG", "1")
+    parser = argparse.ArgumentParser(prog="python -m wera_agent.evaluate")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    letters = sub.add_parser("letters", help="write each job's letter in both `letters.mode`s and compare")
+    letters.add_argument("--source", default="postgresql://localhost:5432/wera", help="the live database, read only")
+    letters.add_argument("--finance", type=int, default=10)
+    letters.add_argument("--cs", type=int, default=10)
+    letters.add_argument("--visa", action="store_true", help="only software posts that mention visas or sponsorship")
+    letters.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args()
+    os.environ.setdefault("WERA_RUN_LABEL", "eval")
+    from .logging import configure as configure_logging
+    from .observability import configure as configure_observability
+
+    configure_logging()
+    configure_observability()
+    result = run_letters(source_url=args.source, finance=args.finance, cs=args.cs, visa=args.visa)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(letters_as_markdown(result), encoding="utf-8")
+    args.out.with_suffix(".json").write_text(json.dumps([r.__dict__ for r in result.rows], indent=2), encoding="utf-8")
+    print(f"Wrote {args.out}", file=sys.stderr)

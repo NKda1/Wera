@@ -144,7 +144,8 @@ export const agent = {
   getContact: () => json<Contact>("/cv/contact"),
   getProfile: () => json<SearchProfile>("/profile"),
   getSettings: () => json<SettingsResponse>("/settings"),
-  upskills: (days = 60) => json<UpskillsReport>(`/upskills?days=${days}`),
+  upskills: (days = 60, family: string | null = null) =>
+    json<UpskillsReport>(`/upskills?days=${days}${family ? `&family=${encodeURIComponent(family)}` : ""}`),
   /** MATCH-13: profile changes the person's Gate 1 decisions point at. */
   learningSuggestions: () => json<SuggestionList>("/learning/suggestions"),
 };

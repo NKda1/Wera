@@ -1,0 +1,77 @@
+# UPSK-05 (20 Nov): the programmes employers in a field most often name, shown on Upskills until
+# the postings WERA has read name enough of their own (`starter_until` mentions). The postings'
+# own counts replace this list as they arrive; it exists so a new user, or a narrow field, still
+# gets a direction on day one.
+#
+# A field is matched by any of its `match` words appearing in the search plan's field
+# ("investment banking and corporate finance" → finance). Each programme is how a person would
+# search for it. Professional qualifications sit with the degrees because a bachelor's graduate
+# weighing a master's is usually weighing them against one.
+
+starter_until: 5
+
+fields:
+  finance:
+    match: [finance, banking, investment, equity, asset management, accounting, audit, actuarial, insurance, wealth, treasury, private equity]
+    programmes:
+      - Master's in Finance
+      - Master's in Financial Economics
+      - Master's in Accounting and Finance
+      - Master's in Financial Engineering
+      - MBA
+      - ACA (ICAEW Chartered Accountant)
+      - ACCA
+      - CFA Program
+  software:
+    match: [software, backend, frontend, full stack, engineering, developer, devops, platform, cloud, web]
+    programmes:
+      - Master's in Computer Science
+      - Master's in Software Engineering
+      - Master's in Artificial Intelligence
+      - Master's in Data Science
+      - AWS Certified Solutions Architect
+      - Azure Fundamentals
+  data:
+    match: [data, analytics, machine learning, ai, statistics, quantitative, research scientist]
+    programmes:
+      - Master's in Data Science
+      - Master's in Statistics
+      - Master's in Machine Learning
+      - Master's in Operational Research
+      - Master's in Applied Mathematics
+  law:
+    match: [law, legal, solicitor, barrister, paralegal, compliance]
+    programmes:
+      - Graduate Diploma in Law (GDL / PGDL)
+      - SQE preparation course
+      - LLM
+      - Bar Practice Course
+  marketing:
+    match: [marketing, brand, communications, content, digital marketing, public relations, advertising]
+    programmes:
+      - Master's in Marketing
+      - Master's in Digital Marketing
+      - CIM Certificate in Professional Marketing
+      - Google Analytics certification
+  consulting:
+    match: [consulting, strategy, management, business analysis, operations, project management]
+    programmes:
+      - MBA
+      - Master's in Management
+      - Master's in Business Analytics
+      - PRINCE2 Foundation
+      - PMP
+  healthcare:
+    match: [health, clinical, nursing, pharma, medical, biotech, life sciences]
+    programmes:
+      - Master's in Public Health
+      - Master's in Biomedical Science
+      - Master's in Health Data Science
+      - Clinical research certification (GCP)
+  engineering:
+    match: [mechanical, electrical, civil, chemical, aerospace, manufacturing, structural]
+    programmes:
+      - MEng / Master's in the engineering discipline
+      - Chartered Engineer (CEng) pathway
+      - Master's in Systems Engineering
+      - Master's in Engineering Management
