@@ -324,6 +324,10 @@ def is_copy_elsewhere(left: Job, right: Job) -> bool:
     return same_words and _same_kind(left_title, right_title) and is_near_duplicate(left, right)
 
 
+# The job API whose apply link no merge may replace (its terms, 22 Nov).
+HIMALAYAS = "himalayas"
+
+
 def merge_sources(into: Job, other: Job) -> Job:
     """Keeps every source and the fullest description, so nothing is lost to a merge."""
     seen = {(s.channel, s.detail) for s in into.sources}
@@ -335,12 +339,22 @@ def merge_sources(into: Job, other: Job) -> Job:
         into.description_md, into.description_status = other.description_md, other.description_status
     # The employer's own link wins over a board's, and a board's over an aggregator's copy, so a
     # job first seen on bebee and then found at the employer applies at the employer.
-    if other.apply_url and link_rank(other) > link_rank(into):
+    #
+    # Except a Himalayas job's (22 Nov): its terms say every Apply uses its `applicationLink`
+    # unchanged, never an employer's or an ATS link. A sighting from Himalayas, either way round,
+    # keeps that link, and the job keeps Himalayas' label with it.
+    himalayas = next((j for j in (into, other) if j.via == HIMALAYAS and j.apply_url), None)
+    if himalayas is not None:
+        into.apply_url, into.via = himalayas.apply_url, HIMALAYAS
+        into.via_url = himalayas.via_url or into.via_url
+        into.ats = into.ats or other.ats
+    elif other.apply_url and link_rank(other) > link_rank(into):
         into.apply_url, into.ats = other.apply_url, other.ats or into.ats
     else:
         into.apply_url = into.apply_url or other.apply_url
         into.ats = into.ats or other.ats
     into.via = into.via or other.via
+    into.via_url = into.via_url or other.via_url
     into.linkedin_url = into.linkedin_url or other.linkedin_url  # MAIL-07: stored, never fetched
     into.salary = into.salary or other.salary
     into.closes_at = into.closes_at or other.closes_at  # LIFE-02: whichever source gave a date

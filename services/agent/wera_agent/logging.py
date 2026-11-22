@@ -12,6 +12,9 @@ _KEYS = [
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
     re.compile(r"\bfc-[A-Fa-f0-9]{16,}"),
 ]
+# 22 Nov: Jooble's key is a path segment (`jooble.org/api/<key>`), which httpx's own INFO line
+# ("HTTP Request: POST https://jooble.org/api/…") would otherwise write out whole.
+_IN_PATH = re.compile(r"(?i)(\bjooble\.[a-z.]+/api/)[^\s/?#\"']+")
 _BEARER = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+")
 _ASSIGNED = re.compile(
     r"(?i)\b(authorization|api[_-]?key|[A-Z_]*_(?:KEY|TOKEN|PASSWORD|SECRET))(\s*[:=]\s*)(?!bearer\b)([^\s,;]+)"
@@ -21,6 +24,7 @@ _ASSIGNED = re.compile(
 def redact(text: str) -> str:
     for p in _KEYS:
         text = p.sub("[redacted]", text)
+    text = _IN_PATH.sub(lambda m: f"{m.group(1)}[redacted]", text)
     text = _BEARER.sub(lambda m: f"{m.group(1)} [redacted]", text)
     return _ASSIGNED.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
 

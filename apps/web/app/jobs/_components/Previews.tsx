@@ -4,7 +4,7 @@ import { ChevronDown } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useId, useMemo, useState } from "react";
 import { api } from "@/lib/api";
-import { formatDate, formatLocation, formatPostedAge, previewLabel, previewsLeft, previewSource, sortPreviews, type PreviewLabel } from "@/lib/format";
+import { attribution, formatDate, formatLocation, formatPostedAge, previewLabel, previewsLeft, previewSource, sortPreviews, type PreviewLabel } from "@/lib/format";
 import type { Job, PreviewCutoffs } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -179,6 +179,7 @@ function PreviewCard({
 }) {
   const titleId = useId();
   const meta = [previewSource(job), formatLocation(job), formatPostedAge(job)].filter(Boolean).join(" · ");
+  const credit = attribution(job);
   return (
     // An article, not a region: these aren't the shortlist, and a screen reader's landmarks list
     // shouldn't carry a hundred of them.
@@ -188,16 +189,16 @@ function PreviewCard({
           <p className="mb-1.5 flex flex-wrap items-center gap-2">
             <span className={cn("inline-flex rounded-none px-2.5 py-0.5 text-[12px] font-semibold", LABEL_STYLE[label.id])}>{label.label}</span>
             {/* SRCH-32: Adzuna's terms ask for its name, linked, on every job it found, at least
-                116×23 px. The link is Adzuna's home page; the job's own tracked link is never
-                requested by WERA. */}
-            {job.via === "adzuna" ? (
+                116×23 px; Himalayas' (22 Nov) for a visible link to the job on Himalayas. WERA never
+                follows Adzuna's tracked link to the job itself. */}
+            {credit ? (
               <a
-                href="https://www.adzuna.co.uk"
+                href={credit.href}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex h-[23px] min-w-[116px] items-center justify-center rounded-none border border-ink-2/30 px-2.5 text-[12px] font-semibold text-ink hover:text-forest-700"
               >
-                Jobs by Adzuna
+                {credit.label}
               </a>
             ) : null}
           </p>

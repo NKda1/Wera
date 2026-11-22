@@ -74,6 +74,12 @@ def isolated(tmp_path, monkeypatch) -> Iterator[None]:
     from wera_agent.nodes import prefilter
 
     monkeypatch.setattr(prefilter, "_cached", {"hash": prefilter.HashEmbedder(), "fast": prefilter.HashEmbedder()})
+    # Every job API starts unreviewed, whatever config/wera.yaml says (22 Nov): the user's own
+    # review dates there would otherwise switch APIs on in tests that mock only the ones they test —
+    # Arbeitnow and The Muse need no key, so nothing else would stop a real call. A test that wants
+    # an API asked reviews it itself (the `reviewed` fixtures).
+    for feed_id, cfg in list(wera().feeds.items()):
+        monkeypatch.setitem(wera().feeds, feed_id, cfg.model_copy(update={"terms_reviewed_on": None}))
     get_settings.cache_clear()
     reset_caches()
     clock.freeze()

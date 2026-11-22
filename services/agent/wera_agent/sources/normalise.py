@@ -412,7 +412,7 @@ def from_card(
 # The job APIs' tracked links (SRCH-32): Adzuna's `redirect_url` on any of its country sites, and
 # Careerjet's `jobviewtrack.com`. A click there is one an advertiser pays for, so WERA stores the
 # link for the person to open and never requests it — not to read it, not to check it is still up.
-_TRACKED = re.compile(r"(?:^|\.)(?:adzuna\.[a-z.]+|careerjet\.[a-z.]+|jobviewtrack\.com)$")
+_TRACKED = re.compile(r"(?:^|\.)(?:adzuna\.[a-z.]+|careerjet\.[a-z.]+|jobviewtrack\.com|jooble\.[a-z.]+)$")
 
 
 def is_tracked_link(url: str | None) -> bool:

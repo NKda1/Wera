@@ -255,9 +255,17 @@ def _from_feed(target: Target, redis: Any | None) -> tuple[dict[str, Any] | None
 
 def _from_api(job: Job, card: dict[str, Any], target: Target) -> None:
     """What a job API knows that a page doesn't say plainly: who found it, the salary as fields,
-    and (ReliefWeb, SRCH-35) that the employer is an international organisation."""
+    (ReliefWeb, SRCH-35) that the employer is an international organisation, and (Himalayas,
+    22 Nov) the job's page there for its label, and the country a remote job is open to."""
     if target.via:
         job.via = target.via
+    if card.get("viaUrl"):
+        job.via_url = str(card["viaUrl"])
+    if "country" in card:
+        # A card that says where it is open: the country asked, or none for a job open anywhere.
+        # "Remote (United Kingdom, Netherlands)" names no city.
+        city = None if card.get("remote") == "remote" else job.location.city
+        job.location = job.location.model_copy(update={"city": city, "country": card["country"] or None})
     if job.salary is None and isinstance(card.get("salary"), dict):
         with contextlib.suppress(ValueError):
             job.salary = Salary(**card["salary"])

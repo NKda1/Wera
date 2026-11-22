@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     # SRCH-35: ReliefWeb's approved `appname`, requested from apidoc.reliefweb.int. Not a secret
     # (it travels in every URL), but nothing is asked without one: ReliefWeb refuses it with a 403.
     reliefweb_appname: str | None = None
+    # SRCH-31 (22 Nov): Himalayas' remote jobs, a `Bearer` key from himalayas.app/api. Sent from
+    # this server only, as its terms require; never to the browser.
+    himalayas_api_key: SecretStr | None = None
+    # SRCH-31 (22 Nov): The Muse's key is optional — without one its public API still answers, at a
+    # lower hourly limit. Sent as `api_key`, never part of a shared answer's key.
+    themuse_api_key: SecretStr | None = None
+    # SRCH-32 (22 Nov): Jooble's key, which goes in the request's path (`/api/<key>`).
+    jooble_api_key: SecretStr | None = None
     # Careerjet also wants a Referer: the site its searches are made from. WERA's own web app here;
     # the public address once hosted ("Undeclared referrer" without one, 13 Nov).
     careerjet_referer: str = "http://localhost:3000"

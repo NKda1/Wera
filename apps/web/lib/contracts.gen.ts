@@ -830,6 +830,7 @@ export interface Job {
   summary?: JobSummary;
   title: string;
   via?: string;
+  viaUrl?: string;
 }
 export interface Salary {
   currency: string;
@@ -914,6 +915,7 @@ export interface ScoredJob {
   title: string;
   urgency: Urgency;
   via?: string;
+  viaUrl?: string;
 }
 /**
  * MATCH-12: how far a job moved in the order, and why. Never part of `fit.total`.

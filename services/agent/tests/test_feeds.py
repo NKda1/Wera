@@ -32,6 +32,8 @@ FIXTURES = Path(__file__).parent / "fixtures" / "feeds"
 NOW = parse_ms("2026-11-13T12:00:00Z")
 UK = feeds.FeedQuery("Graduate Software Engineer", "Software Engineer", "graduate", "London", "gb")
 US = feeds.FeedQuery("Graduate Software Engineer", "Software Engineer", "graduate", None, "us")
+# The APIs a test of the others must leave unreviewed: with no key to miss, they would be asked.
+KEYLESS = {"arbeitnow", "themuse"}
 PERSON = feeds.Person(ip="203.0.113.7", user_agent="Mozilla/5.0 (test)")
 
 
@@ -58,8 +60,9 @@ def keys(outbound, monkeypatch):
 
 @pytest.fixture
 def reviewed(monkeypatch):
-    """Every API's terms reviewed, as config/wera.yaml would say once they are."""
-    for feed_id in feeds.FEEDS:
+    """Every API's terms reviewed, as config/wera.yaml would say once they are — but the two that
+    need no key (Arbeitnow, The Muse, 22 Nov), whose own tests are in test_more_feeds.py."""
+    for feed_id in feeds.FEEDS.keys() - KEYLESS:
         monkeypatch.setitem(wera().feeds, feed_id, FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=1))
 
 
@@ -514,7 +517,7 @@ class TestOneSearchPerQuestion:
     def test_graduate_and_junior_are_one_reed_search_but_two_adzuna_ones(
         self, keys, reviewed, redis, store, respx_mock, monkeypatch
     ):
-        for feed_id in feeds.FEEDS:
+        for feed_id in feeds.FEEDS.keys() - KEYLESS:
             monkeypatch.setitem(wera().feeds, feed_id, FeedConfig(terms_reviewed_on=date(2026, 11, 13), max_searches=3))
         reed_route = respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
         adzuna_route = respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(

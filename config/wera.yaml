@@ -214,6 +214,11 @@ guard:
     adzuna: 1440
     careerjet: 1440
     reliefweb: 1440
+    himalayas: 1440 # 22 Nov: Himalayas refreshes its jobs daily, and its terms ask to cache where you can
+    # 22 Nov: Arbeitnow's pages are read once a day this way — the day's first search pays, the rest are free.
+    arbeitnow: 1440
+    themuse: 1440
+    jooble: 1440
   lock_seconds: 15 # one caller asks; the others wait up to this for its answer
   breaker:
     failures: 3 # inside window_seconds, each after its own retries; a final 429 opens it at once
@@ -225,6 +230,11 @@ guard:
     # so each has a day's ceiling too. Set to your accounts' own limits; these are cautious guesses.
     adzuna: 200
     careerjet: 300
+    himalayas: 2000 # 22 Nov: its own limit is 10,000 a day (and 60 a minute)
+    # 22 Nov, cautious guesses: none of the three states a daily limit on its API page.
+    arbeitnow: 200
+    themuse: 300
+    jooble: 300
   stop_at: 0.8
 
 # SRCH-31/32: the job APIs, asked before Serper's first tier (they are "tier 0"). Keys go in
@@ -269,6 +279,52 @@ feeds:
     enabled: true
     terms_reviewed_on: null
     max_searches: 3
+  # SRCH-31 (22 Nov): Himalayas, remote jobs with each posting's full text, one search a role and
+  # ticked country (Entry-level when every level wanted is early-career); skipped for a profile
+  # that said no to remote work. Needs HIMALAYAS_API_KEY. Its terms (clause 113, read 22 Nov):
+  # commercial use allowed; every Apply uses the job's `applicationLink` unchanged, never an
+  # employer's or an ATS link (a merge keeps it); a visible link to the job on Himalayas or to
+  # himalayas.app (the card's "Jobs by Himalayas"); shown only on sites you operate and never
+  # passed on to other boards, aggregators or Google Jobs (WERA publishes nothing); cache where
+  # you can and remove jobs once they expire (`expiryDate` closes it; the re-check asks its status
+  # endpoint); keys used from your own servers only. https://himalayas.app/api
+  himalayas:
+    enabled: true
+    terms_reviewed_on: 2026-11-22
+    max_searches: 12
+  # SRCH-31 (22 Nov): Arbeitnow, jobs from employers' own job systems in Germany and its neighbours
+  # (and the UK, from arbeitnow.co.uk when GB is ticked), each with its full text. No key and no
+  # search: up to `max_pages` pages of its latest jobs a feed, each kept a day by the guard, matched
+  # here to the plan's titles and the ticked countries (or remote), at most `max_leads` of them.
+  # Terms: none stated on its API page (arbeitnow.com/blog/job-board-api, read 22 Nov) beyond "no
+  # API key"; read them before setting the date.
+  arbeitnow:
+    enabled: true
+    terms_reviewed_on: 2026-11-22
+    max_pages: 10
+    max_leads: 40
+  # SRCH-31 (22 Nov): The Muse, mostly US and strong on entry level, each job's full text. No keyword
+  # search: asked by the role's family (its categories), Entry Level (and Internship), a ticked US
+  # city or "Flexible / Remote", pages 1–2. THEMUSE_API_KEY is optional (it raises the hourly
+  # limit). Terms: not read — themuse.com/developers/api/v2 refused WERA's reader (403) on 22 Nov;
+  # read them, and any attribution they ask for, before setting the date.
+  # Off (22 Nov): every server call to /api/public/jobs, on www. and bare themuse.com, answers 403
+  # from Cloudflare with `cf-mitigated: challenge` — a bot check, which WERA never works around
+  # (SRCH-22, §11.3). Turn it back on once a THEMUSE_API_KEY gets through, or The Muse allows
+  # server-side calls; the adapter (feeds/themuse.py) is built to their documented answer.
+  themuse:
+    enabled: false
+    terms_reviewed_on: 2026-11-22
+    max_searches: 4
+  # SRCH-32 (22 Nov): Jooble, snippets from its country sites behind a tracked jooble.org link that
+  # is never fetched; each lead's original is looked for with Serper, the rest are previews. Needs
+  # JOOBLE_API_KEY (it goes in the request's path). Terms: none stated on jooble.org/api/about; the
+  # site's terms (jooble.org/info/terms) forbid copying its content for republication and automatic
+  # access to the site, and say nothing of the API or attribution. Read both before setting the date.
+  jooble:
+    enabled: true
+    terms_reviewed_on: 2026-11-22
+    max_searches: 12
 
 # SRCH-10: a short-term cache in front of Firecrawl, so a run doesn't pay for the last one's
 # answers again. `known_urls` (SRCH-05) already stops a job being re-scraped; this covers the two
@@ -307,7 +363,10 @@ discovery_max_queries: 8
 # every "score more" — batching below changes *when* a job is paid for, never how many are.
 # 70 since 18 Nov (was 40, about three searches a day): about $0.28 a day at most, inside the
 # weekly budget, which still stops everything first (COST-01).
-max_scored_per_day: 70
+# 100 since 22 Nov (the user): the new job APIs bring more jobs to score, and on 22 Nov a search's
+# 8 read previews joined the list unscored because the day's 70 had run out. About 30 more
+# `fit.score` calls a day, about $0.40 a day at most; the weekly budget still stops first.
+max_scored_per_day: 100
 
 # SRCH-26: best match first, with each ticked country's share; Firecrawl searches when Serper's
 # day is spent. 20 Nov: no per-source ceiling and no agency caps — "one site could actually contain

@@ -3,6 +3,7 @@
 import { ChevronDown, ExternalLink } from "lucide-react";
 import { useId, useState } from "react";
 import {
+  attribution,
   formatAge,
   formatAgo,
   formatClosing,
@@ -67,6 +68,7 @@ export function JobCard({
 }) {
   const [open, setOpen] = useState(false);
   const origin = formatOrigin(job);
+  const credit = attribution(job);
   const detailsId = useId();
   const { fit } = job;
   // MATCH-10: appended rather than replacing anything, and empty for a confirmed job — if every
@@ -105,7 +107,7 @@ export function JobCard({
               a screen reader — the old one was a pale pill after the title that every run wiped.
               The origin stays after the tag has gone: where and when a job was found is still
               worth knowing once it has been read. */}
-          {isNew || origin ? (
+          {isNew || origin || credit ? (
             <p className="mb-1.5 flex flex-wrap items-center gap-2">
               {isNew ? (
                 <span className="rounded-none bg-accent px-2.5 py-0.5 text-[11px] font-bold tracking-wide text-white uppercase">New</span>
@@ -118,16 +120,17 @@ export function JobCard({
                   {job.foundBy ? <> · {formatAgo(job.foundBy.at)}</> : null}
                 </span>
               ) : null}
-              {/* SRCH-32: Adzuna's terms ask for its name, linked, on every job it found, at
-                  least 116×23 px. WERA never follows Adzuna's tracked link to the job itself. */}
-              {job.via === "adzuna" ? (
+              {/* SRCH-32: Adzuna's terms ask for its name, linked, on every job it found, at least
+                  116×23 px; Himalayas' (22 Nov) for a visible link to the job on Himalayas. WERA never
+                  follows Adzuna's tracked link to the job itself. */}
+              {credit ? (
                 <a
-                  href="https://www.adzuna.co.uk"
+                  href={credit.href}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex h-[23px] min-w-[116px] items-center justify-center rounded-none border border-ink-2/30 px-2.5 text-[12px] font-semibold text-ink hover:text-forest-700"
                 >
-                  Jobs by Adzuna
+                  {credit.label}
                 </a>
               ) : null}
             </p>

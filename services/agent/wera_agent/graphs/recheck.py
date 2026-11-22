@@ -142,12 +142,36 @@ def _by_http(now: int, max_checks: int, summary: dict[str, int]) -> None:
     verdicts: list[tuple[str, str]] = []
     with browser.session() as fetch_html:
         for job in candidates:
-            verdicts.append((job.id, live.check(job.apply_url, fetch_html=fetch_html)))
+            verdict = _api_verdict(job) or live.check(job.apply_url, fetch_html=fetch_html)
+            verdicts.append((job.id, verdict))
             if len(verdicts) >= HTTP_BATCH:
                 _apply(now, verdicts, summary)
                 verdicts = []
     if verdicts:
         _apply(now, verdicts, summary)
+
+
+def _api_verdict(job: Any) -> str | None:
+    """A job API's own answer on whether its job is open, for the APIs that have one; None for
+    every other job. Himalayas (22 Nov): its status endpoint, 410 closed and 200 open, through
+    the guard — its terms ask that expired jobs are removed, and the job's page is never fetched,
+    not even when the endpoint can't say."""
+    if job.via != "himalayas":
+        return None
+    from ..sources.feeds import himalayas
+
+    return himalayas.status(job.via_url, _guard("himalayas"))
+
+
+def _guard(provider: str) -> Any:
+    """The provider's guard on the shared Redis; one that does nothing when Redis won't answer."""
+    from ..sources.provider_guard import Guard
+    from ..sources.targets import connect
+
+    try:
+        return Guard(connect(), provider)
+    except Exception:  # noqa: BLE001 — without Redis the guard is a no-op, not a failure
+        return Guard(None, provider)
 
 
 def _apply(now: int, verdicts: list[tuple[str, str]], summary: dict[str, int]) -> None:
@@ -222,7 +246,9 @@ def check_one(job_id: str, *, force: bool = False) -> str:
         return "skipped"
     if not force and job.last_checked_at and now - parse_ms(job.last_checked_at) < RECHECK_ONE_AFTER_HOURS * 3_600_000:
         return "skipped"
-    if job.ats is not None:
+    if (asked := _api_verdict(job)) is not None:
+        verdict = asked
+    elif job.ats is not None:
         board = _board_of(job.ats)
         result = ats_feeds.fetch_boards([board], limit=1)
         if board in result.answered:

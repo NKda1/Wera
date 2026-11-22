@@ -492,6 +492,10 @@ class FeedConfig(BaseModel):
     # Searches one search may send to it, one per title (and city). There is no cap on what it may
     # queue (20 Nov): every API's leads join one pool ranked by CV similarity, read best first.
     max_searches: int = 3
+    # A feed with no search (Arbeitnow, 22 Nov): the pages of its latest jobs read, and how many of
+    # the jobs that match the plan become leads. Unused by the APIs that search.
+    max_pages: int = 10
+    max_leads: int = 40
 
 
 class WeraConfig(BaseModel):
@@ -518,7 +522,7 @@ class WeraConfig(BaseModel):
     # behind a job API's snippet lead, an aggregator's copy, or a preview a short search reads.
     # One allowance, shared by all three, on top of `max_serper_queries` and inside the day's.
     lookups_per_search: int = 15
-    max_scored_per_day: int = 70
+    max_scored_per_day: int = 100
     # Jobs scored at once (`intake.judge`); 1 on SQLite whatever this says.
     scoring_workers: int = 3
     # SRCH-26: 8–12 jobs a search. Replaces MATCH-05's two batches of eight, which scored sixteen

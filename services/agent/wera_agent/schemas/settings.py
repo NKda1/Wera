@@ -134,7 +134,7 @@ class SettingsResponse(Settings):
     # a control that deletes applications must not be one a request can switch on.
     allow_clear_jobs: bool = False
     # MATCH-05: the jobs `daily_score_limit` allows in 24 hours, from `config/wera.yaml`.
-    max_scored_per_day: int = 70
+    max_scored_per_day: int = 100
 
 
 def _is_url(v: str) -> bool:

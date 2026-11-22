@@ -1,11 +1,15 @@
 """The job APIs (SRCH-31, SRCH-32): asked before Serper, each through the provider guard.
 
-Four official APIs, in two kinds:
+Official APIs, in two kinds:
 
-* **Full text** — Reed (UK) and USAJOBS (US federal). A posting is read from the API itself
-  (Reed's details call, or USAJOBS' own payload), never by fetching its page, and checked like
-  any other (SRCH-23). Queued as `Target(source="feed")`.
-* **Snippet only** — Adzuna and Careerjet. They give a title, a company and a few lines, behind a
+* **Full text** — Reed (UK), USAJOBS (US federal), ReliefWeb (international organisations),
+  Himalayas (remote jobs), Arbeitnow (Europe: a feed of the latest jobs with no search, read once
+  a day and matched here) and The Muse (US, entry level), the last three from 22 Nov. A posting is
+  read from the API itself (Reed's details call, or the others' own payload), never by fetching
+  its page, and checked like any other (SRCH-23).
+  Queued as `Target(source="feed")`. They come first in `FEEDS`, so the snippet APIs' lookups are
+  decided once every full-text posting is in.
+* **Snippet only** — Adzuna, Careerjet and Jooble (22 Nov). They give a title, a company and a few lines, behind a
   tracked link on a pay-per-click network. **That link is never fetched**: it would register as a
   click someone paid for. Instead each lead's original posting is looked for with one Serper
   search (`resource.py`), and what is queued is that page, with `via` saying who found it.
@@ -13,7 +17,8 @@ Four official APIs, in two kinds:
 Each API only runs where it has jobs (`countries`), with its key set, and with
 `terms_reviewed_on` set in `config/wera.yaml` — the same gate as a board in sites.yaml. Careerjet
 also needs the person searching: its terms require their IP address and browser on every call
-(`Person`), so a scheduled run, which has no person, skips it and says so.
+(`Person`), so a scheduled run, which has no person, skips it and says so. An API that only has
+remote jobs (Himalayas) is skipped for a profile that said no to remote work.
 
 The queries come from the plan, never the CV: the titles the Strategist would search for, at the
 person's level and in their city. No CV text is ever sent to any of them.
@@ -22,7 +27,7 @@ person's level and in their city. No CV text is ever sent to any of them.
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import logfire
@@ -32,6 +37,9 @@ from ...domain.places import COUNTRIES
 from ...http import request
 from ...settings import get_settings
 from ..provider_guard import Guard, answer_key
+
+if TYPE_CHECKING:
+    from ...schemas.profile import SearchProfile
 
 # Real-time callers wait this long for an API at most (the blueprint's "~1.2 s" is for a search a
 # person is watching; WERA's searches stream, so a slower API delays its own postings only).
@@ -50,6 +58,8 @@ class Feed:
     countries: frozenset[str]
     full_text: bool
     needs_person: bool = False
+    # Only remote jobs: no use to someone who said they don't want remote work.
+    remote_only: bool = False
 
 
 # Adzuna's countries, from its API; Careerjet's are the locales WERA maps a country to.
@@ -62,13 +72,34 @@ CAREERJET_LOCALES = {
     "es": "es_ES", "it": "it_IT", "nl": "nl_NL", "pl": "pl_PL", "se": "sv_SE", "pt": "pt_PT",
 }  # fmt: skip
 
+# Jooble's country sites (22 Nov): its API page names none, so these are the ones WERA's places
+# know that Jooble runs a site for (`<cc>.jooble.org`, `jooble.org` for the US).
+JOOBLE_COUNTRIES = frozenset(
+    ["gb", "us", "ca", "au", "nz", "ie", "in", "za", "sg", "de", "at", "ch", "fr", "be", "nl", "es", "it", "pl",
+     "se", "pt", "dk", "no", "fi", "cz", "hu", "ro", "gr", "mx", "br", "ae", "tr"]
+)  # fmt: skip
+# Arbeitnow's jobs come from employers in Germany and its neighbours, and the UK through its .co.uk
+# feed (22 Nov); a remote one may be taken from anywhere (`arbeitnow.matches`).
+ARBEITNOW_COUNTRIES = frozenset({"de", "nl", "at", "ch", "gb"})
+
+EVERYWHERE = frozenset(c.lower() for c in COUNTRIES)
+
+# Full text first (22 Nov), then the snippet APIs.
 FEEDS: dict[str, Feed] = {
     "reed": Feed("reed", "Reed", frozenset({"gb"}), full_text=True),
     "usajobs": Feed("usajobs", "USAJOBS", frozenset({"us"}), full_text=True),
+    # SRCH-35: UN agencies, international organisations and NGOs, everywhere.
+    "reliefweb": Feed("reliefweb", "ReliefWeb", EVERYWHERE, full_text=True),
+    # SRCH-31 (22 Nov): remote jobs open to people in the country asked, or anywhere.
+    "himalayas": Feed("himalayas", "Himalayas", EVERYWHERE, full_text=True, remote_only=True),
+    # SRCH-31 (22 Nov): no search — the day's latest jobs, matched to the plan here.
+    "arbeitnow": Feed("arbeitnow", "Arbeitnow", ARBEITNOW_COUNTRIES, full_text=True),
+    # SRCH-31 (22 Nov): US entry-level jobs, asked by category and city.
+    "themuse": Feed("themuse", "The Muse", frozenset({"us"}), full_text=True),
     "adzuna": Feed("adzuna", "Adzuna", ADZUNA_COUNTRIES, full_text=False),
     "careerjet": Feed("careerjet", "Careerjet", frozenset(CAREERJET_LOCALES), full_text=False, needs_person=True),
-    # SRCH-35: UN agencies, international organisations and NGOs, everywhere.
-    "reliefweb": Feed("reliefweb", "ReliefWeb", frozenset(c.lower() for c in COUNTRIES), full_text=True),
+    # SRCH-32 (22 Nov): snippets behind a tracked jooble.org link, never fetched.
+    "jooble": Feed("jooble", "Jooble", JOOBLE_COUNTRIES, full_text=False),
 }
 
 
@@ -119,13 +150,19 @@ def missing_key(feed_id: str) -> str | None:
         "adzuna": {"ADZUNA_APP_ID": s.adzuna_app_id, "ADZUNA_APP_KEY": s.adzuna_app_key},
         "careerjet": {"CAREERJET_API_KEY": s.careerjet_api_key},
         "reliefweb": {"RELIEFWEB_APPNAME": s.reliefweb_appname},
+        "himalayas": {"HIMALAYAS_API_KEY": s.himalayas_api_key},
+        "jooble": {"JOOBLE_API_KEY": s.jooble_api_key},
+        # No key at all (Arbeitnow), or an optional one (The Muse's raises its hourly limit).
+        "arbeitnow": {},
+        "themuse": {},
     }[feed_id]
     names = [name for name, value in needs.items() if unset(value)]
     return ", ".join(names) or None
 
 
-def skipped(feed_id: str, *, countries: set[str], person: Person | None) -> str | None:
-    """Why this API won't be asked in this search, or None when it will."""
+def skipped(feed_id: str, *, countries: set[str], person: Person | None, profile: "SearchProfile | None" = None) -> str | None:
+    """Why this API won't be asked in this search, or None when it will. Without a profile, an
+    API is judged on everything but the person's own wishes (the place picker asks that way)."""
     feed, cfg = FEEDS[feed_id], config(feed_id)
     if not cfg.enabled:
         return "turned off in config/wera.yaml"
@@ -137,6 +174,8 @@ def skipped(feed_id: str, *, countries: set[str], person: Person | None) -> str 
         return f"{keys} not set in .env.local"
     if feed.needs_person and person is None:
         return "it needs the person searching, and a scheduled run has none"
+    if feed.remote_only and profile is not None and profile.remote == "no_remote":
+        return "you said you don't want remote work"
     return None
 
 
@@ -183,17 +222,21 @@ def call(
     *,
     params: dict[str, Any],
     key_params: dict[str, Any] | None = None,
+    key_url: str | None = None,
     method: str = "GET",
     **kwargs: Any,
 ) -> tuple[Any | None, str]:
     """One call to an API, through its guard: a shared answer when there is one, else one call for
     everyone asking, counted on the day's meter; a 429 or repeated failure opens the breaker.
     Returns the JSON (or None) and how it was answered. `key_params`, when given, is what the
-    answer is shared under instead of `params` — the question without who asked it. A POST's
-    `json` body is part of the question, so it is part of the key."""
+    answer is shared under instead of `params` — the question without who asked it; `key_url` the
+    same for a URL that carries a key in its path (Jooble's). A POST's `json` body is part of the
+    question, so it is part of the key."""
     if seconds := guard.open_for():
         return None, f"breaker open {seconds}s"
-    key = answer_key(feed_id, url, sorted((key_params if key_params is not None else params).items()), kwargs.get("json"))
+    key = answer_key(
+        feed_id, key_url or url, sorted((key_params if key_params is not None else params).items()), kwargs.get("json")
+    )
 
     def fetch() -> Any | None:
         try:

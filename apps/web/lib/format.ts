@@ -83,7 +83,22 @@ export const VIA: Record<string, string> = {
   adzuna: "Adzuna",
   careerjet: "Careerjet",
   reliefweb: "ReliefWeb",
+  himalayas: "Himalayas",
+  // 22 Nov: Arbeitnow and The Muse (full text), Jooble (snippets behind a link never fetched).
+  arbeitnow: "Arbeitnow",
+  themuse: "The Muse",
+  jooble: "Jooble",
 };
+
+/** The label a job API's terms ask for on every job it found, linked: Adzuna's to its home page
+ *  (SRCH-32), Himalayas' to the job's own page there, or its home page without one (22 Nov). The
+ *  job's Apply is untouched by this — for Himalayas it is the `applicationLink`, as their terms
+ *  require. Null for a job no such API found. */
+export function attribution(job: Pick<Job, "via" | "viaUrl">): { label: string; href: string } | null {
+  if (job.via === "adzuna") return { label: "Jobs by Adzuna", href: "https://www.adzuna.co.uk" };
+  if (job.via === "himalayas") return { label: "Jobs by Himalayas", href: job.viaUrl || "https://himalayas.app" };
+  return null;
+}
 
 /** Which run found a job, to the minute: "Search 17 Nov, 08:54". The minute, not just the day,
  *  because two searches on one day are two different searches (17 Nov). */

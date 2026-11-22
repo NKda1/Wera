@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { displayCase, employerLine, formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, formatTime, isNew, allowanceParts, previewLabel, previewsLeft, previewSource, sortPreviews, upskillAnchor } from "./format";
+import { attribution, displayCase, employerLine, formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, formatTime, isNew, allowanceParts, previewLabel, previewsLeft, previewSource, sortPreviews, upskillAnchor } from "./format";
 
 describe("new jobs (SRCH-25)", () => {
   const foundBy = { runId: "run-7", channel: "board_search" as const, at: "2026-11-11T08:00:00Z" };
@@ -26,6 +26,23 @@ describe("new jobs (SRCH-25)", () => {
   it("names the job API that found it (SRCH-31)", () => {
     expect(formatOrigin({ foundBy, via: "reed" })).toBe(`Search 11 Nov, ${at} · via Reed`);
     expect(formatOrigin({ foundBy, via: "adzuna" })).toBe(`Search 11 Nov, ${at} · via Adzuna`);
+    expect(formatOrigin({ foundBy, via: "himalayas" })).toBe(`Search 11 Nov, ${at} · via Himalayas`);
+    expect(formatOrigin({ foundBy, via: "arbeitnow" })).toBe(`Search 11 Nov, ${at} · via Arbeitnow`);
+    expect(formatOrigin({ foundBy, via: "themuse" })).toBe(`Search 11 Nov, ${at} · via The Muse`);
+    expect(formatOrigin({ foundBy, via: "jooble" })).toBe(`Search 11 Nov, ${at} · via Jooble`);
+  });
+
+  // Their terms: a visible link to the job on Himalayas (or himalayas.app), and Adzuna's name linked.
+  it("credits Himalayas with a link to the job's page there, and Adzuna with its home page", () => {
+    const page = "https://himalayas.app/companies/acme/jobs/junior-analyst";
+    expect(attribution({ via: "himalayas", viaUrl: page })).toEqual({ label: "Jobs by Himalayas", href: page });
+    expect(attribution({ via: "himalayas" })).toEqual({ label: "Jobs by Himalayas", href: "https://himalayas.app" });
+    expect(attribution({ via: "adzuna" })).toEqual({ label: "Jobs by Adzuna", href: "https://www.adzuna.co.uk" });
+    expect(attribution({ via: "reed" })).toBeNull();
+    // 22 Nov: no attribution rule found for these three (their terms aren't reviewed yet).
+    expect(attribution({ via: "jooble" })).toBeNull();
+    expect(attribution({ via: "themuse" })).toBeNull();
+    expect(attribution({})).toBeNull();
   });
 });
 

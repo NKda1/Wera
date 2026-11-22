@@ -32,6 +32,7 @@ scored on its summary, and a preview read counted as found by this search (`Stor
 """
 
 import contextvars
+import re
 import threading
 import time
 from collections import Counter
@@ -346,7 +347,7 @@ def _run(
     # SRCH-26: best match first, each ticked country's share — and, since 20 Nov, no share by site.
     balance = targets.Balance(sorted(countries), per_run=surface_max)
 
-    if any(feeds.skipped(f, countries=countries, person=person) is None for f in feeds.FEEDS):
+    if any(feeds.skipped(f, countries=countries, person=person, profile=profile) is None for f in feeds.FEEDS):
         tiers = [0, *tiers]
     pending = [t for t in tiers if mode == "search" or t not in queue.tiers_sent()]
     # SRCH-32 (22 Nov): the search's one lookup allowance — the job APIs' snippet leads, the
@@ -1024,8 +1025,16 @@ def _feeds_note(asked: "strategist.FeedDiscovery", previewed: int = 0) -> str:
     used = {f: st for f, st in asked.by_feed.items() if "skipped" not in st}
     searches = sum(int(st.get("searches", 0)) for st in used.values())  # type: ignore[call-overload]
     leads = sum(int(st.get("leads", 0)) for st in used.values())  # type: ignore[call-overload]
-    each = ", ".join(f"{feeds.FEEDS[f].name} {st['searches']}" for f, st in used.items() if st.get("searches"))
-    left = [feeds.FEEDS[f].name for f, st in asked.by_feed.items() if st.get("skipped")]
+    # 22 Nov: a feed with no search (Arbeitnow) says what it matched of what it read instead.
+    each = ", ".join(
+        f"{feeds.FEEDS[f].name} {st['leads']:,} matched of {st['read']:,} read"
+        if "read" in st
+        else f"{feeds.FEEDS[f].name} {st['searches']}"
+        for f, st in used.items()
+        if st.get("searches")
+    )
+    # 22 Nov: and why, in a few words: "Himalayas (its terms aren't reviewed yet)".
+    left = [f"{feeds.FEEDS[f].name} ({_short(str(st['skipped']))})" for f, st in asked.by_feed.items() if st.get("skipped")]
     # 22 Nov: links and reads, not jobs — "683 postings, 35 queued" was read as jobs found.
     text = f"Job APIs: {_count(searches, 'search', 'searches')}, {_count(leads, 'link')} to postings, {asked.queued} to read"
     if each:
@@ -1038,6 +1047,11 @@ def _feeds_note(asked: "strategist.FeedDiscovery", previewed: int = 0) -> str:
     if left:
         text += f" · not asked: {', '.join(left)}"
     return text
+
+
+def _short(why: str) -> str:
+    """A skip reason without its pointer to the file that sets it."""
+    return re.sub(r"\s*\([^()]*config/wera\.yaml\)$", "", why)
 
 
 def _search_note(

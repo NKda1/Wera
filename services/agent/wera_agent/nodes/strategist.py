@@ -795,9 +795,18 @@ def _count(n: int, noun: str) -> str:
     return f"{n} {noun}" + ("" if n == 1 else "s")
 
 
+def _matched(matched: int, read: int) -> str:
+    """Arbeitnow's answer, a feed matched here: "40 matched of 1,000 read" (22 Nov)."""
+    return f"{matched:,} matched of {read:,} read"
+
+
 def _asked_where(feed_id: str, query: feeds.FeedQuery) -> str:
     if feed_id == "reliefweb":
         return "every country"
+    if feed_id == "himalayas":
+        return f"remote from {places.country_name(query.country)}"
+    if feed_id == "themuse" and not query.city:
+        return "the US, remote"
     return query.city or places.country_name(query.country)
 
 
@@ -1224,9 +1233,10 @@ def discover_feeds(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    from ..domain import role_family
     from ..domain.filters import RECENCY_MS
     from ..http import is_denied
-    from ..sources.feeds import adzuna, careerjet, reed, reliefweb, usajobs
+    from ..sources.feeds import adzuna, arbeitnow, careerjet, himalayas, jooble, reed, reliefweb, themuse, usajobs
     from ..sources.feeds import resource as finding
     from ..sources.provider_guard import Guard
 
@@ -1245,7 +1255,7 @@ def discover_feeds(
 
     asks: list[tuple[str, feeds.FeedQuery]] = []
     for feed_id, feed in feeds.FEEDS.items():
-        why = feeds.skipped(feed_id, countries=set(countries), person=person)
+        why = feeds.skipped(feed_id, countries=set(countries), person=person, profile=profile)
         if why is None and not feed.full_text and resource is None:
             why = "no Serper to find the original postings with"
         out.by_feed[feed_id] = {"skipped": why} if why else {"searches": 0, "leads": 0, "queued": 0, "how": Counter()}
@@ -1259,21 +1269,54 @@ def discover_feeds(
                 asked_as = (q.role if feed_id == "usajobs" or (feed_id == "reed" and graduate and q.level) else q.title, q.level if feed_id == "adzuna" else None, q.city, q.country)  # fmt: skip
                 if feed_id == "reliefweb":
                     asked_as = (q.role,)  # one search a role: its search is the whole world (SRCH-35)
+                elif feed_id == "himalayas":
+                    asked_as = (q.role, q.country)  # remote jobs: a country, never a city (22 Nov)
+                elif feed_id == "arbeitnow":
+                    asked_as = ()  # no search: one read of the day's feed, matched to every title (22 Nov)
+                elif feed_id == "themuse":
+                    # No keyword search: asked by the role's family and the place (22 Nov). A role in
+                    # no family has nothing to be asked by.
+                    if not themuse.categories_for(q.role):
+                        continue
+                    remote = profile.remote if profile else "any"
+                    asked_as = (role_family.family_of(q.role), themuse.location_for(q.city, remote=remote))
+                elif feed_id == "jooble":
+                    asked_as = (q.title, q.city, q.country)
                 if q.country in feed.countries and asked_as not in sent:
                     sent.add(asked_as)
                     mine.append(q)
             asks += [(feed_id, q) for q in mine[: feeds.config(feed_id).max_searches]]
 
+    early = bool(levels) and levels <= {"intern", "graduate", "junior", "entry"}
+    remote_wish = profile.remote if profile else "any"
+
     def ask(feed_id: str, query: feeds.FeedQuery) -> tuple[list[feeds.Lead], str]:
         guard = Guard(redis, feed_id)
+        if feed_id == "arbeitnow":
+            cfg = feeds.config("arbeitnow")
+            got = arbeitnow.read(
+                guard,
+                targets=titles,  # MATCH-01's word rule leaves level words out: "Data Analyst (m/w/d)" matches
+                countries=[c for c in countries if c in feeds.FEEDS["arbeitnow"].countries],
+                remote_ok=remote_wish != "no_remote",
+                max_pages=cfg.max_pages,
+                max_leads=cfg.max_leads,
+            )
+            out.by_feed["arbeitnow"]["read"] = got.read
+            return got.leads, got.how
+        if feed_id == "themuse":
+            return themuse.search(query, guard, interns="intern" in levels, remote=remote_wish)
+        if feed_id == "jooble":
+            return jooble.search(query, guard)
         if feed_id == "reed":
             return reed.search(query, guard, graduate=bool(levels & {"graduate", "intern", "entry"}))
         if feed_id == "usajobs":
             return usajobs.search(query, guard, pathways=bool(levels & {"graduate", "intern"}))
         if feed_id == "adzuna":
             return adzuna.search(query, guard)
+        if feed_id == "himalayas":
+            return himalayas.search(query, guard, early=early)
         if feed_id == "reliefweb":
-            early = bool(levels) and levels <= {"intern", "graduate", "junior", "entry"}
             # Always with international organisations' posts anywhere (SRCH-35, 17 Nov).
             return reliefweb.search(query, guard, countries=countries, international=True, early=early)
         return careerjet.search(query, guard, person=person)  # type: ignore[arg-type]
@@ -1289,10 +1332,15 @@ def discover_feeds(
                 i = futures[future]
                 results[i] = future.result()
                 feed_id, query = asks[i]
+                said = (
+                    f"Arbeitnow: {_matched(len(results[i][0]), out.by_feed['arbeitnow'].get('read', 0))}"  # type: ignore[arg-type]
+                    if feed_id == "arbeitnow"
+                    else f"{feeds.FEEDS[feed_id].name} · {query.title} in {_asked_where(feed_id, query)}: "
+                    f"{_count(len(results[i][0]), 'posting')}"
+                )
                 tell(
                     ANSWERS_SHARE * len(results) / len(asks),
-                    f"{feeds.FEEDS[feed_id].name} · {query.title} in {_asked_where(feed_id, query)}: "
-                    f"{_count(len(results[i][0]), 'posting')} ({len(results)} of {len(asks)})",
+                    f"{said} ({len(results)} of {len(asks)})",
                     len(results),
                     len(asks),
                 )
@@ -1435,8 +1483,7 @@ def discover_feeds(
                     lead.date,
                     via=feed_id,
                     payload=payload,
-                    # ReliefWeb's one search covers every country, so its postings belong to none.
-                    country=None if feed_id == "reliefweb" else query.country,
+                    country=_target_country(feed_id, query, lead),
                 )
             )
             stats["queued"] += 1  # type: ignore[operator]
@@ -1463,6 +1510,19 @@ def discover_feeds(
             }
         )
     return out
+
+
+def _target_country(feed_id: str, query: feeds.FeedQuery, lead: feeds.Lead) -> str | None:
+    """The country a queued posting belongs to. ReliefWeb's one search covers every country, so
+    its postings belong to none; a Himalayas job to the country asked when it lists it, and to
+    none when it is open anywhere (22 Nov); an Arbeitnow or The Muse job to the one its card names."""
+    if feed_id == "reliefweb":
+        return None
+    if feed_id in ("himalayas", "arbeitnow", "themuse"):
+        # 22 Nov: the card says where the job is — Arbeitnow's one feed covers every ticked country.
+        card = (lead.payload or {}).get("card") or {}
+        return str(card["country"]).lower() if card.get("country") else None
+    return query.country
 
 
 def _ms(day: str) -> int | None:

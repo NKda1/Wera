@@ -2325,6 +2325,9 @@
         },
         "via": {
           "type": "string"
+        },
+        "viaUrl": {
+          "type": "string"
         }
       },
       "required": [
@@ -3888,6 +3891,9 @@
         },
         "via": {
           "type": "string"
+        },
+        "viaUrl": {
+          "type": "string"
         }
       },
       "required": [
@@ -4211,7 +4217,7 @@
           "type": "string"
         },
         "maxScoredPerDay": {
-          "default": 70,
+          "default": 100,
           "type": "integer"
         },
         "models": {

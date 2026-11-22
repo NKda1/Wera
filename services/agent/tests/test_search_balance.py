@@ -167,8 +167,9 @@ class TestFirecrawlAsTheStandIn:
 
 
 class TestTheSettings:
-    def test_seventy_a_day(self):
-        assert wera().max_scored_per_day == 70
+    def test_a_hundred_a_day(self):
+        # 22 Nov, the user: 70 → 100, as the new job APIs bring more jobs to score (MATCH-05).
+        assert wera().max_scored_per_day == 100
 
     def test_an_api_answer_is_kept_for_a_day_and_serpers_for_six_hours(self, r):
         Guard(r, "adzuna").remember("adzuna:k", {"x": 1})

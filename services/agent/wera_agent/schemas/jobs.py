@@ -226,6 +226,10 @@ class Job(Model):
     # did. Set when the job is first saved and kept through later sightings. A job found via
     # Adzuna carries Adzuna's linked label on its card (their terms).
     via: Opt[str] = None
+    # 22 Nov: the job's own page on the job API that found it, for the attribution its terms ask
+    # for — Himalayas' "Jobs by Himalayas", linked to the job there. Shown, never fetched; the
+    # Apply button is `apply_url`, which for Himalayas is its `applicationLink`, unchanged.
+    via_url: Opt[str] = None
     # 20 Nov: the agency or board that reposted this employer's job ("eFinancialCareers"), when the
     # company WERA shows is the employer its title named ("Investment Banking Analyst - Citi"). With
     # no limit on any one site, one agency's reposts could fill a search; shown under fourteen
