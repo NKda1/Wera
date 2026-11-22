@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { ALLOWED, STATUS_LABEL } from "@/lib/applications";
-import { formatAgo, formatDate, formatLocation } from "@/lib/format";
+import { employerLine, formatAgo, formatDate, formatLocation } from "@/lib/format";
 import type { ApplicationStatus, ApplicationWithJob } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { cn } from "@/lib/ui/cn";
@@ -232,7 +232,7 @@ function TrackerCard({ app, onMove }: { app: ApplicationWithJob; onMove: (to: Ap
         )}
       </h3>
       <p className="text-small text-ink-2">
-        {app.job.company} · {formatLocation(app.job)} · fit {app.job.fitTotal.toFixed(1)}
+        {employerLine(app.job)} · {formatLocation(app.job)} · fit {app.job.fitTotal.toFixed(1)}
       </p>
       <JobLinks job={app.job} className="mt-1" />
 

@@ -13,8 +13,9 @@ const host = (url: string) => {
 /** Where the job lives, at every stage of its pack (17 Nov): the posting itself, named by the site
  *  it is on, and the employer's own careers site when WERA knows it — so the person can open the
  *  post to apply, or check the company, without hunting for either. */
-export function JobLinks({ job, className }: { job: Pick<ApplicationJob, "applyUrl" | "careersUrl" | "company">; className?: string }) {
-  const careers = job.careersUrl && job.careersUrl !== job.applyUrl ? job.careersUrl : undefined;
+export function JobLinks({ job, className }: { job: Pick<ApplicationJob, "applyUrl" | "careersUrl" | "company"> & { employerNamed?: boolean }; className?: string }) {
+  // 22 Nov: a board's post that names no employer has no employer's careers site to offer.
+  const careers = job.careersUrl && job.careersUrl !== job.applyUrl && job.employerNamed !== false ? job.careersUrl : undefined;
   if (!job.applyUrl && !careers) return null;
   const link = "inline-flex items-center gap-1 font-semibold text-forest-700 underline-offset-2 hover:underline";
   return (

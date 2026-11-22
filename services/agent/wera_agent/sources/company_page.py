@@ -183,7 +183,7 @@ def read(job: Job) -> tuple[Page | None, str | None]:
         return None, "Reading company sites is turned off (company_brief.enabled)."
     if get_settings().wera_demo_mode:
         return None, "Demo mode reads no web pages, so this brief is from the post alone."
-    if dedupe.is_agency(job.company):
+    if dedupe.is_agency(job.company) or not job.employer_named:
         return None, f"This post is {job.company}'s, an agency or job board, so the employer isn't named."
     site = site_from_links(job) or site_from_search(job.company)
     if site is None:

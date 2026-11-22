@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { displayCase, formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, formatTime, isNew, upskillAnchor } from "./format";
+import { displayCase, employerLine, formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, formatTime, isNew, allowanceParts, previewLabel, previewsLeft, previewSource, sortPreviews, upskillAnchor } from "./format";
 
 describe("new jobs (SRCH-25)", () => {
   const foundBy = { runId: "run-7", channel: "board_search" as const, at: "2026-11-11T08:00:00Z" };
@@ -67,5 +67,86 @@ describe("displayCase", () => {
     ["McLean Capital", true, "McLean Capital"],
   ])("%s", (raw, brand, shown) => {
     expect(displayCase(raw, { brand })).toBe(shown);
+  });
+});
+
+describe("previews (21 Nov)", () => {
+  it("labels a match by the agent's cut-offs, never as a number", () => {
+    const cut = { strong: 0.8, good: 0.72 };
+    expect(previewLabel(0.91, cut)).toEqual({ id: "strong", label: "Strong match" });
+    expect(previewLabel(0.8, cut).id).toBe("strong");
+    expect(previewLabel(0.75, cut).id).toBe("good");
+    expect(previewLabel(0.5, cut).id).toBe("possible");
+    expect(previewLabel(undefined, cut).id).toBe("possible");
+    expect(previewLabel(0.75, { strong: 0.7, good: 0.6 }).id).toBe("strong");
+  });
+
+  it("names the employer and the job API that found it", () => {
+    expect(previewSource({ company: "Larkspur Payments", via: "adzuna" })).toBe("Larkspur Payments · via Adzuna");
+    expect(previewSource({ company: "Citi", postedBy: "eFinancialCareers", via: "careerjet" })).toBe("Citi (posted by eFinancialCareers) · via Careerjet");
+    expect(previewSource({ company: "eFinancialCareers", via: "reed", employerNamed: false })).toBe("Employer not named (posted by eFinancialCareers) · via Reed");
+  });
+
+  // 22 Nov: a link the hunter found names the site it was on, and an employer only when something
+  // named one — its address (a Greenhouse tenant), its text, or an aggregator's title.
+  it("says where a hunted link was found, and never a board as the employer", () => {
+    const foundOn = { site: "Totaljobs", kind: "posting" as const, employerKnown: false };
+    expect(previewSource({ company: "Totaljobs", foundOn, employerNamed: false })).toBe("Found on Totaljobs");
+    expect(previewSource({ company: "Acmerobotics", foundOn: { ...foundOn, site: "Built In London", employerKnown: true }, employerNamed: true })).toBe(
+      "Acmerobotics · found on Built In London",
+    );
+    expect(previewSource({ company: "Acme Robotics", foundOn: { site: "beBee", kind: "copy", employerKnown: true } })).toBe("Acme Robotics · found on beBee");
+  });
+
+  it("orders best match first, then newest", () => {
+    const jobs = [
+      { id: "a", previewMatch: 0.7, postedAt: "2026-11-20" },
+      { id: "b", previewMatch: 0.9, postedAt: "2026-11-01" },
+      { id: "c", previewMatch: 0.7, postedAt: "2026-11-21" },
+      { id: "d", postedAt: "2026-11-22" },
+    ];
+    expect(sortPreviews(jobs).map((j) => j.id)).toEqual(["b", "c", "a", "d"]);
+  });
+});
+
+describe("previewsLeft (21 Nov)", () => {
+  const listed = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  it("takes dismissed previews off the agent's total", () => {
+    expect(previewsLeft(3, listed, new Set())).toBe(3);
+    expect(previewsLeft(3, listed, new Set(["a"]))).toBe(2);
+    expect(previewsLeft(120, listed, new Set(["a", "b"]))).toBe(118);
+  });
+  it("does not take one off twice once the page has refreshed without it", () => {
+    // `a` was read, the refresh dropped it from both the list and the total.
+    expect(previewsLeft(119, [{ id: "b" }, { id: "c" }], new Set(["a"]))).toBe(119);
+    expect(previewsLeft(2, [{ id: "b" }, { id: "c" }], new Set(["a"]))).toBe(2);
+  });
+  it("never goes below zero", () => {
+    expect(previewsLeft(1, listed, new Set(["a", "b", "c"]))).toBe(0);
+  });
+});
+
+describe("allowanceParts (H4, 21 Nov)", () => {
+  it("says what is left of both allowances", () => {
+    expect(allowanceParts({ googleSearchesLeftToday: 41, googleSearchesPerDay: 80, weeklyCreditCap: 500, creditsThisWeek: 120 })).toEqual([
+      "Google searches left today: 41 of 80",
+      "Firecrawl credits left this week: 380 of 500",
+    ]);
+  });
+  it("leaves out a limit it isn't told, and never shows a negative", () => {
+    expect(allowanceParts({})).toEqual([]);
+    expect(allowanceParts({ googleSearchesLeftToday: 3, googleSearchesPerDay: null })).toEqual([]);
+    expect(allowanceParts({ weeklyCreditCap: 100, creditsThisWeek: 130 })).toEqual(["Firecrawl credits left this week: 0 of 100"]);
+    expect(allowanceParts({ weeklyCreditCap: 100 })).toEqual(["Firecrawl credits left this week: 100 of 100"]);
+  });
+});
+
+describe("employerLine (22 Nov)", () => {
+  it("never shows the board that posted a job as its employer", () => {
+    expect(employerLine({ company: "eFinancialCareers", employerNamed: false })).toBe("Employer not named (via eFinancialCareers)");
+  });
+  it("shows an agency's repost under the employer it names, with the agency beside it", () => {
+    expect(employerLine({ company: "Citi", postedBy: "eFinancialCareers", employerNamed: true })).toBe("Citi (via eFinancialCareers)");
+    expect(employerLine({ company: "Citi" })).toBe("Citi");
   });
 });

@@ -2,6 +2,8 @@
 
 from typing import Literal
 
+from pydantic import computed_field
+
 from .base import Model, Opt
 from .jobs import Location, RemoteMode
 from .pack import Pack
@@ -50,6 +52,16 @@ class ApplicationJob(Model):
     # company itself, beside `apply_url`, which can be a board that carried the post.
     careers_url: Opt[str] = None
     fit_total: float
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def employer_named(self) -> bool:
+        """Whether `company` is the employer or only the board or agency that posted the job
+        (22 Nov; `Job.employer_named`). The review screen, the tracker and the letter's recipient
+        line say "Employer not named" rather than write to eFinancialCareers as if it were hiring."""
+        from ..domain.dedupe import is_intermediary  # dedupe imports the job schemas
+
+        return not is_intermediary(self.company)
 
 
 class DraftProgress(Model):

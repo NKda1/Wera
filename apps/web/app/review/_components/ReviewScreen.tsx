@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { formatAgo, formatDate, formatLocation } from "@/lib/format";
+import { employerLine, formatAgo, formatDate, formatLocation } from "@/lib/format";
 import type { ApplicationWithJob, MasterCV } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -110,7 +110,7 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
           <StatusPill app={app} />
           <h1 className="mt-3 text-[30px] leading-[1.1] font-bold tracking-[-0.02em] sm:text-h1">{app.job.title}</h1>
           <p className="mt-1.5 text-[15px] text-ink-2">
-            {app.job.company} · {formatLocation(app.job)} · fit {app.job.fitTotal.toFixed(1)} ·{" "}
+            {employerLine(app.job)} · {formatLocation(app.job)} · fit {app.job.fitTotal.toFixed(1)} ·{" "}
             {app.status === "drafting" ? "drafting now" : `drafted ${formatAgo(draftedAt)}`}
           </p>
           <JobLinks job={app.job} className="mt-2" />

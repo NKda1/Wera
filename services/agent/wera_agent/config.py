@@ -278,6 +278,27 @@ class SurfaceConfig(BaseModel):
     min_fit: float = 4.0
 
 
+class RotationConfig(BaseModel):
+    """SRCH-20 (21 Nov): how a search asks something new, inside the same Serper cap.
+
+    The plan is made once per CV, profile and model, so every search sent the same 73 queries in
+    the same order, and Serper's answers are shared for hours: on 20 Nov a second search the same
+    day found its postings "already saved". Each planned search now carries other phrasings of
+    itself (`strategist.queries`), and the searches sent are remembered in Redis per pool
+    (`sources.rotation`, `wera:asked:<pool>`). One sent in the last `skip_days` is not sent again:
+    its next page goes instead while its pages keep finding postings, else its next phrasing.
+    """
+
+    # A search asked in this many days is not asked again; after it, Google's page 1 has moved on.
+    skip_days: float = 3
+    # How long a search sent is remembered (the Redis key's TTL), refreshed by every search.
+    memory_days: int = 7
+    # The deepest page of Google's results a search is followed to.
+    max_page: int = 3
+    # Other phrasings each planned search carries, besides its own.
+    variants: int = 6
+
+
 class SourceShareConfig(BaseModel):
     """SRCH-26: how a search's reads are shared between its places.
 
@@ -291,6 +312,26 @@ class SourceShareConfig(BaseModel):
     # Firecrawl's search, asked instead of Serper when Serper's day is spent or it is failing, at
     # most this many a search (each costs `SEARCH_CREDITS`, inside the run's credit cap).
     firecrawl_searches: int = 6
+
+
+class HuntConfig(BaseModel):
+    """SRCH-22 (21 Nov): the hunter, which reads a search's pages of jobs for their postings
+    (`sources.hunt`). On 20 Nov a search's 319 results held 41 postings and 13 results pages, and
+    reading 8 of those over plain HTTP, 15 links each, found nothing: 7 were drawn by JavaScript,
+    5 refused, 1 robots.txt disallowed. These are the hunter's bounds, all per search."""
+
+    # Results and category pages read for their links (was 8, `LISTINGS_PER_RUN`).
+    listings_per_search: int = 40
+    # Posting links taken from one listing, its next pages included (was 15).
+    links_per_listing: int = 50
+    # "Next page" links followed from a listing, after the listing itself.
+    next_pages: int = 2
+    # Listings rendered by Firecrawl (`formats: links`, 1 credit each) because plain HTTP got a
+    # 200 with no posting links on it: a JavaScript shell. Inside the run's credit cap as well.
+    firecrawl_per_search: int = 30
+    # Pages read at once (H4). Each host's pages are still read one after another, so a refusal
+    # stops that host before a second request goes to it.
+    workers: int = 4
 
 
 class UpskillsConfig(BaseModel):
@@ -473,6 +514,10 @@ class WeraConfig(BaseModel):
     discovery_max_queries: int = 8
     # SRCH-20: the most Serper queries one search may send, across every tier the 8–12 rule asks for.
     max_serper_queries: int = 30
+    # SRCH-32 (21 Nov): one search's lookups — a Serper search each for the employer's own posting
+    # behind a job API's snippet lead, an aggregator's copy, or a preview a short search reads.
+    # One allowance, shared by all three, on top of `max_serper_queries` and inside the day's.
+    lookups_per_search: int = 15
     max_scored_per_day: int = 70
     # Jobs scored at once (`intake.judge`); 1 on SQLite whatever this says.
     scoring_workers: int = 3
@@ -482,6 +527,8 @@ class WeraConfig(BaseModel):
     search_progress: SearchProgress = SearchProgress()
     markets: MarketsConfig = MarketsConfig()
     source_share: SourceShareConfig = SourceShareConfig()
+    rotation: RotationConfig = RotationConfig()
+    hunt: HuntConfig = HuntConfig()
     upskills: UpskillsConfig = UpskillsConfig()
     company_brief: CompanyBriefConfig = CompanyBriefConfig()
     letters: LettersConfig = LettersConfig()

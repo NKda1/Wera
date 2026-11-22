@@ -14,7 +14,9 @@ import {
   formatPostedAge,
   formatSalary,
   sourceLine,
+  employerLine,
   sourceName,
+  VIA,
 } from "@/lib/format";
 import { api } from "@/lib/api";
 import type { ScoredJob } from "@/lib/types";
@@ -71,8 +73,9 @@ export function JobCard({
   // live card carried a liveness note, the one job WERA couldn't confirm would be invisible.
   const liveness = formatLiveness(job);
   const meta = [
-    // 20 Nov: an agency's repost reads under the employer it names, with the agency beside it.
-    job.postedBy ? `${job.company} (via ${job.postedBy})` : job.company,
+    // 20 Nov: an agency's repost reads under the employer it names, with the agency beside it;
+    // 22 Nov: a board's post that names no employer says so.
+    employerLine(job),
     formatLocation(job),
     formatInternational(job),
     formatSalary(job.salary),
@@ -166,7 +169,13 @@ export function JobCard({
         </div>
 
         <div className="col-span-2 rounded-control bg-mint-50 px-3.5 py-2.5 text-[14px] leading-relaxed @2xl:col-span-1 @2xl:col-start-2">
-          {fit.roughOnly ? (
+          {fit.roughOnly && job.descriptionStatus === "partial" ? (
+            // 21 Nov: a preview read without its original — scored on a job API's summary alone.
+            <p>
+              Scored on {job.via ? `${VIA[job.via] ?? job.via}'s` : "a"} short summary only: WERA couldn&apos;t find the employer&apos;s own ad, so
+              the score is rough and capped at 6.5. Open the job post to read it in full.
+            </p>
+          ) : fit.roughOnly ? (
             <p>Only the title, company and location are known. Open it on LinkedIn to read the description; the score is a rough title match.</p>
           ) : (
             <p>

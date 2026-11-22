@@ -401,7 +401,7 @@ def _targets(cmd: str, *, tiers: list[int] | None, plan: bool) -> int:
     chosen = sorted(set(tiers or [1]))
     if 0 in chosen:
         resource = serper.Serper(
-            max_queries=strategist.RESOURCE_QUERIES,
+            max_queries=wera().lookups_per_search,
             window=strategist.RESOURCE_WINDOW,
             guard=provider_guard.Guard(queue.r, "serper"),
         )

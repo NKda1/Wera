@@ -15,6 +15,7 @@ import type {
   IntakeRun,
   JobsCleared,
   MasterCV,
+  PreviewRead,
   ProfileProposalResult,
   ScoredJob,
   SavedProfile,
@@ -23,6 +24,7 @@ import type {
   SettingsResponse,
   SiteOption,
   SuggestionList,
+  UpskillsVersion,
   WritingReport,
 } from "./types";
 
@@ -87,11 +89,16 @@ export const api = {
   /** The post in a minute's reading. The first click is one fast-tier model call; the summary is kept until the post changes. */
   summariseJob: (jobId: string) => call<ScoredJob>(`/api/jobs/${encodeURIComponent(jobId)}/summary`, { method: "POST", body: {} }),
   markAllSeen: () => call<{ marked: number }>("/api/jobs/seen", { method: "POST", body: {} }),
+  /** 21 Nov: a preview read in full — its employer's ad found and read, else its summary — and
+   *  scored. Counts towards the day's scoring limit; can take a few seconds. */
+  readPreview: (jobId: string) => call<PreviewRead>(`/api/jobs/${encodeURIComponent(jobId)}/read`, { method: "POST", body: {} }),
   /** MATCH-13: a profile change the person's decisions point at — accepted, or not offered again. */
   acceptSuggestion: (id: string) => call<SearchProfile>(`/api/learning/suggestions/${encodeURIComponent(id)}/accept`, { method: "POST", body: {} }),
   dismissSuggestion: (id: string) => call<SuggestionList>(`/api/learning/suggestions/${encodeURIComponent(id)}/dismiss`, { method: "POST", body: {} }),
   /** SRCH-27: what "Clear jobs" would remove, and then removing it. A testing control. */
   clearPreview: () => call<JobsCleared>("/api/jobs/clear"),
+  /** 22 Nov: what the Upskills report is built from; the page refreshes when it moves. */
+  upskillsVersion: () => call<UpskillsVersion>("/api/upskills/version"),
   clearJobs: () => call<JobsCleared>("/api/jobs/clear", { method: "POST", body: {} }),
   importJob: (body: { url: string } | { text: string }) => call<ScoredJob>("/api/jobs/import", { method: "POST", body }),
 

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from ..clock import iso
 from ..db.models import FitReportRow
 from ..domain.degrees import looks_like_degree
-from ..domain.scoring import build_fit_report
+from ..domain.scoring import build_fit_report, rough_only
 from ..domain.vocab import in_post, text_has_term
 from ..errors import ApiError
 from ..llm.gateway import structured
@@ -224,13 +224,14 @@ def evidence_for(
 
 
 def report_for(job: Job, evidence: FitEvidence, weights: FitWeights, now: int) -> FitReport:
-    """§8.2: the total, computed here and never by a model. A job with no description is
-    `rough_only`, which caps its total — a title match is not a fit."""
+    """§8.2: the total, computed here and never by a model. A job with no description, or only
+    a job API's summary of one (21 Nov), is `rough_only`, which caps its total — a title match is
+    not a fit (`scoring.rough_only`)."""
     return build_fit_report(
         job.id,
         evidence,
         job.posted_at,
-        job.description_status == "missing",
+        rough_only(job),
         weights,
         now,
     )

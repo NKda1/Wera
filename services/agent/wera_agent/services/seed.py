@@ -16,7 +16,7 @@ from ..nodes.fit import scoring_fingerprint
 from ..schemas.cv import MasterCV
 from ..settings import get_settings
 from . import store as st
-from .demo_data import DAY, MIN, fixture, seed_to_job
+from .demo_data import DAY, MIN, fixture, preview_seeds, seed_to_job, seed_to_preview
 from .drafting import draft_pack
 
 
@@ -90,6 +90,11 @@ def seed(session: Session, now: int) -> None:
     # above are different: they are a starting point the person edits, not a claimed finding.
     for s in [*jobs["shortlist"], *jobs["hidden"]] if settings.wera_demo_mode else []:
         st.save_job(session, *seed_to_job(s, now), created_at=iso(now), cv_version=cv.version, cv_hash=scoring_fingerprint(cv))
+    # 21 Nov: a few previews — leads a search kept rather than read — so the Jobs screen's "More
+    # found, not read yet" section and "Read the full ad" have something to show. No fit report:
+    # nothing has scored a preview.
+    for s in preview_seeds() if settings.wera_demo_mode else []:
+        st.save_job(session, seed_to_preview(s, now), created_at=iso(now))
 
     store = st.Store(session, now)
     # Demo applications come with drafted packs, and drafting goes through the gateway — which

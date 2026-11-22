@@ -53,6 +53,7 @@ const gap = (term: string, category: KeywordCategory = "tool"): Upskill => ({
 
 const report: UpskillsReport = {
   windowDays: 60,
+  version: "v1",
   families: [],
   jobsConsidered: 10,
   missing: [gap("Kafka")],

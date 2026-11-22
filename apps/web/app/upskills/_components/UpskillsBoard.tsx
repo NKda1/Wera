@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { upskillAnchor } from "@/lib/format";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState, useTransition } from "react";
+import { api } from "@/lib/api";
+import { formatTime, upskillAnchor } from "@/lib/format";
 import type { SkillDemand, UpskillsReport } from "@/lib/types";
 import { Card } from "@/lib/ui/Card";
 import { cn } from "@/lib/ui/cn";
@@ -38,6 +40,7 @@ const winAnchor = (term: string) => `win-${upskillAnchor(term).slice("skill-".le
  * filters sit in one row above the charts and scope every chart, figure and list below them, so
  * the numbers always agree (the user, 20 Nov: the charts didn't move with the near misses). */
 export function UpskillsBoard({ report, initial }: { report: UpskillsReport; initial: Filters }) {
+  const fresh = useFollowsSearches(report.version);
   const [filters, setFilters] = useState<Filters>(initial);
   const [highlight, setHighlight] = useState<{ term: string; at: number } | null>(null);
   const [win, setWin] = useState<string | null>(null);
@@ -154,6 +157,12 @@ export function UpskillsBoard({ report, initial }: { report: UpskillsReport; ini
             ) : null}
           </span>
         </nav>
+        <p className="mt-2 flex flex-wrap items-center gap-x-2 text-small text-ink-2">
+          <span aria-live="polite">{fresh.refreshing ? "Updating with your latest jobs…" : fresh.at ? `Updated ${formatTime(fresh.at)} · follows each search` : "Follows each search"}</span>
+          <button type="button" onClick={fresh.refresh} disabled={fresh.refreshing} className="font-semibold text-forest-700 underline-offset-2 hover:underline disabled:opacity-60">
+            Refresh
+          </button>
+        </p>
         <p className="sr-only" aria-live="polite">
           {shownLabel} {s.demand.length} skills charted, {s.missing.length} gaps listed.
         </p>
@@ -239,6 +248,53 @@ export function UpskillsBoard({ report, initial }: { report: UpskillsReport; ini
       )}
     </div>
   );
+}
+
+/** 22 Nov: the page follows each search. The report is worked out on the server when the page
+ *  loads, so a search finished since — or the near misses read on their own thread after it, or a
+ *  decision — never reached the charts without a reload (the user: Upskills wasn't refreshing with
+ *  every search). Every 15 s while the tab is visible, and on coming back to it, the page asks the
+ *  agent what the report is built from (`GET /upskills/version`, a few counts) and refreshes the
+ *  server data when that has moved; the filters, held here, stay as they are. */
+const CHECK_EVERY_MS = 15_000;
+
+function useFollowsSearches(version: string) {
+  const router = useRouter();
+  const [refreshing, startTransition] = useTransition();
+  // Set after the page loads, not while it renders, so the server's and the browser's clocks agree.
+  const [at, setAt] = useState<string>();
+  useEffect(() => setAt(new Date().toISOString()), [version]);
+  useEffect(() => {
+    if (!version) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const check = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const now = await api.upskillsVersion();
+        if (!stopped && now.version !== version) startTransition(() => router.refresh());
+      } catch {
+        // The agent is down or busy: the next check tries again, and the page keeps what it shows.
+      }
+    };
+    const loop = () => {
+      timer = setTimeout(async () => {
+        await check();
+        if (!stopped) loop();
+      }, CHECK_EVERY_MS);
+    };
+    const onBack = () => void check();
+    loop();
+    document.addEventListener("visibilitychange", onBack);
+    window.addEventListener("focus", onBack);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onBack);
+      window.removeEventListener("focus", onBack);
+    };
+  }, [version, router]);
+  return { at, refreshing, refresh: () => startTransition(() => router.refresh()) };
 }
 
 /** A headline number: label, value, and what it counts. */

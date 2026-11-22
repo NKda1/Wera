@@ -61,6 +61,7 @@ const APP: ApplicationWithJob = {
     location: { raw: "London", city: "London" },
     remote: "hybrid",
     fitTotal: 8.4,
+    employerNamed: true,
   },
 };
 
@@ -170,6 +171,12 @@ describe("cover letter", () => {
     // and the company and role are the job's own.
     const texts = exportDoc("letter", APP, CV, CONTACT).blocks.map((b) => b.text);
     expect(texts.slice(0, 4)).toEqual(["12 October 2026", "Fernhill Analytics", "Re: Machine Learning Engineer", "Dear Hiring Team,"]);
+  });
+
+  it("is addressed to the hiring team when the board that posted it names no employer (22 Nov)", () => {
+    const board: ApplicationWithJob = { ...APP, job: { ...APP.job, company: "eFinancialCareers", employerNamed: false } };
+    const texts = exportDoc("letter", board, CV, CONTACT).blocks.map((b) => b.text);
+    expect(texts[1]).toBe("Hiring team, via eFinancialCareers");
   });
 });
 

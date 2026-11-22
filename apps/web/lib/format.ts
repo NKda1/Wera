@@ -263,3 +263,73 @@ export function displayCase(s: string, { brand = false }: { brand?: boolean } = 
     })
     .join(" ");
 }
+
+/** 21 Nov: a preview's label, from its CV match (`previewMatch`) and the agent's cut-offs. Never
+ *  the number: the match is a similarity, not a fit, and "0.81" beside a fit of 8.1 would read as
+ *  one scale. Without cut-offs (an older agent) these are the agent's own defaults. */
+export type PreviewLabel = { id: "strong" | "good" | "possible"; label: string };
+
+export const PREVIEW_CUTOFFS = { strong: 0.8, good: 0.72 } as const;
+
+export function previewLabel(match: number | null | undefined, cutoffs: { strong: number; good: number } = PREVIEW_CUTOFFS): PreviewLabel {
+  if (match != null && match >= cutoffs.strong) return { id: "strong", label: "Strong match" };
+  if (match != null && match >= cutoffs.good) return { id: "good", label: "Good match" };
+  return { id: "possible", label: "Possible match" };
+}
+
+/** A preview's employer line: the employer, and the job API that found it ("via Adzuna"). An
+ *  agency's repost names the agency too, as a scored card does. A link the hunter found (22 Nov,
+ *  `foundOn`) names the site it was found on, and only an employer something named: "Found on
+ *  Totaljobs" when nothing did, never the board as if it were hiring. */
+export function previewSource(job: Pick<Job, "company" | "postedBy" | "via" | "foundOn"> & { employerNamed?: boolean }): string {
+  if (job.foundOn) {
+    const site = job.foundOn.site;
+    return job.foundOn.employerKnown && job.employerNamed !== false ? `${employerLine(job, "posted by")} · found on ${site}` : `Found on ${site}`;
+  }
+  const via = job.via ? ` · via ${VIA[job.via] ?? job.via}` : "";
+  return `${employerLine(job, "posted by")}${via}`;
+}
+
+/** Previews best match first, then newest posted — the order the agent sends, kept after a local
+ *  change (one read or dismissed) so the list never reshuffles under the pointer. */
+export function sortPreviews<T extends Pick<Job, "previewMatch" | "postedAt">>(jobs: T[]): T[] {
+  return [...jobs].sort(
+    (a, b) => (b.previewMatch ?? -1) - (a.previewMatch ?? -1) || (b.postedAt ?? "").localeCompare(a.postedAt ?? ""),
+  );
+}
+
+/** How many previews the section's heading counts: the agent's total less the ones dismissed or
+ *  read here that this page's list still carries. A page refreshed since has already dropped them
+ *  from `total`, so ids no longer in the list aren't taken off twice. */
+export function previewsLeft(total: number, listed: Pick<Job, "id">[], gone: ReadonlySet<string>): number {
+  const pending = listed.filter((j) => gone.has(j.id)).length;
+  return Math.max(total - pending, listed.length - pending, 0);
+}
+
+/** H4 (21 Nov): what is left of the two allowances a search spends, as the Settings line shows
+ *  them. A limit the agent doesn't report is left out rather than guessed. */
+export function allowanceParts(s: {
+  googleSearchesLeftToday?: number | null;
+  googleSearchesPerDay?: number | null;
+  weeklyCreditCap?: number | null;
+  creditsThisWeek?: number | null;
+}): string[] {
+  const parts: string[] = [];
+  if (s.googleSearchesLeftToday != null && s.googleSearchesPerDay != null) {
+    parts.push(`Google searches left today: ${Math.max(s.googleSearchesLeftToday, 0)} of ${s.googleSearchesPerDay}`);
+  }
+  if (s.weeklyCreditCap != null) {
+    parts.push(`Firecrawl credits left this week: ${Math.max(s.weeklyCreditCap - (s.creditsThisWeek ?? 0), 0)} of ${s.weeklyCreditCap}`);
+  }
+  return parts;
+}
+
+/** 22 Nov: who a job is for, as its card and review screen say it. An agency's repost reads under
+ *  the employer it names, with the agency beside it ("Citi (via eFinancialCareers)", 20 Nov); a
+ *  board's or agency's post that names no employer says so rather than show the board as the
+ *  employer (Reed gives "eFinancialCareers" as the employer of the posts it carries for that
+ *  board). The agent decides which is which (`employerNamed`). */
+export function employerLine(job: { company: string; postedBy?: string | null; employerNamed?: boolean }, by: "via" | "posted by" = "via"): string {
+  if (job.employerNamed === false) return `Employer not named (${by} ${job.company})`;
+  return job.postedBy ? `${job.company} (${by} ${job.postedBy})` : job.company;
+}

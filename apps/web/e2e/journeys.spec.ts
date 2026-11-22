@@ -340,3 +340,30 @@ test("Discarding a pack asks why, as a reject does (MATCH-11, 19 Nov)", async ({
   await expect(page).toHaveURL(/\/review$/);
   await expect(page.getByRole("link", { name: "Graduate AI Engineer" })).toHaveCount(0);
 });
+
+test("More found, not read yet: expand the previews, read one, and it is scored on the shortlist (H3, 21 Nov)", async ({ page }) => {
+  await page.goto("/jobs");
+  await expect(page.getByRole("heading", { name: "Today's shortlist" })).toBeVisible();
+
+  // Collapsed under the scored jobs: a real button, and nothing of the previews until it opens.
+  const toggle = page.getByRole("button", { name: /^More found, not read yet \(\d+\)/ });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("article", { name: "Graduate Software Engineer, Payments" })).toHaveCount(0);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+  // Best match first, with its label, the employer "via" the job API, and Adzuna's name linked.
+  const preview = page.getByRole("article", { name: "Graduate Software Engineer, Payments" });
+  await expect(preview).toBeVisible();
+  await expect(preview.getByText("Strong match", { exact: true })).toBeVisible();
+  await expect(preview.getByText("Larkspur Payments · via Adzuna", { exact: false })).toBeVisible();
+  await expect(preview.getByRole("link", { name: "Jobs by Adzuna" })).toHaveAttribute("href", "https://www.adzuna.co.uk");
+  await expect(preview.getByRole("button", { name: "Snooze", exact: true })).toBeVisible();
+  await expect(preview.getByRole("button", { name: "Reject", exact: true })).toBeVisible();
+
+  // Read it: the preview leaves the section and the scored job joins the shortlist.
+  await preview.getByRole("button", { name: "Read the full ad" }).click();
+  await expect(page.getByText("Read the full ad for Graduate Software Engineer, Payments: fit", { exact: false })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Graduate Software Engineer, Payments" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Shortlisted jobs" }).getByRole("heading", { level: 3, name: "Graduate Software Engineer, Payments" })).toBeVisible();
+});

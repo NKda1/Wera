@@ -325,3 +325,31 @@ class TestWhoAsksForIt:
         quant = upskills.report(store.s, store.cv(), now=NOW, titles=finance, family="quantitative")
         assert find(quant, "C++") is not None and find(quant, "Pitchbooks") is None
         assert {f.family: f.jobs for f in quant.families}["finance"] >= 1  # the filter's chips still count every family
+
+
+class TestThePageFollowsEachSearch:
+    """22 Nov: the page refreshes when what its report is built from moves (`upskills.version`), so a
+    search's scores, and the near misses read on their own thread after it, reach the charts."""
+
+    def test_a_new_score_moves_the_version(self, store):
+        before = upskills.version(store.s, store.cv())
+        assert upskills.version(store.s, store.cv()) == before  # nothing changed, nothing moves
+        scored(store, job(21), ("Kafka", "required"))
+        assert upskills.version(store.s, store.cv()) != before
+
+    def test_a_near_miss_read_after_the_search_moves_it(self, store):
+        from wera_agent.db.models import JobSignalRow
+
+        before = upskills.version(store.s, store.cv())
+        store.s.add(
+            JobSignalRow(key="near-1", url="https://up.example/n1", title="Analyst", company="Upco", source="lead",
+                         similarity=0.8, keywords=[], seen_at=iso(NOW))
+        )  # fmt: skip
+        store.s.flush()
+        assert upskills.version(store.s, store.cv()) != before
+
+    def test_the_report_and_the_route_agree(self, api, store):
+        scored(store, job(22), ("Kafka", "required"))
+        store.s.commit()
+        report = api.ok("GET", "/upskills?days=60")
+        assert report["version"] and api.ok("GET", "/upskills/version")["version"] == report["version"]

@@ -50,7 +50,8 @@ def analyse(session: Session, job: Job, evidence: FitEvidence) -> JobAnalysis:
         role_profile=RoleProfile(
             target_role_title=job.title,
             department=out.role_profile.department,
-            company_name=job.company,
+            # 22 Nov: a board's or agency's post that names no employer isn't the board's job.
+            company_name=job.company if job.employer_named else f"Employer not named (posted by {job.company})",
             industry_name=out.role_profile.industry_name,
             experience_level=out.role_profile.experience_level,
         ),

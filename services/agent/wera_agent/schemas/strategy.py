@@ -44,6 +44,12 @@ class PlannedQuery(Model):
     # Which page of Google's results: tier 4 asks for page 2 of tier 1's searches, for when page 1
     # is all postings WERA already has. Still one Serper credit.
     page: int = 1
+    # SRCH-20 (21 Nov): other ways to ask the same thing ("graduate Software Engineer jobs in
+    # London", "Software Engineer graduate scheme 2027"), best first, as whole queries without the
+    # `-site:` and `-intitle:` exclusions added after planning. A search sent in the last few days
+    # is replaced by its next page or one of these (`sources.rotation`), so a second search the same
+    # day asks Google something new.
+    variants: list[str] = []
 
 
 class TargetMatrix(Model):

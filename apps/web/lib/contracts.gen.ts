@@ -39,7 +39,7 @@ export type RunPhase =
   | "scoring"
   | "closing"
   | "done";
-export type JobStatus = "new" | "shortlisted" | "in_application" | "snoozed" | "rejected" | "hidden" | "closed" | "archived";
+export type JobStatus = "new" | "shortlisted" | "in_application" | "snoozed" | "rejected" | "hidden" | "closed" | "archived" | "preview";
 export type Liveness = "open" | "unverified" | "unreachable" | "gone";
 export type Urgency = "today" | "this_week" | "two_weeks" | "older" | "unknown";
 export type SkillLevel = "familiar" | "proficient" | "expert";
@@ -285,6 +285,12 @@ export interface ApplicationJob {
   applyUrl?: string;
   careersUrl?: string;
   company: string;
+  /**
+   * Whether `company` is the employer or only the board or agency that posted the job
+   * (22 Nov; `Job.employer_named`). The review screen, the tracker and the letter's recipient
+   * line say "Employer not named" rather than write to eFinancialCareers as if it were hiring.
+   */
+  employerNamed: boolean;
   fitTotal: number;
   id: string;
   linkedinUrl?: string;
@@ -714,6 +720,17 @@ export interface FoundCounts {
   total: number;
   watchlist: number;
 }
+/**
+ * Where a preview no job API found came from (21 Nov, SRCH-22): a posting link the hunter took
+ * off a page of jobs, or an aggregator's copy of one job. The job APIs' previews have `via`
+ * instead.
+ */
+export interface FoundOn {
+  employerKnown: boolean;
+  kind: "posting" | "copy";
+  page?: string;
+  site: string;
+}
 export interface InboxSettings {
   emailsThisWeek: number;
   folder: string;
@@ -777,8 +794,19 @@ export interface Job {
   descriptionMd: string | null;
   descriptionStatus: "full" | "partial" | "missing";
   descriptionView?: DescriptionView;
+  /**
+   * Whether `company` is the employer (22 Nov). Reed gives "eFinancialCareers" as the
+   * employer of the posts it carries for that board, and the posts say only "a leading
+   * financial institution": the card read "Trade Operations Analyst — eFinancialCareers". A
+   * board or agency WERA knows (`dedupe.is_intermediary`), or a hunted link's site when
+   * nothing named the employer (`FoundOn.employer_known`), is the poster, never the employer.
+   * `company` stays the poster, so dedupe keys, same-posting merges and the letter's rule for a
+   * board's post (`tailor.job_header`) are unchanged; what shows the employer reads this.
+   */
+  employerNamed: boolean;
   firstSeen: string;
   foundBy?: FoundBy;
+  foundOn?: FoundOn;
   hiddenReason?: string;
   id: string;
   international?: InternationalPost;
@@ -791,6 +819,7 @@ export interface Job {
   postedAt?: string;
   postedBy?: string;
   postedPrecision: "exact" | "approximate" | "unknown";
+  previewMatch?: number;
   remote: ("remote" | "hybrid" | "onsite") | null;
   salary?: Salary;
   seenAt?: string;
@@ -843,10 +872,21 @@ export interface ScoredJob {
   descriptionMd: string | null;
   descriptionStatus: "full" | "partial" | "missing";
   descriptionView?: DescriptionView;
+  /**
+   * Whether `company` is the employer (22 Nov). Reed gives "eFinancialCareers" as the
+   * employer of the posts it carries for that board, and the posts say only "a leading
+   * financial institution": the card read "Trade Operations Analyst — eFinancialCareers". A
+   * board or agency WERA knows (`dedupe.is_intermediary`), or a hunted link's site when
+   * nothing named the employer (`FoundOn.employer_known`), is the poster, never the employer.
+   * `company` stays the poster, so dedupe keys, same-posting merges and the letter's rule for a
+   * board's post (`tailor.job_header`) are unchanged; what shows the employer reads this.
+   */
+  employerNamed: boolean;
   evergreen: boolean;
   firstSeen: string;
   fit: FitReport;
   foundBy?: FoundBy;
+  foundOn?: FoundOn;
   hiddenReason?: string;
   id: string;
   international?: InternationalPost;
@@ -862,6 +902,7 @@ export interface ScoredJob {
   postedAt?: string;
   postedBy?: string;
   postedPrecision: "exact" | "approximate" | "unknown";
+  previewMatch?: number;
   remote: ("remote" | "hybrid" | "onsite") | null;
   salary?: Salary;
   seenAt?: string;
@@ -1096,6 +1137,27 @@ export interface PlannedQuery {
   source: "open" | "board";
   tier: number;
   title: string;
+  variants: string[];
+}
+/**
+ * 21 Nov: where a preview's match (`Job.preview_match`) becomes a label on the Jobs screen —
+ * Strong at `strong` and above, Good at `good` and above, else Possible (`scoring.preview_label`).
+ * Sent with the previews so the screen and the agent can't disagree on a label.
+ */
+export interface PreviewCutoffs {
+  good: number;
+  strong: number;
+}
+/**
+ * `POST /jobs/{id}/read` (21 Nov): the preview, read in full. `job` is it scored, on the
+ * shortlist; or, when reading it in full showed the hard filters hide it, `job` is null and
+ * `hidden_reason` says why. `original`: its employer's own ad was found and read — false when it
+ * was scored on the job API's summary alone, rough-only (MATCH-04).
+ */
+export interface PreviewRead {
+  hiddenReason?: string;
+  job?: ScoredJob;
+  original: boolean;
 }
 export interface ProfileChannels {
   boardSearch: boolean;
@@ -1168,6 +1230,8 @@ export interface SearchSchedule {
   creditsThisWeek?: number;
   cron: string;
   enabled: boolean;
+  googleSearchesLeftToday?: number;
+  googleSearchesPerDay?: number;
   nextRunAt?: string;
   weeklyCreditCap?: number;
 }
@@ -1228,6 +1292,9 @@ export interface ShortlistMeta {
   hidden: Job[];
   hiddenTotal: number;
   nearMisses: number;
+  previewCutoffs?: PreviewCutoffs;
+  previews: Job[];
+  previewsTotal: number;
   rejected: number;
   scoreCapMessage: string | null;
   snoozed: number;
@@ -1286,6 +1353,7 @@ export interface UpskillsReport {
   missing: Upskill[];
   ownFamily?: string;
   quickWins: QuickWin[];
+  version: string;
   windowDays: number;
   withNearMisses?: NearMissView;
 }
@@ -1308,6 +1376,9 @@ export interface Coverage2 {
   nearMissing: number;
   nearQuickWins: number;
   quickWins: number;
+}
+export interface UpskillsVersion {
+  version: string;
 }
 /**
  * One CV line the Writing card has a suggestion for. `source_id` is the master-CV line it

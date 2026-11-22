@@ -4,7 +4,7 @@ An Adzuna or Careerjet lead is a title, a company and a tracked link WERA must n
 Serper search for the two, quoted, finds where else the job is posted; the first result that is a
 posting (`postings.classify`), isn't on an aggregator, and carries the lead's title and company is
 queued as an ordinary posting, `via` the API that found it. A lead with no such result is counted
-and dropped — never read through the tracked link.
+and kept as a preview (21 Nov; it was dropped) — never read through the tracked link.
 
 These searches have their own cap (`resource_queries`, 10 a search), so finding originals never
 eats into discovery's 30. They go through the same guard as discovery, so a lead two people's
@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from ...config import Site
 from ...domain import dedupe
+from ..normalise import is_tracked_link
 from ..postings import ONE_SLUG_PATH, classify
 from ..serper import Result, Serper
 from . import Lead
@@ -44,6 +45,10 @@ def original(lead: Lead, *, serper: Serper, sites: list[Site], gl: str, hl: str,
     for result in serper.search(query_for(lead, exclude), gl=gl, hl=hl) or []:
         host = dedupe._host(result.url)
         if any(host == a or host.endswith(f".{a}") for a in AGGREGATORS):
+            continue
+        # 21 Nov: and no tracked link on any of their country sites — `adzuna.ca` and `careerjet.de`
+        # aren't in the list above, and the original found is a page WERA reads (SRCH-32).
+        if is_tracked_link(result.url):
             continue
         kind = classify(result.url, title=result.title, sites=sites)
         if kind != "posting" and not (kind == "listing" and _slug_is_the_lead(lead, result.url)):

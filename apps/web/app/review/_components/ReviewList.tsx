@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { formatAgo, formatLocation, pct } from "@/lib/format";
+import { employerLine, formatAgo, formatLocation, pct } from "@/lib/format";
 import type { ApplicationWithJob } from "@/lib/types";
 import { Button, ButtonLink } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
@@ -45,7 +45,7 @@ export function ReviewList({ apps }: { apps: Item[] }) {
               <div className="min-w-0 flex-1 basis-64">
                 <h3 className="text-h2">{a.job.title}</h3>
                 <p className="text-small text-ink-2">
-                  {a.job.company} · {formatLocation(a.job)}
+                  {employerLine(a.job)} · {formatLocation(a.job)}
                   {a.changeNote ? ` · redrafting with your note` : ""}
                 </p>
                 <div className="mt-3">{a.draft ? <DraftProgress step={a.draft.step} progress={a.draft.progress} /> : null}</div>
@@ -122,7 +122,7 @@ function PackRow({ app, primary }: { app: Item; primary?: boolean }) {
           </Link>
         </h3>
         <p className="text-small text-ink-2">
-          {app.job.company} · {formatLocation(app.job)} · {app.status === "approved" ? `approved ${formatAgo(app.approvedAt)}` : `drafted ${formatAgo(draftedAt)}`}
+          {employerLine(app.job)} · {formatLocation(app.job)} · {app.status === "approved" ? `approved ${formatAgo(app.approvedAt)}` : `drafted ${formatAgo(draftedAt)}`}
           {app.coverage != null ? ` · ATS ${pct(app.coverage)}` : ""}
         </p>
         <JobLinks job={app.job} className="mt-1" />

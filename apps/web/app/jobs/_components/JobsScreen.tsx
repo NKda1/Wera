@@ -20,6 +20,7 @@ import dynamic from "next/dynamic";
 import { FilterMenu } from "./FilterMenu";
 import { cityKey, groupCities, levelLabel, workLabel } from "./filters";
 import { JobCard } from "./JobCard";
+import { PreviewsSection } from "./Previews";
 import { ProfileCard, type SiteOption } from "./ProfileCard";
 import { RunPanel } from "./SearchRun";
 
@@ -582,7 +583,9 @@ export function JobsScreen({
             <Button variant="secondary" onClick={findMore} busy={scoringMore} disabled={runIds.length > 0}>
               Find up to {meta.findMoreSize} more
             </Button>
-            <span className="text-small text-ink-2">Waiting jobs first, then what your last search queued, then new searches.</span>
+            <span className="text-small text-ink-2">
+              Waiting jobs first, then what your last search queued, then new searches{meta.previewsTotal > 0 ? ", then the best jobs not read yet" : ""}.
+            </span>
           </div>
         ) : null}
         {visible.length === 0 ? (
@@ -636,6 +639,10 @@ export function JobsScreen({
           </Card>
         ) : null}
       </section>
+
+      {/* 21 Nov: leads kept rather than read, below the scored jobs and collapsed — not the
+          shortlist, and nothing here has a score. */}
+      {meta.previewsTotal > 0 ? <PreviewsSection previews={meta.previews} total={meta.previewsTotal} cutoffs={meta.previewCutoffs} /> : null}
 
       <footer className="mt-6 space-y-3 text-small text-ink-2">
         <p>

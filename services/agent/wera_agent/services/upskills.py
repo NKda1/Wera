@@ -29,14 +29,14 @@ model call, no fetch, and as current as the last search.
 from collections import Counter, defaultdict
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..clock import iso, parse_ms
 from ..config import degrees as degrees_file
 from ..config import wera
 from ..db import state
-from ..db.models import ApplicationRow, DocumentRow, FitReportRow, JobRow, JobSignalRow
+from ..db.models import ApplicationRow, DecisionRow, DocumentRow, FitReportRow, JobRow, JobSignalRow
 from ..domain import degrees, role_family
 from ..domain.scoring import DEFAULT_WEIGHTS, fit_total, freshness_score
 from ..domain.vocab import cv_line_index, group_key, master_cv_text, not_a_skill, skill_text, text_has_term
@@ -157,6 +157,27 @@ NEAR: dict[str, tuple[str, ...]] = {
     "c# / .net": ("java",), "go": ("rust", "c++"), "rust": ("go", "c++"), "c++": ("rust", "go"),
     "machine learning": ("python", "pytorch"), "deep learning": ("pytorch", "machine learning"),
 }  # fmt: skip
+
+
+def version(session: Session, cv: MasterCV, *, titles: list[str] | None = None) -> str:
+    """What the report is built from, as a short fingerprint (22 Nov): the scores and their newest
+    write, the near misses read (UPSK-06, on their own thread after a search), the packs' ATS
+    reports, the decisions (which weigh the fit) and the CV and target titles. The page asks for it
+    every few seconds while it is open and refreshes when it moves, so a search's jobs reach the
+    charts without a reload (the user, 22 Nov: Upskills didn't refresh with each search). A handful
+    of aggregates, no report built."""
+    import hashlib
+
+    parts = [
+        *session.execute(select(func.count(), func.max(FitReportRow.created_at))).one(),
+        *session.execute(select(func.count(), func.max(JobSignalRow.seen_at)).select_from(JobSignalRow)).one(),
+        *session.execute(select(func.count(), func.max(DocumentRow.id)).where(DocumentRow.kind == "ats")).one(),
+        *session.execute(select(func.count(), func.max(DecisionRow.id)).select_from(DecisionRow)).one(),
+        session.scalar(select(func.count()).select_from(ApplicationRow).where(ApplicationRow.status != "discarded")),
+        cv.version,
+        "|".join(titles or []),
+    ]
+    return hashlib.sha1(repr(parts).encode()).hexdigest()[:16]
 
 
 def report(

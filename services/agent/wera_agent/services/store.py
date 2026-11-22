@@ -9,6 +9,7 @@ Demo intake runs advance with time (`_finish_run`); a real install runs the inta
 instead, and that graph records its own figures.
 """
 
+import dataclasses
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -44,7 +45,17 @@ from ..domain.applications import ALLOWED
 from ..domain.cv_profile import build_profile
 from ..domain.places import COUNTRIES
 from ..domain.profile_diff import profile_diff
-from ..domain.scoring import build_fit_report, evergreen, js_round, liveness, possibly_closed, urgency
+from ..domain.scoring import (
+    PREVIEW_GOOD,
+    PREVIEW_STRONG,
+    build_fit_report,
+    evergreen,
+    js_round,
+    liveness,
+    possibly_closed,
+    rough_only,
+    urgency,
+)
 from ..domain.text import is_linkedin_url, title_case
 from ..domain.vocab import cv_line_index, master_cv_text, text_has_term
 from ..errors import ApiError, validation_error
@@ -62,6 +73,8 @@ from ..schemas.api import (
     JobsCleared,
     NavCounts,
     PlaceOption,
+    PreviewCutoffs,
+    PreviewRead,
     ProfileProposalResult,
     ShortlistMeta,
     SiteOption,
@@ -91,10 +104,11 @@ from ..schemas.runs import ChannelSummary, Estimate, IntakeRun, RunError, RunIds
 from ..schemas.settings import DEFAULT_SEARCH_CRON, SecretsStatus, SettingsPatch, SettingsResponse
 from ..schemas.strategy import PlannedQuery, TargetMatrix
 from ..settings import get_settings, llm_provider_name
+from ..sources import normalise
 from ..sources.ats_feeds import careers_url
 from ..sources.harvest import BATCH
 from . import learning, providers
-from .demo_data import DAY, MIN, first_run_seeds, seed_to_job
+from .demo_data import DAY, MIN, first_run_seeds, fixture, seed_to_job
 
 # The order the graph drafts a pack in, which the review screen shows as progress (PERF-03).
 # Must match the nodes in `graphs/application.py` and `schemas.applications.DraftStep`. An
@@ -262,6 +276,23 @@ def _run_name(channel: str) -> str:
     }.get(channel, "A search is")
 
 
+def _google_left(demo: bool) -> dict[str, int]:
+    """H4 (21 Nov): the Serper day's share still unused, for Settings — every run and person counts
+    against it (`Guard.left_today`). Nothing in demo mode, without Redis, or with no daily limit:
+    Settings then just doesn't say, rather than say something it can't know."""
+    if demo:
+        return {}
+    from ..sources import targets
+    from ..sources.provider_guard import Guard
+
+    try:
+        client = targets.connect()
+    except ApiError:
+        return {}
+    left_of = Guard(client, "serper").left_today()
+    return {"googleSearchesLeftToday": left_of[0], "googleSearchesPerDay": left_of[1]} if left_of else {}
+
+
 def _required(app_id: str | None) -> str:
     """A graph node always has an application by the time it drafts; this says so out loud."""
     if not app_id:
@@ -412,7 +443,10 @@ class Store:
         for row in self.s.scalars(select(JobRow).where(JobRow.status == "snoozed")).all():
             if row.snoozed_until and parse_ms(row.snoozed_until) <= now:
                 job = self._job(row)
-                job.status, job.snoozed_until = "new", None
+                # A snoozed preview (21 Nov) wakes as a preview: it was never read, and on the
+                # shortlist with no fit it would only be waiting for a score on its summary.
+                woke = "preview" if self._unread_preview(job) else "new"
+                job.status, job.snoozed_until = woke, None
                 save_job(self.s, job)
         # Drafting is no longer time-based: the application graph moves an application to
         # ready_for_review when its nodes have actually finished (see graphs/application.py).
@@ -803,12 +837,156 @@ class Store:
             or 0
         )
 
+    # ---- previews (21 Nov, SRCH-26, SRCH-32) ----
+
+    # How many previews the Jobs screen is sent, best match first; `previews_total` is the count.
+    PREVIEWS_SHOWN = 100
+
+    def _unread_preview(self, job: Job) -> bool:
+        """A job that is a preview nobody has read: ranked as one and never scored. What a snoozed
+        preview wakes as, and what a decision on one has to read first."""
+        return job.preview_match is not None and self.s.get(FitReportRow, job.id) is None
+
+    def save_previews(self, jobs: list[Job], *, run_ids: dict[str, str] | None = None) -> int:
+        """A search's previews (`normalise.from_lead`), after the hard filters. Returns how many
+        are new to the database.
+
+        **The filters first, and what they hide isn't kept** (MATCH-01): a preview is a lead a
+        search *would* have read, so one with an excluded word, a level above the search, an advert
+        for a paid scheme (`filters.SCHEME`) or a place outside it was never going to be — and
+        hundreds of hidden previews a search would bury the hidden list's near misses. No model is
+        asked anything. A lead WERA already has as a job (a copy found on a board, say) merges into
+        it as a second source, as any re-sighting does, and keeps that job's status.
+        """
+        if not jobs:
+            return 0
+        kept, _hidden = filters.apply(jobs, self._profile(), self.now)
+        for job in kept:
+            job.status = "preview"
+        _stored, new_ids = self.upsert_jobs(kept, run_ids=run_ids)
+        return len(new_ids)
+
+    def list_previews(self, *, limit: int | None = None) -> list[Job]:
+        """Previews, best match first (`preview_match`), then newest posted. Unranked ones last."""
+        rows = self.s.scalars(select(JobRow).where(JobRow.status == "preview")).all()
+        jobs = [self._job(r) for r in rows]
+        jobs.sort(key=lambda j: j.posted_at or "", reverse=True)
+        jobs.sort(key=lambda j: j.preview_match if j.preview_match is not None else -1.0, reverse=True)
+        return jobs[:limit] if limit is not None else jobs
+
+    def read_preview(self, job_id: str) -> PreviewRead:
+        """`POST /jobs/{id}/read` (21 Nov): a preview read in full and scored, at the person's ask.
+
+        One lookup for the employer's own posting, the normal read ladder on it, then a normal
+        score (`fit.evidence_for`) — one `fit.score` call, which counts towards the day's scoring
+        limit (MATCH-05) like any other, so a spent limit refuses before anything is fetched. With
+        no original, the preview is scored on its summary, rough-only (MATCH-04). Read in full, the
+        hard filters apply again — the posting may name a place or a level its summary didn't — and
+        a job they hide is saved hidden, with no score, and said so.
+
+        The fit bar (MATCH-01) is not applied: the person asked for this one by name, as with a
+        pasted job (ATS-04), and a score they asked for is shown whatever it is.
+        """
+        from ..llm.gateway import MESSAGES
+        from ..nodes import fit
+
+        row = self._job_row(job_id)
+        preview = self._job(row)
+        if preview.status != "preview":
+            if preview.status == "new" and self.scored_or_none(preview) is not None:
+                return PreviewRead(job=self.scored(preview), original=False)  # read already
+            raise ApiError(409, "NOT_A_PREVIEW", f"{preview.title} at {preview.company} has already been read.")
+        if self.score_allowance() == 0:
+            raise ApiError(429, "DAILY_CAP", self.score_cap_message())
+        self._assert_budget()  # COST-01
+
+        job, original = self._read_in_full(preview)
+        reason = filters.hidden_reason(job, self._profile(), self.now)
+        if reason is not None:
+            job.status, job.hidden_reason = "hidden", reason
+        stored, _new = self.upsert_jobs([job])
+        job = stored[0]
+        if reason is not None:
+            self.s.flush()
+            logfire.info("Preview {job_id} read and hidden: {reason}", job_id=job.id, reason=reason, original=original)
+            return PreviewRead(job=None, hidden_reason=reason, original=original)
+        evidence, _, code = fit.evidence_for(self.s, job, self.cv(), model=self.scoring_model(), now=self.now)
+        if evidence is None:
+            raise ApiError(
+                424,
+                code or "SCORE_FAILED",
+                f"WERA read the job but couldn't score it, so it stays a preview. {MESSAGES.get(code or '', 'Try again in a moment.')}",
+            )
+        self.s.flush()
+        logfire.info("Preview {job_id} read in full", job_id=job.id, original=original, via=job.via)
+        return PreviewRead(job=self.scored(job), original=original)
+
+    def _read_in_full(self, preview: Job) -> tuple[Job, bool]:
+        """The preview read (`previews.read_many`), or in the demo its fixture's full ad (DEMO-02:
+        no outbound request). Returns the job as read and whether its original was found."""
+        from ..sources import previews
+
+        if get_settings().wera_demo_mode:
+            seed = next((p for p in fixture("jobs.json").get("previews", []) if p["id"] == preview.id), None)
+            if seed is None or not seed.get("fullDescription"):
+                return previews.unread(preview), False
+            page = preview.model_copy(update={"description_md": seed["fullDescription"], "description_status": "full"})
+            return previews.absorb(preview, page.model_copy(update={"status": "new"})), True
+
+        from ..graphs.intake import normalise_with_model
+        from ..sources import browser, targets
+        from ..sources.firecrawl_search import SearchOutcome
+        from ..sources.provider_guard import Guard
+        from ..sources.serper import Serper
+
+        # One page, and never past what the week's Firecrawl credits have left.
+        week_left = max(0, wera().max_credits_per_week - self.credits_this_week())
+        caps = dataclasses.replace(previews.CLICK_CAPS, max_credits=min(previews.CLICK_CAPS.max_credits, week_left))
+        try:
+            redis = targets.connect()
+        except ApiError:  # Redis down: the lookup goes without the guard's shared answers
+            redis = None
+        serper: Serper | None = None
+        if not previews.is_direct(preview):  # a hunted link is the posting: nothing to look for (22 Nov)
+            try:
+                # One lookup, through the guard: the day's meter and the breaker apply to a click too.
+                serper = Serper(max_queries=1, window=strategist.RESOURCE_WINDOW, guard=Guard(redis, "serper"))
+            except ApiError as exc:  # no Serper key: no lookup, and the summary is what there is
+                logfire.warn("No lookup for preview {job_id}: {code}", job_id=preview.id, code=exc.code)
+        with browser.session() as fetch_html:
+            got = previews.read_many(
+                [preview],
+                serper=serper,
+                sites=sites(),
+                profile=self._profile(),
+                caps=caps,
+                spend=SearchOutcome(),
+                now=self.now,
+                # No crawl cache on a click: it commits on its own connection, and the request's
+                # transaction is open around this — on SQLite, a second writer waiting on the first.
+                cache=None,
+                fetch_html=fetch_html,
+                parse=normalise_with_model,
+                redis=redis,
+            )
+        if preview.id in got.unread:
+            # 22 Nov: a hunted link's only "summary" is its text, so one that couldn't be read is
+            # not scored on it. It stays a preview, and nothing was counted against the day.
+            where = preview.found_on.site if preview.found_on is not None else "its site"
+            raise ApiError(
+                422,
+                "PREVIEW_UNREADABLE",
+                f"WERA couldn't read {preview.title} on {where}: {got.unread[preview.id]}. It stays in the list; "
+                "open its link yourself to read it.",
+            )
+        return got.jobs[0], bool(got.originals)
+
     def scored(self, job: Job, weights: FitWeights | None = None) -> ScoredJob:
         report = build_fit_report(
             job.id,
             self._evidence(job.id),
             job.posted_at,
-            job.description_status == "missing",
+            rough_only(job),  # MATCH-04: no description, or a job API's summary of one (21 Nov)
             weights or self._weights(),
             self.now,
             stale=self._stale_score(job),
@@ -877,6 +1055,11 @@ class Store:
 
     def get_job(self, job_id: str) -> ScoredJob:
         return self.scored(self._job(self._job_row(job_id)))
+
+    def get_job_status(self, job_id: str) -> str | None:
+        """A job's status, or None for no such job — read from the column, without building it."""
+        row = self.s.get(JobRow, job_id)
+        return row.status if row is not None else None
 
     def mark_seen(self, job_id: str) -> None:
         """SRCH-25: the person opened this job, so it is no longer new. Idempotent."""
@@ -1014,6 +1197,9 @@ class Store:
             snoozed=self.count_jobs("snoozed"),
             rejected=self.count_jobs("rejected"),
             active_run_ids=list(self.s.scalars(select(IntakeRunRow.id).where(IntakeRunRow.status == "running"))),
+            previews=self.list_previews(limit=self.PREVIEWS_SHOWN),
+            previews_total=self.count_jobs("preview"),
+            preview_cutoffs=PreviewCutoffs(strong=PREVIEW_STRONG, good=PREVIEW_GOOD),
         )
 
     def _minutes_ago(self, at: str) -> str:
@@ -1026,11 +1212,24 @@ class Store:
 
     # ---- Gate 1 (G1-02, G1-05, MATCH-06, TRK-03) ----
 
-    def decide(self, job_id: str, d: DecisionIn) -> ScoredJob:
+    def decide(self, job_id: str, d: DecisionIn) -> ScoredJob | Job:
         self.settle()
         row = self._job_row(job_id)
         job = self._job(row)
         now = self.now
+        # 21 Nov: approving a preview reads it first — a pack is drafted from the ad, and a
+        # preview's is a job API's summary of it. Snoozing or rejecting one needs no read.
+        if job.status == "preview" and d.action == "approve":
+            read = self.read_preview(job_id)
+            if read.job is None:
+                raise ApiError(
+                    409,
+                    "HIDDEN_WHEN_READ",
+                    f"WERA read the full ad and your profile hides it ({read.hidden_reason}), so nothing was approved.",
+                )
+            job = self._job(self._job_row(job_id))
+        elif job.status == "preview":
+            job.status = "new"  # decided on as it is: a snooze wakes it as a preview (`settle`)
         # MATCH-11: what the job was when it was decided on, before the decision changes it — an
         # unhide clears the reason it was hidden for, which is the thing worth learning.
         before = self.scored_or_none(job)
@@ -1083,7 +1282,8 @@ class Store:
         self.s.flush()
         logfire.info("Gate 1 {action} on {job_id}", action=d.action, job_id=job_id, job_status=job.status)
         GATE1_DECISIONS.add(1, {"action": d.action})
-        return self.scored(job)
+        # A preview snoozed or rejected unread (21 Nov) has no fit to report: the job as it is.
+        return self.scored(job) if self.s.get(FitReportRow, job.id) is not None else job
 
     def _record_decision(
         self,
@@ -1488,7 +1688,10 @@ class Store:
         `JobRow.data` rather than a column — the same reason `known_apply_urls` scans.
         """
         rows = self.s.scalars(select(JobRow).where(JobRow.status.in_(self.RECHECKABLE))).all()
-        jobs = [self._job(row) for row in rows]
+        # Never a job API's tracked link (SRCH-32, 21 Nov): a preview read without its original
+        # keeps that link for the person to open, and checking it would be a click an advertiser
+        # pays for. Such a job's liveness stays unverified, which is what it is.
+        jobs = [job for row in rows if not normalise.is_tracked_link((job := self._job(row)).apply_url)]
         jobs.sort(key=lambda j: (j.last_checked_at is not None, j.last_checked_at or ""))
         return jobs[:limit]
 
@@ -1525,7 +1728,10 @@ class Store:
         """
         cutoff = self.now - after_days * 24 * 60 * 60 * 1000
         archived = 0
-        for row in self.s.scalars(select(JobRow).where(JobRow.status.in_(self.RECHECKABLE))).all():
+        # Previews too (21 Nov), like any board-search job: a lead no search has listed for
+        # `after_days` has most likely closed. They are never re-checked (`recheck_candidates`), so
+        # `last_seen` — the last search that listed them — is the only clock they have.
+        for row in self.s.scalars(select(JobRow).where(JobRow.status.in_((*self.RECHECKABLE, "preview")))).all():
             job = self._job(row)
             if any(s.channel == "watchlist" for s in job.sources):
                 continue
@@ -1609,7 +1815,28 @@ class Store:
                     (job.id, dedupe.bare_title(job.company, job.title))
                 )
                 continue
-            merged = dedupe.merge_sources(self._job(existing), job)
+            if existing.status == "preview" and job.status != "preview":
+                # 21 Nov: a preview's own posting, read — by "Read the full ad", by "Find more",
+                # or found again by a later search. The posting's words win over the job API's
+                # summary of them, and it joins the shortlist (or the hidden list, by the
+                # filters); the preview's id, run and match stay (`previews.absorb`).
+                from ..sources.previews import absorb
+
+                merged = absorb(self._job(existing), job)
+                # 22 Nov: and it is found by the search that read it — saved as a preview by an
+                # earlier run, it is new to the person now, so "Just found" and "Found by this
+                # search" show it and the run counts it (on 22 Nov eight read previews kept the
+                # earlier run, and the search that read them said it found 1). With no run (the
+                # person's own "Read the full ad"), the run that saved it stays; either way it is
+                # unseen again, so it is "New".
+                channel = job.sources[0].channel if job.sources else None
+                run_id = (runs.get(channel) if channel else None) or only_run
+                if channel is not None and (run_id is not None or merged.found_by is None):
+                    merged.found_by = FoundBy(run_id=run_id, channel=channel, at=iso(self.now))
+                merged.seen_at = None
+                new_ids.add(existing.id)
+            else:
+                merged = dedupe.merge_sources(self._job(existing), job)
             merged.last_seen = iso(self.now)
             # LIFE-03: an employer's own feed listing the job today is a live answer that it is
             # open. A board card is not — it may be the crawl cache's copy from two days ago.
@@ -2475,6 +2702,8 @@ class Store:
             return False
         if self.jobs_needing_score(cv_version=self.cv().version, model=self.scoring_model()):
             return False
+        if self.count_jobs("preview"):
+            return False  # 21 Nov: "Find more" reads the best previews once every tier is sent
         try:
             queue = targets.TargetQueue(targets.connect(), self.plan_key(), pool=self.pool_key(), reader=self.reader_key())
             planned, _ = self.search_queries(refresh=False, probe=False)
@@ -3535,6 +3764,7 @@ class Store:
                     "nextRunAt": None if env.wera_demo_mode else next_search_at(schedule),
                     "creditsThisWeek": self.credits_this_week(),
                     "weeklyCreditCap": wera().max_credits_per_week,
+                    **_google_left(env.wera_demo_mode),
                 },
                 # SET-06: the real figure, from the rows the gateway writes (not a stored number).
                 "spentThisWeekUsd": spent_this_week_usd(self.s, self.now),

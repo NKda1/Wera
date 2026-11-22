@@ -14,6 +14,36 @@ DEFAULT_WEIGHTS = FitWeights(core=0.35, adjacent=0.2, experience=0.2, eligibilit
 # §8.2 rough-only jobs (no description) are capped, since the score is a title match.
 ROUGH_CAP = 6.5
 
+
+def rough_only(job: Job) -> bool:
+    """MATCH-04: whether a score could only be rough — judged on less than the ad itself.
+
+    A card with no description (`missing`) always was. *(21 Nov)* So is one with only part of it
+    (`partial`): a preview read without its original is scored on a job API's summary, 270–500
+    characters that name the role and a skill or two and none of what it asks, and a summary that
+    happens to read well is not a fit any more than a title is. Capped at `ROUGH_CAP` the same way.
+    """
+    return job.description_status != "full"
+
+
+# 21 Nov: a preview's label from its `lead_ranker` match (cosine of title and summary against the
+# CV, plus 0.1 when the title names a target title), never a number on screen — the match is a
+# similarity, not a fit, and a "0.71" beside a fit of 7.1 would read as the same scale. Calibrated
+# on the finance CV (v9) against 1,035 real Adzuna and Careerjet leads in Redis, 21 Nov: see
+# `PREVIEW_LABELS` in SPEC SRCH-26. Strong is about the best fifth, Good the next two-fifths.
+PREVIEW_STRONG = 0.80
+PREVIEW_GOOD = 0.72
+
+
+def preview_label(match: float | None) -> str:
+    """ "strong", "good" or "possible" (21 Nov). Unranked (no embedding model) is "possible"."""
+    if match is None:
+        return "possible"
+    if match >= PREVIEW_STRONG:
+        return "strong"
+    return "good" if match >= PREVIEW_GOOD else "possible"
+
+
 DAY_MS = 24 * 60 * 60 * 1000
 
 # §8.2's freshness ladder, and the groups the Jobs screen puts jobs into, from one table —

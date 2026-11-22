@@ -126,6 +126,7 @@ AGGREGATORS = (
     "simplyhired.co.uk", "simplyhired.com", "jooble.org", "talent.com", "efinancialcareers.com", "efinancialcareers.co.uk",
     "jobleads.com", "devglobaljobs.com", "jobrapido.com", "neuvoo.com", "whatjobs.com", "learn4good.com", "trabajo.org",
     "jobright.ai", "bandana.com", "jobs.fox8.com", "apply4u.co.uk", "startup.jobs", "simplify.jobs",
+    "jobgether.com",
 )  # fmt: skip
 
 
@@ -141,13 +142,60 @@ INTERMEDIARIES = frozenset(
         # ("Analyst, Portfolio Valuation - Goodman Masson").
         "goodman masson", "morgan mckinley", "selby jennings", "hays specialist recruitment", "page group",
         "pagegroup", "robert walters", "korn ferry", "oliver james", "sanderson", "investigo", "barclay simpson",
+        # 22 Nov: Switzerland's public job board and an aggregator, both shown as employers.
+        "job room", "jobgether",
     }
 )  # fmt: skip
 
 
+# How the sites a job is found on write their own names (22 Nov), where their address alone would
+# read wrong ("Bebee", "Jobleads"). What a hunted link's card says it was found on (`hunt.site_name`),
+# and, with the boards in `config/sites.yaml`, never an employer (`is_intermediary`).
+SITE_NAMES = {
+    "bebee.com": "beBee", "jobleads.com": "JobLeads", "indeed.com": "Indeed", "indeed.co.uk": "Indeed",
+    "efinancialcareers.com": "eFinancialCareers", "efinancialcareers.co.uk": "eFinancialCareers",
+    "simplyhired.com": "SimplyHired", "simplyhired.co.uk": "SimplyHired", "cv-library.co.uk": "CV-Library",
+    "totaljobs.com": "Totaljobs", "jooble.org": "Jooble", "talent.com": "Talent.com", "glassdoor.com": "Glassdoor",
+    "glassdoor.co.uk": "Glassdoor", "jobrapido.com": "Jobrapido", "whatjobs.com": "WhatJobs",
+    "job-room.ch": "Job-Room", "jobgether.com": "Jobgether",
+}  # fmt: skip
+
+
 def is_intermediary(company: str) -> bool:
-    """Whether the named "company" is the board or agency that posted the job, not its employer."""
-    return normalise_company(company) in INTERMEDIARIES
+    """Whether the named "company" is the board or agency that posted the job, not its employer:
+    a named agency (`INTERMEDIARIES`), or — 22 Nov — a board WERA searches or finds links on, by
+    its name. A hunted link whose employer nothing named is saved under its site's name, and a
+    board's posting can name the board as its organisation: either way it is not who the person
+    would write to."""
+    name = normalise_company(company)
+    return name in INTERMEDIARIES or name in _board_names()
+
+
+_BOARDS: frozenset[str] | None = None
+
+
+def _board_names() -> frozenset[str]:
+    """The boards' names, normalised: `config/sites.yaml`'s (by name, and by their address's own
+    name — "gradcracker.com" is "Gradcracker"), and `SITE_NAMES`. Read once a process."""
+    global _BOARDS
+    if _BOARDS is None:
+        try:
+            from ..config import sites  # config's models import this module's
+
+            boards = sites()
+        except Exception:  # noqa: BLE001 — a missing or broken sites file costs the boards' names only
+            boards = []
+        names = {*SITE_NAMES.values(), *(s.name for s in boards), *(_own_name(s.domain) for s in boards)}
+        _BOARDS = frozenset(n for n in (normalise_company(x) for x in names) if n)
+    return _BOARDS
+
+
+def _own_name(domain: str) -> str:
+    """'www.gradcracker.com' → 'gradcracker', 'reed.co.uk' → 'reed'."""
+    labels = [p for p in domain.lower().removeprefix("www.").split(".") if p]
+    if len(labels) >= 3 and labels[-2] in {"co", "com", "org", "ac"} and len(labels[-1]) == 2:
+        return labels[-3]
+    return labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
 
 
 # A recruiter posting on an employer's behalf, by how agencies name themselves.

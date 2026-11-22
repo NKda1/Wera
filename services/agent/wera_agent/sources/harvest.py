@@ -272,6 +272,8 @@ def _gate(target: Target, rules: Robots, declined: set[str], sites: list[Site]) 
         return "LinkedIn"
     if target.source == "feed":
         return None  # read from the API, not fetched as a page (SRCH-31)
+    if normalise.is_tracked_link(target.url):
+        return "tracked link"  # a job API's paid click, never requested (SRCH-32)
     if classify(target.url, title=target.title, sites=sites) != "posting":
         return NOT_A_POSTING
     host = host_of(target.url).removeprefix("www.")

@@ -22,7 +22,7 @@ a slug alone is too often a category ("/jobs/software-engineer" is Milkround's c
 """
 
 import re
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from ..domain.dedupe import canonical_url
@@ -227,7 +227,116 @@ def posting_links(html: str, page_url: str, domain: str, limit: int) -> list[tup
         if key == page or key in seen:
             continue
         seen.add(key)
-        out.append((href.split("#")[0], " ".join((anchor.text() or "").split())[:200]))
+        out.append((href.split("#")[0], _link_text(anchor)[:200]))
         if len(out) >= limit:
             break
     return out
+
+
+# Where a job card keeps its title inside the link, first match wins. 21 Nov: jobs.ch's links are
+# whole cards, and their text run together read "3 weeks agoBusiness Analyst TraineePlace of
+# work:Zürich" — a title MATCH-01 can't judge and the pool can't rank.
+_TITLE_NODES = ("h1", "h2", "h3", "h4", "h5", "[class*='title' i]", "[data-cy*='title' i]", "strong")
+
+
+def _link_text(anchor: Any) -> str:
+    """A link's job title: its label when it has one of a few words, the card's heading when the
+    link is a card, else all its text with the pieces kept apart."""
+    for attr in ("aria-label", "title"):
+        label = " ".join((anchor.attributes.get(attr) or "").split())
+        if len(label.split()) >= 2:
+            return label
+    for selector in _TITLE_NODES:
+        node = anchor.css_first(selector)
+        if node is not None and (text := " ".join((node.text(separator=" ") or "").split())):
+            return text
+    return " ".join((anchor.text(separator=" ") or "").split())
+
+
+# SRCH-22 (21 Nov): how a results page names its next page. `rel="next"` first — a `<link>` in the
+# head or an `<a>` in the pager — then a pager link whose words or label say "next", then a link
+# that is this page's own address with its page number one higher. Nothing looser: a link called
+# "More jobs" is as often a category as a second page, and following it reads a different list.
+_NEXT_WORDS = re.compile(
+    r"^(?:next(?:\s+page)?|next\s*[›»>→]|[›»>→]|page\s+suivante|weiter|nächste(?:\s+seite)?|volgende|siguiente)$", re.I
+)
+PAGE_PARAMS = ("page", "pg", "p", "pagenumber", "page_number", "pageno")
+
+
+def next_page(html: str, page_url: str) -> str | None:
+    """The page after this one, on the same site, or None when the page names none.
+
+    Same host only (a pager never sends you to another site), never this page again, and never a
+    URL `classify` calls a posting or a closed page — a "next" that is really the first job is
+    not a page of results.
+    """
+    from selectolax.lexbor import LexborHTMLParser
+
+    tree = LexborHTMLParser(html)
+    here = urlparse(page_url)
+    site = (here.hostname or "").lower().removeprefix("www.")
+    page = canonical_url(page_url) or page_url
+
+    def usable(href: str | None) -> str | None:
+        if not href or href.startswith(("#", "javascript:", "mailto:")):
+            return None
+        url = urljoin(page_url, href).split("#")[0]
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().removeprefix("www.")
+        if parsed.scheme not in ("http", "https") or not (host == site or host.endswith(f".{site}")):
+            return None
+        if (canonical_url(url) or url) == page or classify(url) in ("posting", "closed"):
+            return None
+        return url
+
+    for node in tree.css('link[rel~="next"], a[rel~="next"]'):
+        if url := usable(node.attributes.get("href")):
+            return url
+    for anchor in tree.css("a[href]"):
+        label = " ".join((anchor.attributes.get("aria-label") or anchor.attributes.get("title") or anchor.text() or "").split())
+        if label and _NEXT_WORDS.match(label) and (url := usable(anchor.attributes.get("href"))):
+            return url
+    # The same address with the page number one higher: `?page=2` from `?page=1` (or from no page
+    # number at all, which is page 1).
+    params = {k.lower(): v for k, v in parse_qs(here.query).items()}
+    name = next((p for p in PAGE_PARAMS if p in params), None)
+    try:
+        current = int(params[name][0]) if name else 1
+    except ValueError:
+        return None
+    for anchor in tree.css("a[href]"):
+        url = usable(anchor.attributes.get("href"))
+        if url is None:
+            continue
+        there = urlparse(url)
+        if there.path.rstrip("/") != here.path.rstrip("/"):
+            continue
+        theirs = {k.lower(): v for k, v in parse_qs(there.query).items()}
+        key = name or next((p for p in PAGE_PARAMS if p in theirs), None)
+        if key and theirs.get(key, [""])[0] == str(current + 1):
+            rest = {k: v for k, v in theirs.items() if k != key}
+            if rest == {k: v for k, v in params.items() if k != key}:
+                return url
+    return None
+
+
+def links_from_urls(urls: list[str], page_url: str, domain: str, limit: int) -> list[tuple[str, str]]:
+    """`posting_links` for a bare list of URLs — what a links-only render returns — with a title
+    read off each URL's last words, since there is no link text: `/job/graduate-analyst-12345`
+    is "Graduate Analyst". Enough for MATCH-01's title rules and the pool's ranking to work on."""
+    html = "".join(f'<a href="{u.replace(chr(34), "%22")}">{_slug_title(u)}</a>' for u in urls if isinstance(u, str))
+    return posting_links(html, page_url, domain, limit)
+
+
+def _slug_title(url: str) -> str:
+    try:
+        path = urlparse(url).path
+    except ValueError:
+        return ""
+    words = [w for seg in path.split("/") for w in re.split(r"[-_+.]", seg) if w.isalpha() and len(w) > 1]
+    tail = [
+        w
+        for w in words
+        if w.lower() not in {"job", "jobs", "vacancy", "vacancies", "careers", "career", "en", "gb", "uk", "html"}
+    ]
+    return " ".join(w.capitalize() for w in tail[-8:])

@@ -176,12 +176,32 @@ max_credits_per_week: 600
 # SRCH-20: Serper queries one search may send, across every tier (one Serper credit each). Tier 1
 # is the top three titles as an open search and against each reviewed board — about 15 queries on
 # a four-board profile — and later tiers are only sent when a search is short of 8 jobs.
-max_serper_queries: 30
+# 22 Nov: 30 → 50 with the day's limit at 200 (the user): on 21 Nov a finance search stopped at 30
+# with 1 job of 8, and rotation gives a deeper search new phrasings and pages to ask.
+max_serper_queries: 50
+# SRCH-32 (22 Nov): one allowance of lookups a search — one Serper search each for where the
+# employer posted a job: a job API's snippet lead (Adzuna, Careerjet), an aggregator's copy (bebee,
+# jobleads, Indeed), or a preview a short search reads in full. Best matches first: the job APIs,
+# asked first, take at most two-thirds, and only for leads at "Good match" or better; the rest is
+# kept for the Google tiers' copies and the short search's previews. On top of `max_serper_queries`
+# and inside the Serper day: 50 + 15 is 65 a search at most, two full searches and a half of the
+# day's 160. Was 10 for the APIs and a separate 5 for aggregators' copies.
+lookups_per_search: 15
+# SRCH-20 (21 Nov): every search used to send the same plan, so a second search the same day found
+# its postings "already saved". Each planned search now has other phrasings (graduate, entry level,
+# junior, a scheme, the CV's skills, the field), and what was sent is remembered per pool in Redis
+# for `memory_days`. A search sent in the last `skip_days` isn't sent again: its next page goes
+# instead while its pages keep finding postings (up to `max_page`), else its next phrasing.
+rotation:
+  skip_days: 3
+  memory_days: 7
+  max_page: 3
+  variants: 6
 
 # SRCH-33: what Redis remembers in front of each provider, shared by every search and person.
 # An answer from here is free and never counted against a cap. `daily` counts every run (UTC
-# days); a search stops at `stop_at` of it so the scheduled runs keep the rest. Serper's 150 is
-# five full searches; raise it with the plan you're on. `wera providers status` shows where each
+# days); a search stops at `stop_at` of it so the scheduled runs keep the rest. Serper's 200
+# (22 Nov, the user; was 150) is about three full searches of 50; raise it with the plan you're on. `wera providers status` shows where each
 # provider stands.
 guard:
   cache_minutes: 180 # 3h: the same query twice in an afternoon is free
@@ -200,7 +220,7 @@ guard:
     window_seconds: 60
     open_seconds: 60
   daily:
-    serper: 150
+    serper: 200
     # 17 Nov: the APIs are now asked in every ticked country, not the first three alphabetically,
     # so each has a day's ceiling too. Set to your accounts' own limits; these are cautious guesses.
     adzuna: 200
@@ -215,7 +235,7 @@ guard:
 #
 # * Reed (UK) and USAJOBS (US federal) give the full text, read from the API.
 # * Adzuna and Careerjet give a snippet behind a tracked link that WERA never opens; each lead's
-#   original posting is found with one Serper search (at most 10 a search, on their own cap).
+#   original posting is found with one Serper search (within `lookups_per_search`, shared).
 #   Adzuna's terms: an "Adzuna" label linked on each job it found (the card shows one), and
 #   commercial use needs a licence — a blocker before accounts. Careerjet needs the person's IP
 #   and browser on every call, so scheduled runs skip it, and its key works only from the IPs
@@ -294,6 +314,18 @@ max_scored_per_day: 70
 # a lot of quality jobs". Reposts of one job are merged (`dedupe`), weak jobs hidden by the fit bar.
 source_share:
   firecrawl_searches: 6
+
+# SRCH-22 (21 Nov): the hunter reads every results and category page a search turns up for its
+# postings: plain HTTP first (robots.txt asked), its next pages followed, and Firecrawl's links-only
+# render (1 credit) only for a page that answered 200 with no posting links — a JavaScript shell,
+# never a refusal. A host that refused is left alone for the rest of the search. All per search;
+# renders also stay inside the run's credit cap. 20 Nov: 13 listings read, 0 postings.
+hunt:
+  listings_per_search: 40
+  links_per_listing: 50
+  next_pages: 2
+  firecrawl_per_search: 30
+  workers: 4
 
 # UPSK-06 (20 Nov): the jobs a CV nearly matched — a title the filter dropped, never an excluded
 # word or a too-senior one — feed Upskills. Of each search's near misses at least

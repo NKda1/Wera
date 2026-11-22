@@ -20,7 +20,22 @@ Disallow: /
 """.splitlines()
 
 
+# job-room.ch, Switzerland's public job board (22 Nov): its adverts are under /job-search/, and
+# its robots.txt asks that they are not crawled.
+JOB_ROOM = """
+User-agent: *
+# Do not crawl Job Adverts
+Disallow: /job-search/
+""".splitlines()
+
+
 class TestTheRules:
+    def test_job_rooms_adverts_are_refused(self):
+        rules = Rules.parse(JOB_ROOM)
+        assert not rules.allows("https://www.job-room.ch/job-search/0f3c2a10-junior-financial-analyst")
+        assert not rules.allows("https://www.job-room.ch/job-search/?query=analyst")
+        assert rules.allows("https://www.job-room.ch/home")
+
     def test_the_longest_match_wins_not_the_first(self):
         rules = Rules.parse(INDEED)
         assert not rules.allows("https://www.indeed.com/viewjob?jk=abc123")

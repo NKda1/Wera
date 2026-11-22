@@ -13,13 +13,17 @@ decide. Silently dropping a job they might have wanted is the worse failure.
 import hashlib
 import html
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from ..clock import iso, parse_ms
 from ..domain import dedupe, places
 from ..domain.text import display_case, is_linkedin_url
-from ..schemas.jobs import Ats, Job, JobSource, Location, PostedPrecision, Salary
+from ..schemas.jobs import Ats, FoundOn, Job, JobSource, Location, PostedPrecision, Salary
 from ..sources.ats_feeds import FeedJob
+
+if TYPE_CHECKING:
+    from .feeds import Lead
 
 # Enough to tell a European job ad from an English one without a language model.
 NON_ENGLISH = {
@@ -403,3 +407,123 @@ def from_card(
         now=now,
         linkedin_url=linkedin,
     )
+
+
+# The job APIs' tracked links (SRCH-32): Adzuna's `redirect_url` on any of its country sites, and
+# Careerjet's `jobviewtrack.com`. A click there is one an advertiser pays for, so WERA stores the
+# link for the person to open and never requests it — not to read it, not to check it is still up.
+_TRACKED = re.compile(r"(?:^|\.)(?:adzuna\.[a-z.]+|careerjet\.[a-z.]+|jobviewtrack\.com)$")
+
+
+def is_tracked_link(url: str | None) -> bool:
+    """Whether `url` is a job API's tracked click, which WERA must never fetch (21 Nov)."""
+    try:
+        host = (urlparse(url or "").hostname or "").lower()
+    except ValueError:
+        return False
+    return bool(host) and bool(_TRACKED.search(host))
+
+
+def from_lead(
+    lead: "Lead",
+    feed_id: str | None,
+    query_country: str | None,
+    now: int,
+    *,
+    match: float | None = None,
+    found_on: FoundOn | None = None,
+) -> Job:
+    """A job API's lead that wasn't read this search, kept as a **preview** (21 Nov, SRCH-26).
+
+    Adzuna gives about 500 characters of the ad and Careerjet about 270, behind a tracked link. A
+    search has lookups for its best leads' originals (SRCH-32), and on 20 Nov 228 that passed every
+    filter went unread; they are kept here instead, ranked by `match` (`prefilter.lead_ranker`) and
+    read in full on demand (`Store.read_preview`).
+
+    What is known is kept and nothing more: the summary is the description, `partial` — so a score
+    on it alone is `rough_only`, capped like a card with no description (MATCH-04) — and the
+    tracked link is the apply URL, **stored for the person to open and never fetched**
+    (`is_tracked_link`). The country is the one the API was asked for, since its place names
+    ("Canary Wharf, East London") don't always carry one. Built through `_job` like every other
+    source, so the employer's name, the display case and `dedupe_key` are the same as a read job's.
+
+    An aggregator's copy of one job (22 Nov) is kept the same way, with no `feed_id` and
+    `found_on` saying which site it is a copy on: its title and company are those its search
+    result named (`hunt.copy_lead`), its summary the result's.
+    """
+    where = " ".join((lead.location or "").split())
+    summary = " ".join((lead.snippet or "").split())
+    job = _job(
+        title=lead.title,
+        company=lead.company,
+        location=Location(
+            city=where.split(",")[0].strip() or None,
+            country=query_country.upper() if query_country else None,
+            raw=where or "Not stated",
+        ),
+        remote=infer_remote(where, summary[:400]),
+        description=summary or None,
+        status="partial" if summary else "missing",
+        apply_url=lead.url,
+        ats=None,
+        source=JobSource(channel="board_search", detail=feed_id or _host(lead.url), seen_at=iso(now)),
+        posted_at=lead.date,
+        now=now,
+    )
+    job.status, job.via, job.preview_match, job.found_on = "preview", feed_id, match, found_on
+    return job
+
+
+def from_hunted(
+    url: str,
+    *,
+    title: str,
+    employer: str | None,
+    site: str,
+    listing: str | None,
+    now: int,
+    match: float | None = None,
+) -> Job:
+    """A posting link the hunter found that its search didn't read, kept as a **preview** (22 Nov,
+    SRCH-22): the link is the posting, so reading it needs no lookup.
+
+    It is keyed by its own address, never by company and title — two "Graduate Analyst" links on
+    one board are two jobs — and with the employer's job system's identity when the address carries
+    one, so that reading it later lands on this row, not a second one. The title is the link's
+    text. The company is the `employer` the link named (`hunt.employer_of`) or, when nothing did,
+    the site's name with `found_on.employer_known` false, so the card says "Found on <site>" rather
+    than naming an employer it doesn't know. Nothing else is known: no place — not even a country,
+    since the search's country is where it looked, not where the job is, and a guess there would
+    hide it from a city-only profile — no date, no description. So it isn't hidden for its place
+    until it is read, and a score on it alone would be rough-only (MATCH-04).
+    """
+    from .resolve import ats_from_url
+
+    job = _job(
+        title=title,
+        company=employer or site,
+        # No words for a place at all (not "Not stated", which the filters read as a place they
+        # can't find, and hide): the place is judged once the posting is read.
+        location=Location(city=None, country=None, raw=""),
+        remote=None,
+        description=None,
+        status="missing",
+        apply_url=url,
+        ats=ats_from_url(url),
+        source=JobSource(channel="board_search", detail=_host(url), seen_at=iso(now)),
+        posted_at=None,
+        now=now,
+    )
+    # An agency's site whose link names the employer ("… - Citi" on eFinancialCareers) gives its
+    # employer through `_job`, as a read job's title would.
+    known = employer is not None or job.posted_by is not None
+    job.status, job.preview_match = "preview", match
+    job.found_on = FoundOn(site=site, page=listing, kind="posting", employer_known=known)
+    return job
+
+
+def _host(url: str | None) -> str:
+    try:
+        return (urlparse(url or "").hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return ""

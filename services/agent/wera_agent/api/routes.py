@@ -26,6 +26,7 @@ from ..schemas.api import (
     JobsCleared,
     NavCounts,
     PlaceOption,
+    PreviewRead,
     ProfileProposalResult,
     RegenerateIn,
     RunIn,
@@ -39,14 +40,14 @@ from ..schemas.applications import ApplicationWithJob
 from ..schemas.cv import Contact, CvLine, MasterCV
 from ..schemas.cv_file import CvFile, CvFileIn, CvPreview
 from ..schemas.cv_profile import CvProfile
-from ..schemas.jobs import ScoredJob
+from ..schemas.jobs import Job, ScoredJob
 from ..schemas.learning import SuggestionList
 from ..schemas.pack import AtsCompare, WritingReport
 from ..schemas.profile import SavedProfile, SearchProfile
 from ..schemas.runs import Estimate, IntakeRun, RunIds
 from ..schemas.settings import SettingsPatch, SettingsResponse
 from ..schemas.strategy import TargetMatrix
-from ..schemas.upskills import UpskillsReport
+from ..schemas.upskills import UpskillsReport, UpskillsVersion
 from ..services.store import Store
 
 # Aliased: this module already has a `get_settings` *route*, which would shadow it.
@@ -182,17 +183,28 @@ def summarise_job(s: S, job_id: str) -> ScoredJob:
     return s.summarise_job(job_id)
 
 
+@router.post("/jobs/{job_id}/read")
+def read_preview(s: S, job_id: str) -> PreviewRead:
+    """21 Nov: "Read the full ad" on a preview — one lookup for the employer's own posting, the
+    read ladder on it, and a score, which counts towards the day's scoring limit (MATCH-05). With
+    no original it is scored on the job API's summary, rough-only (MATCH-04). Never requests the
+    job API's tracked link (SRCH-32)."""
+    return s.read_preview(job_id)
+
+
 @router.post("/jobs/{job_id}/decision")
-def decide(s: S, job_id: str, body: DecisionIn) -> ScoredJob:
+def decide(s: S, job_id: str, body: DecisionIn) -> ScoredJob | Job:
     """Gate 1: approve, snooze (1, 3 or 7 days) or reject (G1-02). Every decision is logged (MATCH-06).
 
     The decision is saved before the response goes out; the pack is drafted after it, by the
     application graph, so the person isn't left waiting on a model call.
     """
-    if body.action == "approve" and not environment().wera_demo_mode:
+    if body.action == "approve" and not environment().wera_demo_mode and s.get_job_status(job_id) != "preview":
         # LIFE-05: a pack is model calls and the person's time — make sure the job is still there
         # first. Free (a feed or one page), and only a definite answer stops it: "gone" closes the
-        # job and `decide` then refuses with JOB_CLOSED; anything less goes ahead.
+        # job and `decide` then refuses with JOB_CLOSED; anything less goes ahead. A preview
+        # (21 Nov) is read in full by `decide` instead, and its only link may be a job API's
+        # tracked one, which is never requested (SRCH-32).
         from ..graphs import recheck
 
         if recheck.check_one(job_id, force=True) == "gone":
@@ -369,7 +381,19 @@ def get_upskills(s: S, days: int = Query(60, ge=7, le=365), family: str | None =
     field = (get_kv(s.s, "target_matrix") or {}).get("field")
     # UPSK-07 (21 Nov): the target titles say the person's own role family; `family` filters to one.
     titles = s.get_profile().titles
-    return upskills.report(s.s, s.cv(), now=s.now, days=days, field=field, titles=titles, family=family or None)
+    cv = s.cv()
+    out = upskills.report(s.s, cv, now=s.now, days=days, field=field, titles=titles, family=family or None)
+    out.version = upskills.version(s.s, cv, titles=titles)
+    return out
+
+
+@router.get("/upskills/version")
+def get_upskills_version(s: S) -> UpskillsVersion:
+    """22 Nov: what the report would be built from, cheaply — the Upskills page polls it and
+    refreshes when it moves (a search's scores, a near miss read after it, a decision)."""
+    from ..services import upskills
+
+    return UpskillsVersion(version=upskills.version(s.s, s.cv(), titles=s.get_profile().titles))
 
 
 @router.get("/learning/suggestions")

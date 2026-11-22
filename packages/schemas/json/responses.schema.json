@@ -130,6 +130,11 @@
         "company": {
           "type": "string"
         },
+        "employerNamed": {
+          "description": "Whether `company` is the employer or only the board or agency that posted the job\n(22 Nov; `Job.employer_named`). The review screen, the tracker and the letter's recipient\nline say \"Employer not named\" rather than write to eFinancialCareers as if it were hiring.",
+          "readOnly": true,
+          "type": "boolean"
+        },
         "fitTotal": {
           "type": "number"
         },
@@ -167,7 +172,8 @@
         "company",
         "location",
         "remote",
-        "fitTotal"
+        "fitTotal",
+        "employerNamed"
       ],
       "title": "ApplicationJob",
       "type": "object"
@@ -1849,6 +1855,34 @@
       "title": "FoundCounts",
       "type": "object"
     },
+    "FoundOn": {
+      "description": "Where a preview no job API found came from (21 Nov, SRCH-22): a posting link the hunter took\noff a page of jobs, or an aggregator's copy of one job. The job APIs' previews have `via`\ninstead.",
+      "properties": {
+        "employerKnown": {
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "posting",
+            "copy"
+          ],
+          "type": "string"
+        },
+        "page": {
+          "type": "string"
+        },
+        "site": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "site",
+        "kind",
+        "employerKnown"
+      ],
+      "title": "FoundOn",
+      "type": "object"
+    },
     "GuardResult": {
       "properties": {
         "pass": {
@@ -2193,11 +2227,19 @@
         "descriptionView": {
           "$ref": "#/$defs/DescriptionView"
         },
+        "employerNamed": {
+          "description": "Whether `company` is the employer (22 Nov). Reed gives \"eFinancialCareers\" as the\nemployer of the posts it carries for that board, and the posts say only \"a leading\nfinancial institution\": the card read \"Trade Operations Analyst \u2014 eFinancialCareers\". A\nboard or agency WERA knows (`dedupe.is_intermediary`), or a hunted link's site when\nnothing named the employer (`FoundOn.employer_known`), is the poster, never the employer.\n`company` stays the poster, so dedupe keys, same-posting merges and the letter's rule for a\nboard's post (`tailor.job_header`) are unchanged; what shows the employer reads this.",
+          "readOnly": true,
+          "type": "boolean"
+        },
         "firstSeen": {
           "type": "string"
         },
         "foundBy": {
           "$ref": "#/$defs/FoundBy"
+        },
+        "foundOn": {
+          "$ref": "#/$defs/FoundOn"
         },
         "hiddenReason": {
           "type": "string"
@@ -2235,6 +2277,9 @@
         "postedPrecision": {
           "$ref": "#/$defs/PostedPrecision",
           "default": "unknown"
+        },
+        "previewMatch": {
+          "type": "number"
         },
         "remote": {
           "anyOf": [
@@ -2296,7 +2341,8 @@
         "postedPrecision",
         "firstSeen",
         "lastSeen",
-        "status"
+        "status",
+        "employerNamed"
       ],
       "title": "Job",
       "type": "object"
@@ -2415,7 +2461,8 @@
         "rejected",
         "hidden",
         "closed",
-        "archived"
+        "archived",
+        "preview"
       ],
       "type": "string"
     },
@@ -3116,6 +3163,13 @@
         },
         "title": {
           "type": "string"
+        },
+        "variants": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -3125,7 +3179,8 @@
         "source",
         "tier",
         "title",
-        "page"
+        "page",
+        "variants"
       ],
       "title": "PlannedQuery",
       "type": "object"
@@ -3137,6 +3192,42 @@
         "unknown"
       ],
       "type": "string"
+    },
+    "PreviewCutoffs": {
+      "description": "21 Nov: where a preview's match (`Job.preview_match`) becomes a label on the Jobs screen \u2014\nStrong at `strong` and above, Good at `good` and above, else Possible (`scoring.preview_label`).\nSent with the previews so the screen and the agent can't disagree on a label.",
+      "properties": {
+        "good": {
+          "type": "number"
+        },
+        "strong": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "strong",
+        "good"
+      ],
+      "title": "PreviewCutoffs",
+      "type": "object"
+    },
+    "PreviewRead": {
+      "description": "`POST /jobs/{id}/read` (21 Nov): the preview, read in full. `job` is it scored, on the\nshortlist; or, when reading it in full showed the hard filters hide it, `job` is null and\n`hidden_reason` says why. `original`: its employer's own ad was found and read \u2014 false when it\nwas scored on the job API's summary alone, rough-only (MATCH-04).",
+      "properties": {
+        "hiddenReason": {
+          "type": "string"
+        },
+        "job": {
+          "$ref": "#/$defs/ScoredJob"
+        },
+        "original": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "original"
+      ],
+      "title": "PreviewRead",
+      "type": "object"
     },
     "ProfileChannels": {
       "properties": {
@@ -3679,6 +3770,11 @@
         "descriptionView": {
           "$ref": "#/$defs/DescriptionView"
         },
+        "employerNamed": {
+          "description": "Whether `company` is the employer (22 Nov). Reed gives \"eFinancialCareers\" as the\nemployer of the posts it carries for that board, and the posts say only \"a leading\nfinancial institution\": the card read \"Trade Operations Analyst \u2014 eFinancialCareers\". A\nboard or agency WERA knows (`dedupe.is_intermediary`), or a hunted link's site when\nnothing named the employer (`FoundOn.employer_known`), is the poster, never the employer.\n`company` stays the poster, so dedupe keys, same-posting merges and the letter's rule for a\nboard's post (`tailor.job_header`) are unchanged; what shows the employer reads this.",
+          "readOnly": true,
+          "type": "boolean"
+        },
         "evergreen": {
           "default": false,
           "type": "boolean"
@@ -3691,6 +3787,9 @@
         },
         "foundBy": {
           "$ref": "#/$defs/FoundBy"
+        },
+        "foundOn": {
+          "$ref": "#/$defs/FoundOn"
         },
         "hiddenReason": {
           "type": "string"
@@ -3738,6 +3837,9 @@
         "postedPrecision": {
           "$ref": "#/$defs/PostedPrecision",
           "default": "unknown"
+        },
+        "previewMatch": {
+          "type": "number"
         },
         "remote": {
           "anyOf": [
@@ -3807,7 +3909,8 @@
         "urgency",
         "liveness",
         "possiblyClosed",
-        "evergreen"
+        "evergreen",
+        "employerNamed"
       ],
       "title": "ScoredJob",
       "type": "object"
@@ -3923,6 +4026,12 @@
         },
         "enabled": {
           "type": "boolean"
+        },
+        "googleSearchesLeftToday": {
+          "type": "integer"
+        },
+        "googleSearchesPerDay": {
+          "type": "integer"
         },
         "nextRunAt": {
           "type": "string"
@@ -4197,6 +4306,20 @@
           "default": 0,
           "type": "integer"
         },
+        "previewCutoffs": {
+          "$ref": "#/$defs/PreviewCutoffs"
+        },
+        "previews": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Job"
+          },
+          "type": "array"
+        },
+        "previewsTotal": {
+          "default": 0,
+          "type": "integer"
+        },
         "rejected": {
           "type": "integer"
         },
@@ -4231,7 +4354,9 @@
         "findMoreSize",
         "snoozed",
         "rejected",
-        "activeRunIds"
+        "activeRunIds",
+        "previews",
+        "previewsTotal"
       ],
       "title": "ShortlistMeta",
       "type": "object"
@@ -4875,6 +5000,10 @@
           },
           "type": "array"
         },
+        "version": {
+          "default": "",
+          "type": "string"
+        },
         "windowDays": {
           "type": "integer"
         },
@@ -4890,9 +5019,22 @@
         "demand",
         "coverage",
         "byCategory",
-        "families"
+        "families",
+        "version"
       ],
       "title": "UpskillsReport",
+      "type": "object"
+    },
+    "UpskillsVersion": {
+      "properties": {
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "title": "UpskillsVersion",
       "type": "object"
     },
     "Urgency": {

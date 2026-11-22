@@ -81,7 +81,9 @@ function letterBlocks(app: ApplicationWithJob, cv: MasterCV): Block[] {
   // the place a reader expects a verifiable address is the wrong kind of tidy.
   const recipient = [
     { t: "body" as const, text: letterDate(new Date(app.approvedAt ?? app.createdAt)) },
-    { t: "body" as const, text: app.job.company },
+    // 22 Nov: a board's or agency's post that names no employer is written to its hiring team,
+    // as the letter is (`tailor.job_header`), never to the board as if it were hiring.
+    { t: "body" as const, text: app.job.employerNamed === false ? `Hiring team, via ${app.job.company}` : app.job.company },
     { t: "body" as const, text: `Re: ${app.job.title}` },
   ];
   return [

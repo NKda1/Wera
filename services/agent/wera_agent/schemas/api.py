@@ -36,6 +36,26 @@ class FoundCounts(Model):
     watchlist: int
 
 
+class PreviewCutoffs(Model):
+    """21 Nov: where a preview's match (`Job.preview_match`) becomes a label on the Jobs screen —
+    Strong at `strong` and above, Good at `good` and above, else Possible (`scoring.preview_label`).
+    Sent with the previews so the screen and the agent can't disagree on a label."""
+
+    strong: float
+    good: float
+
+
+class PreviewRead(Model):
+    """`POST /jobs/{id}/read` (21 Nov): the preview, read in full. `job` is it scored, on the
+    shortlist; or, when reading it in full showed the hard filters hide it, `job` is null and
+    `hidden_reason` says why. `original`: its employer's own ad was found and read — false when it
+    was scored on the job API's summary alone, rough-only (MATCH-04)."""
+
+    job: Opt[ScoredJob] = None
+    hidden_reason: Opt[str] = None
+    original: bool
+
+
 class ShortlistMeta(Model):
     found: FoundCounts
     channels: list[ChannelSummary]
@@ -66,6 +86,11 @@ class ShortlistMeta(Model):
     snoozed: int
     rejected: int
     active_run_ids: list[str]
+    # 21 Nov: leads found and kept but not read (`status: preview`), best match first, capped by
+    # `Store.PREVIEWS_SHOWN` — `previews_total` is the count. Plain `Job`s: nothing has scored them.
+    previews: list[Job] = []
+    previews_total: int = 0
+    preview_cutoffs: Opt[PreviewCutoffs] = None
 
 
 class SiteOption(Model):

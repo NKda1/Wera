@@ -163,3 +163,60 @@ class TestNamesThe20NovRunMissed:
             card, url="https://www.efinancialcareers.co.uk/jobs-2", site="efinancialcareers.co.uk", markdown=None, now=now_ms()
         )
         assert saved.title == "Global Equities ESG Investment Analyst" and saved.posted_by is None
+
+
+class TestABoardIsNeverTheEmployer:
+    """22 Nov: Reed gives "eFinancialCareers" as the employer of the posts it carries for that board,
+    and the posts say only "a leading financial institution": the card read "Trade Operations Analyst
+    — eFinancialCareers". The poster stays `company` (keys, merges and the letter's rule for a board's
+    post depend on it), and `employer_named` says it isn't the employer."""
+
+    def test_a_boards_post_that_names_no_one_has_no_employer(self):
+        assert not job("j1", REED, "Trade Operations Analyst", "eFinancialCareers").employer_named
+        assert not job("j2", REED, "Financial Analyst", "Michael Page").employer_named
+
+    def test_job_room_and_jobgether_are_boards_not_employers(self):
+        """22 Nov: Switzerland's public job board and an aggregator were shown as employers."""
+        assert not job("j6", REED, "Junior Financial Analyst", "Job-Room").employer_named
+        assert not job("j7", REED, "Graduate Analyst", "Jobgether").employer_named
+        assert dedupe.SITE_NAMES["job-room.ch"] == "Job-Room" and dedupe.SITE_NAMES["jobgether.com"] == "Jobgether"
+        # A post they carry that names its employer is that employer's; their own name never is one.
+        assert dedupe.employer_named("Job-Room", "Junior Financial Analyst - CERN") == "CERN"
+        assert dedupe.employer_named("eFinancialCareers", "Junior Financial Analyst - Jobgether") is None
+
+    def test_an_employer_and_a_repost_that_names_one_have_theirs(self):
+        assert job("j3", CITI, "Investment Banking Analyst", "Citi").employer_named
+        saved = normalise.from_scrape(
+            dict(TestShownUnderTheEmployer.CARD), url="https://www.efinancialcareers.co.uk/jobs-1",
+            site="efinancialcareers.co.uk", markdown=None, now=now_ms(),
+        )  # fmt: skip
+        assert saved.employer_named and saved.company == "Citi"
+
+    def test_it_is_sent_with_the_job_and_its_application(self):
+        from wera_agent.schemas.applications import ApplicationJob
+
+        board = job("j4", REED, "Trade Operations Analyst", "eFinancialCareers")
+        assert board.model_dump(mode="json", by_alias=True)["employerNamed"] is False
+        assert Job.model_validate(board.model_dump(mode="json")).company == "eFinancialCareers"  # read back as it was
+        app_job = ApplicationJob(
+            id="j4", title=board.title, company=board.company, location=board.location, remote=None, fit_total=6.0
+        )
+        assert app_job.model_dump(mode="json", by_alias=True)["employerNamed"] is False
+
+    def test_its_analysis_doesnt_take_the_board_for_the_employer(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from wera_agent.nodes import analyse
+        from wera_agent.schemas.jobs import FitEvidence
+
+        out = SimpleNamespace(
+            role_profile=SimpleNamespace(department=None, industry_name="banking", experience_level="entry"),
+            strategic_context=SimpleNamespace(model_dump=lambda: {}),
+        )
+        monkeypatch.setattr(analyse, "structured", lambda *_a, **_k: out)
+        monkeypatch.setattr(analyse.StrategicContext, "model_validate", classmethod(lambda cls, _d: None))
+        monkeypatch.setattr(analyse, "JobAnalysis", lambda **kw: kw)
+        monkeypatch.setattr(analyse, "keyword_matrix", lambda _e: None)
+        board = job("j5", REED, "Trade Operations Analyst", "eFinancialCareers")
+        got = analyse.analyse(None, board, FitEvidence.model_construct())  # type: ignore[arg-type]
+        assert got["role_profile"].company_name == "Employer not named (posted by eFinancialCareers)"

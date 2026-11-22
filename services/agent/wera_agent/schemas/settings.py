@@ -82,6 +82,11 @@ class SearchSchedule(Model):
     next_run_at: Opt[str] = None
     credits_this_week: Opt[int] = None
     weekly_credit_cap: Opt[int] = None
+    # H4 (21 Nov): Google (Serper) searches a search may still send today, of the day's share every
+    # run and person counts against (`Guard.left_today`). Null without Redis, in demo mode, or when
+    # no daily limit is set.
+    google_searches_left_today: Opt[int] = None
+    google_searches_per_day: Opt[int] = None
 
 
 class Settings(Model):

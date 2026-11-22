@@ -4,7 +4,7 @@ import { Plus, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiRequestError } from "@/lib/api";
-import { formatAgo, formatDate, formatTime } from "@/lib/format";
+import { allowanceParts, formatAgo, formatDate, formatTime } from "@/lib/format";
 import { DEFAULT_WEIGHTS, normaliseWeights } from "@/lib/scoring";
 import type { FitWeights, JobsCleared, SecretStatus, SettingsResponse } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
@@ -675,8 +675,21 @@ function ScheduleCard({ settings, value, onChange, error }: { settings: Settings
               : "No search scheduled."}
           {credits ? ` ${credits} Firecrawl credits used this week; at the limit, runs stop paying and postings WERA can read for free are still read.` : ""}
         </p>
+        <AllowanceLine schedule={saved} />
       </div>
     </Card>
+  );
+}
+
+/** H4 (21 Nov): what is left of the two allowances a search spends, read-only. Google's is the
+ *  share of Serper's day every search and schedule shares; Firecrawl's is the rolling week. */
+function AllowanceLine({ schedule }: { schedule: SettingsResponse["searchSchedule"] }) {
+  const parts = allowanceParts(schedule);
+  if (!parts.length) return null;
+  return (
+    <p className="text-small text-ink-2" data-testid="allowance">
+      {parts.join(" · ")}
+    </p>
   );
 }
 

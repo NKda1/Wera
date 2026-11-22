@@ -576,7 +576,12 @@ class Judged:
     # Hidden jobs never count: not those the filters hid, nor those scored under the fit bar.
     surfaced: int = 0
     # The new jobs that made the shortlist rather than the hidden list: what a run calls "new".
+    # A preview this pass read into a job is new to it too (22 Nov, `Store.upsert_jobs`).
     visible_new: set[str] = field(default_factory=set)
+    # 22 Nov, for the run's log: scored and hidden under the fit bar, and new on the list with no
+    # score yet (the day's scoring limit reached first).
+    under_bar: int = 0
+    unscored: int = 0
 
 
 def judge(
@@ -759,6 +764,8 @@ def judge(
         under = {j.id for j, _ in Store(session, now).fit_bar((job.id, report.total) for job, report in scored)}
     out.visible_new -= under
     out.surfaced = len(scored) - len(under)
+    out.under_bar = len(under)
+    out.unscored = len(out.visible_new - {job.id for job, _ in scored})
     if out.scored:
         from ..services import analytics
 

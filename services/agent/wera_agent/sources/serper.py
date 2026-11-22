@@ -21,6 +21,7 @@ What this module does and doesn't do:
   whose day's budget is spent, isn't asked at all.
 """
 
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -74,6 +75,9 @@ class Serper:
     # is being left alone, "daily_budget" when today's share is spent, or an error code when Serper
     # refused the key. A stopped client answers every later query with None.
     stopped: str | None = None
+    # 21 Nov (H4): a search's lookups go four at a time on one client, so the cap's check and the
+    # count it checks are one step — two threads can't both take the last query.
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         key = get_settings().serper_api_key
@@ -113,6 +117,11 @@ class Serper:
                 return waited
             token = guard.lead(key)  # the caller asking it gave up without an answer: ask ourselves
         try:
+            with self._lock:
+                if self.sent >= self.max_queries:
+                    self.stopped = "cap"
+                    return None
+                self.sent += 1
             return self._send(q, body, key)
         finally:
             if guard is not None and token is not None:
@@ -128,7 +137,7 @@ class Serper:
         return None
 
     def _send(self, q: str, body: dict[str, object], key: str) -> list[Result] | None:
-        self.sent += 1
+        """The query to Serper, its place under the cap already taken (`search`)."""
         guard = self.guard
         for attempt in range(MAX_TRIES):
             try:

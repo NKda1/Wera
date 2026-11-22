@@ -125,7 +125,8 @@ def world(client, outbound, monkeypatch):
                     return original(q, gl=gl, hl=hl, page=page)
 
                 real_search.search = search
-                self.serper = real_search
+                if window is None:  # the search's own client, not its lookups' (`_Lookups`)
+                    self.serper = real_search
                 return real_search
 
             monkeypatch.setattr(search_pipeline, "Serper", make)
@@ -219,7 +220,9 @@ class TestEightToTwelve:
     def test_an_empty_market_ends_below_eight_and_says_why(self, world):
         world.answers({1: [posting(0)]})
         out = world.run()
-        assert out.surfaced == 1
+        # 22 Nov: short of eight, it read the demo's previews in the places ticked (London's two;
+        # Dublin's and Amsterdam's wait) too, and is still short.
+        assert out.previews_read == 2 and out.surfaced == 3
         assert out.short and "every search in the plan has been sent" in out.short
         assert any(code == "FEWER_THAN_8" for code, _ in out.errors) and out.partial
 
@@ -292,6 +295,8 @@ class TestFindMoreSaysWhenItIsUsedUp:
 
     def test_every_tier_sent_and_nothing_waiting_is_refused_with_why(self, world, monkeypatch):
         monkeypatch.setattr(Store, "jobs_needing_score", lambda *_a, **_k: [])
+        # No previews either (21 Nov): "Find more" reads those once every tier is sent.
+        monkeypatch.setattr(Store, "count_jobs", lambda _self, status: 0)
         self._sent(world, all_tiers=True)
         with transaction() as session, pytest.raises(ApiError) as raised:
             Store(session).start_score_more()
@@ -367,10 +372,12 @@ class TestEachStepSaysWhatItIsDoing:
         first = next(d for d in details if d.startswith("Search 1 of "))
         assert first == 'Search 1 of 3 · "AI Engineer" graduate job in "London" (United Kingdom): 12 results, 12 postings'
         assert "site:" not in " ".join(details)  # Google's operators are not the person's words
-        assert any(n.startswith("Google, tier 1: ") and "12 postings" in n for n in notes)
+        # 22 Nov: links and reads, not jobs — the jobs are what the reading step adds to the list.
+        assert any(n.startswith("Google, tier 1: ") and "12 links to postings, 12 to read" in n for n in notes)
         assert any(d.startswith("Reading Graduate Software Engineer on builtinlondon.uk") for d in details)
-        # The split by place and source first, inside the log's 200 characters (SRCH-26).
-        assert notes[-1].startswith("Read 12 postings (gb 12 · google 12): 12 kept"), notes[-1]
+        # What reached the list first (22 Nov), then the split by place and source, inside the
+        # log's 200 characters (SRCH-26).
+        assert notes[-1] == "12 added to your list · read 12 postings (gb 12 · google 12): 12 readable", notes[-1]
         assert len(notes[-1]) <= intake.DETAIL_LIMIT
 
     def test_each_step_has_a_percentage_and_the_bar_only_rises(self, world, monkeypatch):
@@ -512,3 +519,68 @@ class TestADryCountryIsToppedUp:
         assert out.surfaced == 10
         assert asked and set(asked) == {"us"}
         assert 1 not in world.queue().tiers_sent()  # tier 1 is still to send in full
+
+
+class TestASecondSearchAsksSomethingNew:
+    """SRCH-20 (21 Nov): every search sent the same plan, so a second search the same day found its
+    postings "already saved". What a pool asked is remembered, and the next search asks the next
+    page of a search that found postings, or another phrasing of one that didn't."""
+
+    def _recording(self, monkeypatch) -> list[list[tuple[str, int]]]:
+        runs: list[list[tuple[str, int]]] = []
+        make = search_pipeline.Serper
+
+        def recording(**kw):
+            serper = make(**kw)
+            if "window" in kw:
+                return serper  # a lookup for an employer's posting (`_Lookups`), not one of the search's queries
+            real = serper.search
+            sent: list[tuple[str, int]] = []
+            runs.append(sent)
+
+            def search(q, *, gl, hl, page=1):
+                answer = real(q, gl=gl, hl=hl, page=page)
+                if answer is not None:  # the one the cap turned away was never sent
+                    sent.append((q, page))
+                return answer
+
+            serper.search = search
+            return serper
+
+        monkeypatch.setattr(search_pipeline, "Serper", recording)
+        return runs
+
+    def test_two_searches_in_a_row_send_different_queries(self, world, monkeypatch):
+        world.answers({1: [posting(i) for i in range(3)]})
+        runs = self._recording(monkeypatch)
+        world.run()
+        world.run()
+        first, second = runs
+        assert first and second
+        assert not set(first) & set(second)  # not one query and page asked twice
+        # Page 1 of the first search found postings, so its next page goes; the others found none
+        # and are asked in other words.
+        asked_first = first[0][0]
+        assert (asked_first, 2) in second
+        assert any(page == 1 and q != asked_first for q, page in second)
+
+    def test_each_search_stays_inside_the_serper_cap(self, world, monkeypatch):
+        world.answers({1: []})
+        runs = self._recording(monkeypatch)
+        for _ in range(3):
+            search_pipeline.run({}, now=1_762_850_000_000, caps=SearchCaps(max_serper_queries=4))
+        assert [len(r) for r in runs] == [4, 4, 4]
+        assert len({x for r in runs for x in r}) == 12  # and each asked something new
+
+    def test_the_log_says_what_is_new_and_what_is_left(self, world, monkeypatch):
+        world.answers({1: []})
+        world.run()
+        seen = TestEachStepSaysWhatItIsDoing._watch(None, monkeypatch)
+        world.run()
+        notes = [kw["note"] for kw in seen if kw.get("note")]
+        assert "in other words" in notes[0], notes[0]
+        allowance = next(n for n in notes if n.startswith("Google searches left today: "))
+        share = int(wera().guard.daily["serper"] * wera().guard.stop_at)
+        assert f"of {share}" in allowance and f"Firecrawl credits left this week: {wera().max_credits_per_week} of" in allowance
+        assert any(n.startswith("Google, tier 1: ") and n.endswith(" Google searches left today") for n in notes)
+        assert all(len(n) <= intake.DETAIL_LIMIT for n in notes)

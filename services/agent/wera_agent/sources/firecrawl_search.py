@@ -304,6 +304,53 @@ def scrape_card(
     return card
 
 
+# SRCH-22 (21 Nov): a page rendered for its links alone — no JSON format — is a basic scrape.
+LINKS_SCRAPE_CREDITS = 1
+
+
+@dataclass
+class Rendered:
+    """A page as Firecrawl's browser drew it: its HTML (for the link text) and its links.
+    `failed` when the credit was charged and Firecrawl didn't answer."""
+
+    html: str
+    links: list[str]
+    failed: bool = False
+
+
+def render_links(url: str, outcome: SearchOutcome, caps: SearchCaps, *, lock: Any = None) -> Rendered | None:
+    """One results page drawn by Firecrawl's browser, for the hunter (`sources.hunt`): what a page
+    that answered plain HTTP with an empty JavaScript shell actually lists.
+
+    `LINKS_SCRAPE_CREDITS`, charged to `outcome` inside `caps.max_credits` whether or not the
+    scrape answers, as `scrape_card` does (a scrape that failed comes back `failed`). None — and
+    nothing charged — when the cap leaves no room, which is not a reason to mark the run partial:
+    a render is a way to find more, never a read a person is waiting on.
+    `lock` (the hunter's, which reads four pages at once) makes the check and the charge one step.
+    HTML is asked for as well as links, at no extra credit, because a bare URL has no link text and
+    the link text is the title MATCH-01's rules and the pool's ranking read.
+    """
+    from contextlib import nullcontext
+
+    if is_denied(url):
+        return Rendered("", [], failed=True)
+    with lock or nullcontext():
+        if outcome.credits_used + LINKS_SCRAPE_CREDITS > caps.max_credits:
+            return None
+        outcome.credits_used += LINKS_SCRAPE_CREDITS
+    client = _client()
+    document = _retrying(
+        lambda: client.scrape(url, formats=["links", "html"], only_main_content=False),
+        f"render {url}",
+        outcome.errors,
+    )
+    if document is None:
+        return Rendered("", [], failed=True)
+    html = getattr(document, "html", None)
+    links = getattr(document, "links", None)
+    return Rendered(html if isinstance(html, str) else "", [u for u in links or [] if isinstance(u, str)])
+
+
 def _dated_card(card: dict[str, Any] | None, read_at: int) -> dict[str, Any] | None:
     """Resolve a relative `postedAt` to an absolute date **before the card is stored**.
 

@@ -16,6 +16,7 @@ from .api import (
     JobsCleared,
     NavCounts,
     PlaceOption,
+    PreviewRead,
     ProfileProposalResult,
     RegenerateIn,
     RunIn,
@@ -35,12 +36,13 @@ from .profile import SavedProfile, SearchProfile
 from .runs import ChannelSummary, Estimate, IntakeRun, RunIds
 from .settings import Settings, SettingsPatch, SettingsResponse
 from .strategy import TargetMatrix
-from .upskills import UpskillsReport
+from .upskills import UpskillsReport, UpskillsVersion
 
 # Responses describe what the web app receives; request bodies what it sends.
 RESPONSES = [
     MasterCV,
     UpskillsReport,
+    UpskillsVersion,
     SuggestionList,
     Contact,
     CvLine,
@@ -80,6 +82,7 @@ RESPONSES = [
     ApplicationList,
     TestResult,
     JobsCleared,
+    PreviewRead,
     CvFile,
     CvPreview,
     CvFileSaved,

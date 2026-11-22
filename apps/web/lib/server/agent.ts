@@ -43,7 +43,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 // agent should be the thing that gives up and says why, not this fetch.
 // The company brief too (18 Nov): a Serper search, up to three page reads with robots.txt first,
 // then a model call, all inside the request.
-const SLOW_ROUTES = [/^\/cv\/(parse|import)\b/, /^\/applications\/[^/]+\/company-brief$/];
+// A preview read in full (21 Nov): a Serper lookup, the read ladder (a browser render at worst)
+// and a score, inside the request — and approving a preview reads it first.
+const SLOW_ROUTES = [/^\/cv\/(parse|import)\b/, /^\/applications\/[^/]+\/company-brief$/, /^\/jobs\/[^/]+\/(read|decision)$/];
 const SLOW_TIMEOUT_MS = 330_000;
 
 function timeoutFor(path: string): number {

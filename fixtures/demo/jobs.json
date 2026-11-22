@@ -1978,5 +1978,57 @@
         }
       }
     }
+  ],
+  "previews": [
+    {
+      "id": "job-preview-larkspur",
+      "title": "Graduate Software Engineer, Payments",
+      "company": "Larkspur Payments",
+      "city": "London",
+      "country": "GB",
+      "via": "adzuna",
+      "previewMatch": 0.86,
+      "postedDaysAgo": 1,
+      "applyUrl": "https://www.adzuna.co.uk/jobs/land/ad/5100000001",
+      "summary": "Larkspur Payments is hiring a Graduate Software Engineer (Payments) to join its London platform team. You'll build Python and TypeScript services behind our card-issuing APIs, with mentoring from senior engineers and a structured first year...",
+      "fullDescription": "## About Larkspur Payments\nLarkspur Payments runs card-issuing APIs for fintechs across Europe.\n\n## The role\nAs a Graduate Software Engineer on the platform team you'll build Python and TypeScript services behind our card-issuing APIs, with mentoring from senior engineers and a structured first year.\n\n## What you'll do\n- Build REST APIs in Python (FastAPI) and TypeScript\n- Work with PostgreSQL and event queues\n- Write tests and take part in code review\n\n## About you\n- A degree in CS or similar, graduating 2025 or 2026\n- Python; some TypeScript is a plus\n- Interest in payments and reliable systems"
+    },
+    {
+      "id": "job-preview-fenwick",
+      "title": "Junior AI Engineer, Robotics",
+      "company": "Fenwick Robotics",
+      "city": "London",
+      "country": "GB",
+      "via": "careerjet",
+      "previewMatch": 0.77,
+      "postedDaysAgo": 2,
+      "applyUrl": "https://jobviewtrack.com/en-gb/job-demo-fenwick",
+      "summary": "Junior AI Engineer, London. Fenwick Robotics builds LLM agents that plan warehouse picking. Python, LangGraph, evaluation...",
+      "fullDescription": "## Fenwick Robotics\nFenwick Robotics builds LLM agents that plan warehouse picking for retailers.\n\n## The role\nA Junior AI Engineer to build and evaluate agent workflows in Python with LangGraph, and the guardrails around them.\n\n## You have\n- Python and an LLM framework (LangGraph, LangChain)\n- Model evaluation or testing experience\n- Docker and a cloud platform"
+    },
+    {
+      "id": "job-preview-saltire",
+      "title": "ML Engineer, Forecasting",
+      "company": "Saltire Analytics",
+      "city": "Dublin",
+      "country": "IE",
+      "via": "adzuna",
+      "previewMatch": 0.74,
+      "postedDaysAgo": 3,
+      "applyUrl": "https://www.adzuna.ie/jobs/land/ad/5100000003",
+      "summary": "ML Engineer (graduate or junior) at Saltire Analytics, Dublin. Train and ship forecasting models in Python for retail clients..."
+    },
+    {
+      "id": "job-preview-brackenbury",
+      "title": "AI Engineer, Claims",
+      "company": "Brackenbury Insurance",
+      "city": "Amsterdam",
+      "country": "NL",
+      "via": "careerjet",
+      "previewMatch": 0.66,
+      "postedDaysAgo": 4,
+      "applyUrl": "https://jobviewtrack.com/en-nl/job-demo-brackenbury",
+      "summary": "AI Engineer, Amsterdam. Brackenbury Insurance is looking for an engineer to automate claims triage with LLMs..."
+    }
   ]
 }

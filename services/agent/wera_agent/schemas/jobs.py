@@ -2,12 +2,17 @@
 
 from typing import Literal
 
+from pydantic import computed_field
+
 from .base import Model, Opt
 from .learning import LearnedRank
 from .profile import Seniority
 
 type Channel = Literal["board_search", "email_alert", "watchlist", "manual"]
-type JobStatus = Literal["new", "shortlisted", "in_application", "snoozed", "rejected", "hidden", "closed", "archived"]
+# `preview` (21 Nov): a lead WERA found and kept but hasn't read — a job API's summary, past the
+# search's lookups — ranked by CV similarity alone, with no model call (SRCH-26). It is not on the
+# shortlist and nothing that counts the shortlist counts it; reading it makes it `new`.
+type JobStatus = Literal["new", "shortlisted", "in_application", "snoozed", "rejected", "hidden", "closed", "archived", "preview"]
 RemoteMode = Literal["remote", "hybrid", "onsite"]
 
 # How much a `postedAt` is worth, which is not the same across the three channels:
@@ -150,6 +155,25 @@ class JobSummary(Model):
     created_at: str
 
 
+class FoundOn(Model):
+    """Where a preview no job API found came from (21 Nov, SRCH-22): a posting link the hunter took
+    off a page of jobs, or an aggregator's copy of one job. The job APIs' previews have `via`
+    instead."""
+
+    # The site's name as the card shows it: "Totaljobs", "beBee".
+    site: str
+    # The page of jobs the link was on, for a hunted link.
+    page: Opt[str] = None
+    # `posting`: the apply URL is the posting itself, read as it is, with no lookup. `copy`: an
+    # aggregator's page, whose original is looked for (one Serper search) before it is read.
+    kind: Literal["posting", "copy"]
+    # Whether `company` names the employer — read off an employer's job system's address (the
+    # Greenhouse or Workday tenant), the link's text ("… at Acme") or the copy's title — or is
+    # only the site's name, because nothing said who the employer is. The card never claims one
+    # it doesn't know: an unknown employer is shown as "Found on <site>".
+    employer_known: bool
+
+
 class Job(Model):
     id: str
     dedupe_key: str
@@ -209,9 +233,32 @@ class Job(Model):
     posted_by: Opt[str] = None
     # SRCH-34: a post at an international organisation, with its grade and who it is open to.
     international: Opt[InternationalPost] = None
+    # 21 Nov: a preview's match to the CV, `prefilter.lead_ranker`'s score on its title and summary
+    # (cosine plus the target-title step, about 0.3–1.0). What orders the previews and labels them
+    # Strong / Good / Possible (`domain.scoring.preview_label`); never a fit score and never shown as
+    # a number. Kept once the preview is read, as a record of what the ranker thought of it.
+    preview_match: Opt[float] = None
+    # 21 Nov: where a preview the hunter found came from, and whether its employer is known
+    # (`FoundOn`). Not kept once it is read (`previews.absorb`): the posting then says who the
+    # employer is, and a board it names as its organisation is caught by `dedupe.is_intermediary`.
+    found_on: Opt[FoundOn] = None
     # 18 Nov: the description to read, and a summary when the person asked for one.
     description_view: Opt[DescriptionView] = None
     summary: Opt[JobSummary] = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def employer_named(self) -> bool:
+        """Whether `company` is the employer (22 Nov). Reed gives "eFinancialCareers" as the
+        employer of the posts it carries for that board, and the posts say only "a leading
+        financial institution": the card read "Trade Operations Analyst — eFinancialCareers". A
+        board or agency WERA knows (`dedupe.is_intermediary`), or a hunted link's site when
+        nothing named the employer (`FoundOn.employer_known`), is the poster, never the employer.
+        `company` stays the poster, so dedupe keys, same-posting merges and the letter's rule for a
+        board's post (`tailor.job_header`) are unchanged; what shows the employer reads this."""
+        from ..domain.dedupe import is_intermediary  # dedupe imports this module
+
+        return not is_intermediary(self.company) and not (self.found_on is not None and not self.found_on.employer_known)
 
 
 class SubScore(Model):

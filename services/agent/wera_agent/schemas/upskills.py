@@ -213,3 +213,10 @@ class UpskillsReport(Model):
     family: Opt[str] = None
     # UPSK-06: absent when no near miss was read in the window.
     with_near_misses: Opt[NearMissView] = None
+    # 22 Nov: what the report was built from (`upskills.version`). The page compares it with
+    # `GET /upskills/version` and refreshes when a search, a near miss or a decision moves it.
+    version: str = ""
+
+
+class UpskillsVersion(Model):
+    version: str

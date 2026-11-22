@@ -427,7 +427,12 @@ function runStatus(r: IntakeRun): string {
   // Neither of these *finds* anything, by design: they judge jobs WERA already has. "nothing
   // new" — true of every one of them ever — would read as a run that failed.
   if (r.channel === "rescore") return r.total ? `Done · ${r.total} re-scored` : "Done";
-  if (r.channel === "score_more") return r.total ? `Done · ${r.total} found${queuedText(r)}` : `Done${queuedText(r)}`;
+  // 22 Nov: "Find more" says what it added to the list — the jobs the list now shows, previews it
+  // read among them — and only otherwise what it scored that was already waiting there.
+  if (r.channel === "score_more") {
+    const added = r.newJobs ? ` · ${r.newJobs} added to your list` : r.total ? ` · ${r.total} scored` : "";
+    return `Done${added}${queuedText(r)}`;
+  }
   const found = r.newJobs ? `${r.newJobs} new ${r.newJobs === 1 ? "job" : "jobs"}` : "nothing new";
   if (r.channel === "board_search") {
     // SRCH-10: what the crawl cache answered for free. Shown rather than netted off, because
@@ -443,9 +448,10 @@ function runStatus(r: IntakeRun): string {
   return `Done · ${found}`;
 }
 
-/** SRCH-26: what the search found and left for "Find more" — none of it paid for yet. */
+/** SRCH-26: what the search found and left for "Find more" — none of it paid for yet. Links still
+ *  to read, not jobs (22 Nov): "35 more queued" was read as 35 jobs. */
 function queuedText(r: IntakeRun): string {
-  return r.queued ? ` · ${r.queued} more queued` : "";
+  return r.queued ? ` · ${r.queued} more links to read` : "";
 }
 
 function pagesRead(r: IntakeRun): string {

@@ -85,6 +85,23 @@ class TestWhatItSpends:
         assert (route.call_count, c.sent, c.stopped) == (2, 2, "cap")
 
     @respx.mock
+    def test_four_threads_on_one_client_never_pass_the_cap(self, key):
+        """H4 (21 Nov): a search's lookups go four at a time on one client; the cap still holds."""
+        import time as clock
+        from concurrent.futures import ThreadPoolExecutor
+
+        def slow(_request):
+            clock.sleep(0.01)  # long enough for the threads to meet at the cap's check
+            return httpx.Response(200, json=ORGANIC)
+
+        route = respx.post(serper.ENDPOINT).mock(side_effect=slow)
+        c = client(max_queries=5)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            answers = list(pool.map(lambda i: c.search(f"q{i}", gl="gb", hl="en"), range(12)))
+        assert (route.call_count, c.sent, c.stopped) == (5, 5, "cap")
+        assert sum(a is not None for a in answers) == 5
+
+    @respx.mock
     def test_a_rate_limit_is_retried(self, key):
         route = respx.post(serper.ENDPOINT).mock(side_effect=[httpx.Response(429), httpx.Response(200, json=ORGANIC)])
         c = client()

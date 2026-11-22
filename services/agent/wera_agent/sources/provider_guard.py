@@ -188,6 +188,16 @@ class Guard:
         """The day's share for searches is used up: `stop_at` of `daily`."""
         return self.daily is not None and self.used_today() >= self.daily * self.config.stop_at
 
+    def left_today(self) -> tuple[int, int] | None:
+        """What a search may still use today, and of how much: (left, share), or None when the
+        provider has no daily limit. The share is `stop_at` of `daily` — where `spent` stops a
+        search — not the account's whole day, so "88 of 120 left" is what searches can really
+        use (H4, 21 Nov). Read-only, like `used_today`; without Redis it reads as all of it."""
+        if self.daily is None:
+            return None
+        share = int(self.daily * self.config.stop_at)
+        return max(share - self.used_today(), 0), share
+
     # -------------------------------------------------------------------------------------------
 
     def _call(self, method: str, *args: Any, default: Any = None, **kwargs: Any) -> Any:

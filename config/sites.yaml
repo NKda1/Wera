@@ -27,7 +27,9 @@
 #     countries: [GB]
 #     region: europe
 
-max_sites: 12
+# 22 Nov: 12 → 13 for the jobs.ch proposal below (added by hand; the file was full, so discovery
+# could never have proposed a Swiss board for a profile with Switzerland ticked).
+max_sites: 13
 discover_every_days: 7
 sites:
 - domain: brightnetwork.co.uk
@@ -154,3 +156,25 @@ sites:
   examples:
   - https://www.efinancialcareers.com/jobs/investment-banking-analyst/in-london
   - https://www.efinancialcareers.com/jobs/investment-banking-analyst
+# 22 Nov, proposed by hand (not discovered): the profile ticks Switzerland, and Google's CH searches
+# found no postings (live 21–22 Nov: 0 postings from CH tier-1 queries). Swiss jobs only arrived as
+# Adzuna snippets. jobs.ch is Switzerland's largest board. Its robots.txt (read 22 Nov) allows a
+# posting's page (/en/vacancies/detail/<id>/) and disallows deeper paths, /api/ and logins. Its terms of
+# service are NOT reviewed: read them and set `terms_reviewed_on` yourself if WERA may search it.
+# job-room.ch (the Swiss public job board) is not proposed: its robots.txt says "Do not crawl Job
+# Adverts" (Disallow: /job-search/).
+- domain: www.jobs.ch
+  name: jobs.ch
+  terms_reviewed_on: null
+  countries:
+  - CH
+  region: europe
+  languages:
+  - de
+  - fr
+  - en
+  sectors:
+  - general
+  - finance
+  robots_ok: true
+  posting_pattern: ^/(?:en/vacancies|de/stellenangebote|fr/offres-emplois)/detail/[0-9a-f-]{36}/?$

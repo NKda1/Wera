@@ -25,7 +25,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
@@ -34,21 +34,23 @@ from sqlalchemy.orm import Session
 
 from ..clock import iso
 from ..config import Site, usable_sites, wera
-from ..domain import dedupe, filters, places
+from ..domain import dedupe, filters, places, role_family
 from ..domain.dedupe import canonical_url
+from ..domain.scoring import PREVIEW_GOOD
 from ..errors import ApiError
-from ..http import host_of, request
+from ..http import host_of
 from ..llm.gateway import structured
 from ..schemas.cv import MasterCV
 from ..schemas.cv_profile import CvProfile
+from ..schemas.jobs import FoundOn
 from ..schemas.llm_outputs import PROPOSALS_PER_PLAN, StrategistOutput
 from ..schemas.profile import SearchProfile
 from ..schemas.strategy import LocalTerm, Market, PlannedQuery, TargetMatrix
-from ..sources import feeds, site_discovery
-from ..sources.postings import classify, posting_links
-from ..sources.robots import USER_AGENT, Robots, refusal
+from ..sources import feeds, hunt, site_discovery
+from ..sources.postings import classify
+from ..sources.robots import Robots
 from ..sources.serper import Serper
-from ..sources.targets import Ranker, Target, TargetQueue
+from ..sources.targets import Ranker, Target, TargetQueue, floors_first, url_key
 
 # What postings in a market are written in, for when the reply leaves `languages` empty. Only the
 # countries WERA's boards cover; anywhere else falls back to English, which is a weak default
@@ -272,6 +274,14 @@ NO_LINKEDIN = "-site:linkedin.com"
 # itself. Measured live: `"Software Engineer" London` came back mostly Senior and Lead roles, 53
 # of 61 postings in one tier that the profile then excluded — searches spent on jobs nobody sees.
 LEVEL_QUERY = {"intern": "intern", "graduate": "graduate", "junior": "junior", "entry": "entry level"}
+# SRCH-20 (21 Nov): the CV skills a search's other phrasings pair with its title, and the most
+# pieces of the Strategist's field ("investment banking and corporate finance") they use.
+SKILLS_PER_VARIANT = 3
+FIELD_PARTS = 2
+# The level words a title's role is read without, when a phrasing puts its own level in front:
+# "Graduate Software Engineer" is asked as `graduate "Software Engineer" jobs`, not as
+# `graduate "Graduate Software Engineer" jobs`.
+_ROLE_LEVEL = re.compile(r"\b(?:entry[- ]level|graduate|junior|internship|intern|trainee|apprentice(?:ship)?|placement)\b", re.I)
 
 
 def queries(
@@ -281,6 +291,7 @@ def queries(
     matrix: TargetMatrix | None = None,
     *,
     preferences: Iterable[str] = (),
+    today: date | None = None,
 ) -> list[PlannedQuery]:
     """The searches for this person, best first, in tiers (SRCH-20, stage 1).
 
@@ -294,21 +305,48 @@ def queries(
     job in London` — the title as a phrase, their level, "job", and the city unquoted. "London, UK"
     as an exact phrase is why 11 of the last 12 Firecrawl searches came back empty: postings say
     "London", "London, England" or nothing at all, and Google's `gl` already says which country.
+
+    **Other phrasings (21 Nov).** Each search also carries `variants`, other ways a person would ask
+    for the same job in the same place (`_families`): "graduate {role} jobs", "{role} graduate
+    scheme {year}", "entry level {role}", "junior {role}", "{role} {level} hiring", the role with
+    the CV's top skills, and the Strategist's field. The plan is made once per CV and profile and
+    Google ranks a query the same way all day, so without them every search asked the same 73
+    things and a second search found its postings "already saved". Which one a search sends is
+    decided when it is sent (`sources.rotation`), from what was asked in the last few days. The
+    count and order of the searches doesn't change, so neither does what the Serper cap cuts.
     """
     titles = [t.strip() for t in profile.titles if t.strip()]
     if not titles:
         return []
     level = _level_word(profile)
-    skills = [s for s in (cv_profile.core_competencies.technical_stack if cv_profile else [])[:SKILLS_PER_TITLE] if s.strip()]
+    stack = [s.strip() for s in (cv_profile.core_competencies.technical_stack if cv_profile else []) if s.strip()]
+    skills = stack[:SKILLS_PER_TITLE]
     extra = [p.strip() for p in preferences if p.strip()]
     out: list[PlannedQuery] = []
     seen: set[tuple[str, str, str]] = set()
+    # Where each search's other phrasings go, by its place in `out`: the term, the place, the
+    # language, and what wraps a phrasing into a query (a board's `site:`, an open search's
+    # `-site:linkedin.com`). Written once every search is planned, so no phrasing can take the
+    # words of a search that comes later in the plan.
+    families: dict[int, tuple[str, list[str], str, str, str]] = {}
 
-    def add(q: str, *, gl: str, hl: str, source: str, tier: int, title: str, domain: str | None = None) -> None:
+    def add(
+        q: str,
+        *,
+        gl: str,
+        hl: str,
+        source: str,
+        tier: int,
+        title: str,
+        domain: str | None = None,
+        family: tuple[str, list[str], str, str, str] | None = None,
+    ) -> None:
         q = " ".join(q.split())
         if (q, gl, hl) in seen:
             return
         seen.add((q, gl, hl))
+        if family is not None:
+            families[len(out)] = family
         out.append(PlannedQuery(q=q, gl=gl, hl=hl, source=source, domain=domain, tier=tier, title=title))
 
     @dataclass
@@ -320,7 +358,15 @@ def queries(
 
     def open_search(title: str, term: str, tier: int, c: Country, place: list[str], *, lang: str = "", also: str = "") -> None:
         hl = lang or c.hl
-        add(f"{_phrase(term, level, place, hl, also=also)} {NO_LINKEDIN}", gl=c.gl, hl=hl, source="open", tier=tier, title=title)
+        add(
+            f"{_phrase(term, level, place, hl, also=also)} {NO_LINKEDIN}",
+            gl=c.gl,
+            hl=hl,
+            source="open",
+            tier=tier,
+            title=title,
+            family=(term, place, hl, "", f" {NO_LINKEDIN}"),
+        )
 
     def board_search(title: str, term: str, tier: int, c: Country, turn: int, *, lang: str = "") -> None:
         """A `site:` search of one of this country's reviewed boards, the next in turn — one board a
@@ -334,7 +380,16 @@ def queries(
         # are most of what Google holds for it, and none of them is a job.
         path = f" inurl:{board.posting_segment}" if board.posting_segment else ""
         phrase = _phrase(term, level, c.groups[0], hl)
-        add(f"site:{board.domain}{path} {phrase}", gl=c.gl, hl=hl, source="board", tier=tier, title=title, domain=board.domain)
+        add(
+            f"site:{board.domain}{path} {phrase}",
+            gl=c.gl,
+            hl=hl,
+            source="board",
+            tier=tier,
+            title=title,
+            domain=board.domain,
+            family=(term, c.groups[0], hl, f"site:{board.domain}{path} ", ""),
+        )
 
     wanted = places.searched(places.where(profile.countries, profile.locations))
     countries = [
@@ -387,9 +442,47 @@ def queries(
                 term = terms[turn]
                 open_search(term.title, term.term, 3, c, c.groups[0], lang=term.language)
                 board_search(term.title, term.term, 3, c, turn, lang=term.language)
+    # Each search's other phrasings, best first, none of them a search already in the plan or
+    # another's phrasing: three titles that are one role at three levels ("Graduate", "Junior",
+    # "Entry Level Software Engineer") share their role's phrasings out instead of repeating them.
+    own = role_family.own_family(titles)
+    fields = _field_parts(matrix)
+    year = _scheme_year(today or date.today())
+    cap = wera().rotation.variants
+    paired = [re.sub(r"\s*\([^)]*\)", "", s).strip() for s in stack[:SKILLS_PER_VARIANT]]  # "JavaScript (ES6+)"
+    candidates = {
+        i: [
+            " ".join(f"{before}{phrase}{after}".split())
+            for phrase in _families(term, place, hl, profile, skills=[s for s in paired if s], fields=fields, own=own, year=year)
+        ]
+        for i, (term, place, hl, before, after) in families.items()
+    }
+    # Dealt a phrasing at a time, every search of a tier in plan order, so the searches that share
+    # one never leave a later one with nothing: "Entry Level Software Engineer" asked after
+    # "Graduate" and "Junior" used to get no phrasings at all. A tier is dealt in full before the
+    # next, which is sent less often.
+    asked = set(seen)
+    alts: dict[int, list[str]] = {i: [] for i in candidates}
+    nxt = dict.fromkeys(candidates, 0)
+    for tier in sorted({out[i].tier for i in candidates}):
+        dealt = [i for i in candidates if out[i].tier == tier]
+        for _round in range(cap):
+            for i in dealt:
+                q, options = out[i], candidates[i]
+                while nxt[i] < len(options):
+                    text = options[nxt[i]]
+                    nxt[i] += 1
+                    if (text, q.gl, q.hl) not in asked:
+                        asked.add((text, q.gl, q.hl))
+                        alts[i].append(text)
+                        break
+    for i, texts in alts.items():
+        if texts:
+            out[i] = out[i].model_copy(update={"variants": texts})
     # Tier 4: page 2 of tier 1. Google ranks a query the same way all day, so a second search the
     # same day finds page 1 already saved — measured live, 21 of 61 results on a repeat run. Sent
-    # only for queries whose page 1 was rich in postings (`page_two_worth_asking`).
+    # only for queries whose page 1 was rich in postings (`page_two_worth_asking`). Since 21 Nov it
+    # is the next page of whichever phrasing and page tier 1 actually sent (`sources.rotation`).
     for q in [q for q in out if q.tier == 1]:
         out.append(q.model_copy(update={"tier": 4, "page": 2}))
     return out
@@ -486,6 +579,130 @@ def _has_level(title: str) -> bool:
     return bool(set(title.lower().replace("-", " ").split()) & filters.LEVEL_WORDS)
 
 
+def _town(place: list[str]) -> str:
+    """A search's place as `_phrase` writes it: one city quoted, several OR-ed, none for remote."""
+    if place == ["remote"] or not place:
+        return ""
+    if len(place) == 1:
+        return f'"{place[0]}"'
+    return "(" + " OR ".join(f'"{p}"' for p in place) + ")"
+
+
+def _role(title: str) -> str:
+    """A title without its level words, for a phrasing that says the level itself."""
+    bare = " ".join(_ROLE_LEVEL.sub(" ", title).split())
+    return bare if len(bare) >= 3 else title
+
+
+def _field_parts(matrix: TargetMatrix | None) -> list[str]:
+    """The Strategist's field as the separate things it names — "investment banking and corporate
+    finance" is two fields a posting would name one at a time — at most `FIELD_PARTS` of them."""
+    field_ = (matrix.field if matrix else "") or ""
+    parts = [" ".join(p.split()) for p in re.split(r",|;|/|&|\band\b", field_.lower())]
+    return [p for p in dict.fromkeys(parts) if p and len(p.split()) <= 4][:FIELD_PARTS]
+
+
+def _scheme_year(today: date) -> int:
+    """The intake year graduate schemes are recruiting for: from August, next year's (UK schemes
+    open in the autumn for the September after), before it, this year's late openings."""
+    return today.year + 1 if today.month >= 8 else today.year
+
+
+def _families(
+    term: str,
+    place: list[str],
+    lang: str,
+    profile: SearchProfile,
+    *,
+    skills: list[str],
+    fields: list[str],
+    own: str | None,
+    year: int,
+) -> list[str]:
+    """Other ways to ask for `term` in `place`, best first (SRCH-20, 21 Nov) — the words only;
+    `queries` wraps each in the search's `site:` or `-site:linkedin.com`.
+
+    The level phrasings come from the profile's own levels, in its order, and only those: someone
+    who asked for graduate and junior work gets "graduate {role} jobs", "{role} graduate scheme"
+    and "junior {role}", never "entry level" or an internship, and someone open to mid-level work
+    (or who named no level) gets no level word at all — `_level_word`'s rule, a phrasing at a
+    time. Between them, the role with the CV's top skills and with the Strategist's field.
+
+    Two rules keep a phrasing the person's own search, as `_phrase` keeps the search itself:
+
+    * **Exclusions.** A phrasing whose added words (a skill, a field, a level) hold a word the
+      profile excludes is dropped: a finance profile that excludes "Git" never asks for
+      `"Financial Analyst" Git`.
+    * **The role family (UPSK-07).** A phrasing is kept only in the family of its title or of the
+      person's titles (`role_family.own_family`), or in none. A finance persona doesn't grow quant
+      phrasings — "derivatives pricing", "quantitative finance" — unless its titles are quant, and
+      a software one doesn't drift into machine learning because the CV lists PyTorch.
+
+    A local-language term gets none: the words around it are English.
+    """
+    if lang != "en":
+        return []
+    # Every level the person wants, when all of them are early-career; none otherwise.
+    narrowed = (
+        [lv for lv in dict.fromkeys(x.lower().strip() for x in profile.seniority) if lv in LEVEL_QUERY]
+        if _level_word(profile) is not None
+        else []
+    )
+    # A title that names its level asks in that level's words first: "Junior Software Engineer"
+    # leads with `junior "Software Engineer"`, not with the graduate phrasing its neighbour has.
+    said = _ROLE_LEVEL.search(term)
+    own_level = {"entry level": "entry", "entry-level": "entry", "internship": "intern"}.get(
+        said.group(0).lower() if said else "", said.group(0).lower() if said else ""
+    )
+    if own_level in narrowed:
+        narrowed = [own_level, *(lv for lv in narrowed if lv != own_level)]
+    role = _role(term) if narrowed else term
+    r = f'"{role}"'
+    remote = place == ["remote"]
+    town = "remote" if remote else _town(place)
+    jobs = "remote jobs" if remote else f"jobs in {town}" if town else "jobs"
+    first = LEVEL_QUERY[narrowed[0]] if narrowed else ""
+
+    levelled: list[str] = []
+    for lv in narrowed:
+        if lv == "graduate":
+            levelled += [f"graduate {r} {jobs}", f"{r} graduate scheme {year}" + (" remote" if remote else "")]
+        elif lv == "entry":
+            levelled.append(f"entry level {r} {town}")
+        elif lv == "junior":
+            levelled.append(f"junior {r} {town}")
+        elif lv == "intern":
+            levelled.append(f"{r} internship {year} {town}")
+    if narrowed:
+        levelled.append(f"{r} {LEVEL_QUERY[narrowed[0]]} hiring {town}")
+    else:
+        levelled += [f"{r} hiring {town}", f"{r} vacancy {town}"]
+    paired = [f"{first} {r} {s} {jobs}" for s in skills]
+    named = [f'{first} "{f}" {jobs}' for f in fields if f.casefold() != role.casefold()]
+    # Skills and fields take turns, then interleave with the levels: the first phrasings a search
+    # sends are as different from each other as the plan allows.
+    others = [x for pair in _zip_longest(paired, named) for x in pair]
+    ordered = [x for pair in _zip_longest(levelled, others) for x in pair]
+
+    allowed = {own, role_family.family_of(term), role_family.OTHER}
+    out: list[str] = []
+    for phrase in ordered:
+        phrase = " ".join(phrase.split())
+        added = phrase.replace(r, " ")
+        if filters.excluded_term(added, profile):
+            continue
+        if role_family.family_of(phrase.replace('"', "")) not in allowed:
+            continue
+        out.append(phrase)
+    return list(dict.fromkeys(out))
+
+
+def _zip_longest(a: list[str], b: list[str]) -> list[tuple[str, ...]]:
+    """Pairs of `a` and `b` in turn, the longer one's tail on its own."""
+    n = max(len(a), len(b))
+    return [tuple(x for x in (a[i] if i < len(a) else None, b[i] if i < len(b) else None) if x is not None) for i in range(n)]
+
+
 def _places(profile: SearchProfile, wanted: places.Where, country: str) -> list[list[str]]:
     """The place each of this country's searches names, most wanted first — one per search.
 
@@ -515,15 +732,12 @@ def _english_or_first(country: str, matrix: TargetMatrix | None) -> str:
 # ---------------------------------------------------------------------------
 # SRCH-20, stage 2: discovery
 
-# A page of results is read once for its posting links (SRCH-22): plain HTTP, no browser, no
-# credits. Bounded per run, because every one is a fetch of somebody else's page.
-LISTINGS_PER_RUN = 8
-LINKS_PER_LISTING = 15
-MAX_LISTING_BYTES = 3_000_000
-
-
-class Refused(Exception):
-    """A results page the site wouldn't serve: a 403, a rate limit, a bot check. Never retried."""
+# A page of results is hunted for its posting links (SRCH-22): `sources.hunt`, plain HTTP first and
+# Firecrawl's links-only render for a JavaScript shell. The old caps — 8 pages a pass, 15 links
+# each, no next page — found nothing on 20 Nov's 13 results pages; the bounds now live in
+# `config/wera.yaml` (`hunt:`, 40 pages a search, 50 links each, two next pages), 21 Nov.
+Refused = hunt.Refused
+_listing_html = hunt.fetch_page
 
 
 @dataclass
@@ -538,9 +752,12 @@ class Discovery:
     postings_by_query: dict[str, int] = field(default_factory=dict)
     listings_read: int = 0
     listing_links: int = 0
-    # Hosts that refused a results page this pass. Not asked again until the next run: a board
+    # Hosts that refused a results page this search. Not asked again until the next run: a board
     # that answers plain HTTP with a bot check (Gradcracker does) says the same to every page.
     refused: set[str] = field(default_factory=set)
+    # What the hunter did this pass (21 Nov): pages read and rendered, refusals, postings found and
+    # how many were new. `listings_read` and `listing_links` above are its pages and its links.
+    hunted: hunt.Hunted = field(default_factory=hunt.Hunted)
     known: int = 0
     blocked: int = 0
     excluded: int = 0
@@ -549,6 +766,9 @@ class Discovery:
     excluded_titles: list[str] = field(default_factory=list)
     queued: int = 0
     errors: list[str] = field(default_factory=list)
+    # 22 Nov: aggregators' copies the lookup allowance didn't reach (spent, or under the bar), best
+    # match first, for the pipeline to save as previews after the hard filters.
+    previews: list["Preview"] = field(default_factory=list)
 
 
 # How a stage reports into the run's bar: (fraction of the stage, sentence, done, total).
@@ -594,6 +814,8 @@ def discover(
     fetch: Callable[[str], str | None] | None = None,
     on_step: Step | None = None,
     engine: str = "google",
+    hunter: hunt.Hunter | None = None,
+    on_asked: Callable[[PlannedQuery, int], None] | None = None,
 ) -> Discovery:
     """Send the planned queries in `tiers`, sort what comes back, and queue the postings.
 
@@ -604,18 +826,24 @@ def discover(
     it after it was read, so reading it would spend a place in the 8–12 on a job nobody sees.
     Postings are queued after each query, so a pass that stops early keeps what it found.
     `on_step` is told each query as it returns: its words, and what came back (UX-01).
+    `on_asked` is told each query that was answered, with its postings, for the rotation's memory
+    (`sources.rotation`, 21 Nov): a query with no answer was never asked.
     """
     tell: Step = on_step or (lambda *_a: None)
-    rules = robots or Robots()
-    read = fetch or _listing_html
+    # One hunter a search, passed in by the pipeline so its caps, refusals and hunt cache span the
+    # search's tiers; a call on its own (the CLI, a test) gets one for this pass, with no renders.
+    hunter = hunter or hunt.Hunter(robots=robots or Robots(), fetch=fetch or _listing_html)
+    hunting: list[tuple[PlannedQuery, str]] = []
+    copies: list[tuple[PlannedQuery, Any, str]] = []
     known = {canonical_url(u) or u for u in known_urls}
     declined = {s.domain.lower().removeprefix("www.") for s in sites if s.declined_on is not None}
     taken: set[str] = set()
     out = Discovery(tiers=sorted(set(tiers)))
     found: list[Target] = []
 
-    def keep(query: PlannedQuery, url: str, title: str, snippet: str, when: str | None) -> None:
-        """Into this query's batch, unless it is known, declined, excluded or already taken."""
+    def keep(query: PlannedQuery, url: str, title: str, snippet: str, when: str | None, listing: str | None = None) -> None:
+        """Into this query's batch, unless it is known, declined, excluded or already taken.
+        `listing`: the page of jobs a hunted link was on."""
         key = canonical_url(url) or url
         host = host_of(url).removeprefix("www.")
         if any(host == d or host.endswith(f".{d}") for d in declined):
@@ -630,7 +858,20 @@ def discover(
             taken.add(key)
             # Tagged with the engine that found it, for the share each source may take (SRCH-26).
             asked = query.q if engine == "google" else f"{engine}: {query.q}"
-            found.append(Target(url, host, query.source, asked, len(taken) - 1, title, snippet, when, country=query.gl or None))
+            found.append(
+                Target(
+                    url,
+                    host,
+                    query.source,
+                    asked,
+                    len(taken) - 1,
+                    title,
+                    snippet,
+                    when,
+                    country=query.gl or None,
+                    listing=listing,
+                )
+            )
 
     with logfire.span("strategist discover", tiers=out.tiers) as span:
         sending = [q for q in planned if q.tier in out.tiers]
@@ -654,14 +895,20 @@ def discover(
                 kind = classify(result.url, title=result.title, sites=sites)
                 out.kinds[kind] += 1
                 postings += kind == "posting"
-                if kind == "posting":
+                if kind in ("posting", "other") and hunt.is_copy(result.url, sites):
+                    # An aggregator's copy of one job: its original is looked for once the pass's
+                    # searches are sent (21 Nov). A copy it can't trace is a posting as before.
+                    copies.append((query, result, kind))
+                elif kind == "posting":
                     keep(query, result.url, result.title, result.snippet, result.date)
-                elif kind == "listing" and out.listings_read < LISTINGS_PER_RUN:
-                    for url, text in _listing_links(result.url, rules, read, out):
-                        keep(query, url, text, "", None)
-            if query.page == 1:
-                out.postings_by_query[query.q] = postings
-                queue.note_postings(query.q, postings)
+                elif kind == "listing" and hunter.cache(result.url):
+                    hunting.append((query, result.url))  # hunted once the pass's searches are sent
+            # Every page's count now, not only page 1's (21 Nov): tier 4 may follow a tier-1 search
+            # that rotation already sent at page 2 (`page_two_worth_asking`).
+            out.postings_by_query[page_key(query.q, query.page)] = postings
+            queue.note_postings(page_key(query.q, query.page), postings)
+            if on_asked is not None:
+                on_asked(query, postings)  # SRCH-20's rotation: not asked again for a few days
             out.queued += queue.push(found)
             found.clear()
             tell(
@@ -672,9 +919,26 @@ def discover(
                 shown_total,
             )
 
+        _hunt_pass(
+            hunter,
+            hunting,
+            copies,
+            keep=keep,
+            found=found,
+            queue=queue,
+            out=out,
+            sites=sites,
+            tell=tell,
+            known=known,
+            profile=profile,
+        )
         out.errors = list(serper.errors)
         span.set_attributes(
             {
+                "hunt_pages": out.hunted.pages,
+                "hunt_rendered": out.hunted.rendered,
+                "hunt_found": out.hunted.found,
+                "hunt_new": out.hunted.new,
                 "queries": serper.sent,
                 "results": out.results,
                 "postings": out.kinds["posting"],
@@ -715,143 +979,141 @@ def _why_excluded(title: str, profile: SearchProfile) -> str | None:
     return None
 
 
-def _listing_links(url: str, rules: Robots, read: Callable[[str], str | None], out: Discovery) -> list[tuple[str, str]]:
-    """A page of results, read once over plain HTTP for the postings it links to.
+def _hunt_pass(
+    hunter: hunt.Hunter,
+    hunting: list[tuple[PlannedQuery, str]],
+    copies: list[tuple[PlannedQuery, Any, str]],
+    *,
+    keep: Callable[..., None],
+    found: list[Target],
+    queue: TargetQueue,
+    out: Discovery,
+    sites: list[Site],
+    tell: Step,
+    known: set[str] | None = None,
+    profile: SearchProfile | None = None,
+) -> None:
+    """The pass's pages of jobs hunted for their postings, and its aggregators' copies traced to
+    the employer's own posting (SRCH-22, 21 Nov) — once its searches are all sent, so the pages are
+    read four at a time rather than one per query as they came back.
 
-    A host that refused one page isn't asked for another this pass, and the refusal is never
-    retried or worked around — a bot check is the site saying no.
+    What the hunter finds goes through `keep` like any search result — known, declined, excluded by
+    its link text — after dropping what is already in the queue, best match first by the queue's
+    own ranker (`prefilter.lead_ranker`, on the link text) when it has one. A copy whose original
+    is found is queued as that original; one looked for and not found is a posting as before, or
+    dropped. The copies are looked for best match first, from the search's one lookup allowance and
+    only at `LOOKUP_BAR` or above (22 Nov); a copy the allowance didn't reach is a preview on
+    `out.previews`, unless WERA already has it or the profile excludes its title.
     """
-    host = host_of(url).removeprefix("www.")
-    if host in out.refused:
-        return []
-    try:
-        allowed = rules.allows(url)
-    except ApiError:
-        return []
-    if not allowed:
-        logfire.info("Listing {url} not read: robots.txt disallows it", url=url)
-        return []
-    out.listings_read += 1
-    try:
-        html = read(url)
-    except Refused as why:
-        out.refused.add(host)
-        logfire.info("Listing {url} refused ({why}); not asking {host} again this pass", url=url, why=str(why), host=host)
-        return []
-    links = posting_links(html, url, host_of(url), LINKS_PER_LISTING) if html else []
-    if not links:
-        # Most often a board that draws its results with JavaScript: plain HTTP sees an empty shell.
-        logfire.info("Listing {url} gave no posting links", url=url)
-    out.listing_links += len(links)
-    return links
-
-
-def _listing_html(url: str) -> str | None:
-    """The page over plain HTTP, or None if unreachable. Raises `Refused` when the site says no."""
-    try:
-        response = request("GET", url, follow_redirects=True, headers={"user-agent": USER_AGENT})
-    except ApiError:
-        raise
-    except Exception:  # noqa: BLE001 — an unreachable listing is one fewer page of links, nothing more
-        return None
-    html = response.content[:MAX_LISTING_BYTES].decode(response.encoding or "utf-8", errors="replace")
-    title = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
-    why = refusal(response.status_code, title.group(1) if title else "")
-    if why:
-        raise Refused(why)
-    return html if response.status_code == 200 else None
+    if copies:
+        rank = getattr(queue, "rank", None)
+        leads = [hunt.copy_lead(result) for _q, result, _k in copies]
+        scores: list[float | None] = [None] * len(copies)
+        if rank is not None:
+            asked = [i for i, lead in enumerate(leads) if lead is not None]
+            # On the result's whole title and summary, as a search result is ranked: the company
+            # and the place are in them.
+            got = rank([(copies[i][1].title, copies[i][1].snippet) for i in asked]) if asked else []
+            for i, score in zip(asked, got, strict=True):
+                scores[i] = score
+        traced, did = hunter.originals(
+            [(result, query.gl, query.hl, [t.removeprefix("-site:") for t in query.q.split() if t.startswith("-site:")])
+             for query, result, _kind in copies],
+            sites=sites,
+            scores=scores,
+            bar=LOOKUP_BAR if rank is not None else None,
+        )  # fmt: skip
+        out.hunted.add(did)
+        seen = set(known or ())
+        for (query, result, kind), (what, hit), lead, score in zip(copies, traced, leads, scores, strict=True):
+            if what == "found" and hit is not None:
+                keep(query, hit.url, hit.title, hit.snippet, None)
+            elif what == "waiting" and lead is not None:
+                link = canonical_url(result.url) or result.url
+                if link in seen or (profile is not None and _excluded(lead.title, profile)):
+                    continue
+                seen.add(link)
+                where = hunt.site_name(result.url, sites)
+                found_on = FoundOn(site=where, kind="copy", employer_known=True)
+                out.previews.append(Preview(None, query.gl or None, lead, score, found_on))
+            elif kind == "posting":
+                keep(query, result.url, result.title, result.snippet, result.date)
+        out.previews.sort(key=lambda p: -(p.score if p.score is not None else 0.0))
+        out.queued += queue.push(found)
+        found.clear()
+    if not hunting:
+        return
+    where = {url: query for query, url in reversed(hunting)}  # the first query that found the page
+    hosts = len({host_of(url) for _q, url in hunting})
+    tell(1.0, f"Hunting {_count(len(hunting), 'page')} of jobs for their postings", 0, hosts)
+    links, did = hunter.hunt(
+        [url for _q, url in hunting],
+        on_host=lambda done, total: tell(
+            1.0, f"Hunting pages of jobs for their postings: {done} of {total} sites read", done, total
+        ),
+    )
+    # Once each, and not what the queue already holds (`TargetQueue.push` would refuse it anyway,
+    # but only after it was ranked).
+    fresh: list[hunt.Found] = []
+    seen: set[str] = set()
+    queued = getattr(queue, "queued", None)
+    for link in links:
+        key = canonical_url(link.url) or link.url
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if queued and queue.r.sismember(queued, url_key(link.url)):
+                continue
+        except Exception:  # noqa: BLE001 — a Redis hiccup costs a ranking, never the links
+            pass
+        fresh.append(link)
+    rank = getattr(queue, "rank", None)
+    if rank is not None and fresh:
+        scores = rank([(link.text, "") for link in fresh])
+        fresh = [
+            link for _score, _i, link in sorted(zip(scores, range(len(fresh)), fresh, strict=True), key=lambda x: (-x[0], x[1]))
+        ]
+    for link in fresh:
+        keep(where[link.page], link.url, link.text, "", None, link.page)
+    did.new = queue.push(found)
+    found.clear()
+    out.queued += did.new
+    out.hunted.add(did)
+    out.listings_read += did.listings
+    out.listing_links += did.found
+    out.refused = set(hunter.refused)
 
 
 # ---------------------------------------------------------------------------
 # SRCH-31/32: the job APIs, asked before Serper
 
-# A search's searches for snippet leads' originals: their own cap, so they never eat discovery's.
-RESOURCE_QUERIES = 10
-# 20 Nov, live: with the day's Serper allowance spent, 228 snippet leads that passed every filter
-# were never looked for, and "Find more" found nothing to read. They wait here instead, best match
-# first, for the next search that has lookups to spend — "Find more" after midnight, or tomorrow's.
-WAITING_KEY = "wera:waiting:"
-WAITING_TTL_SECONDS = 3 * 24 * 60 * 60
-WAITING_MAX = 300
+# SRCH-32 (22 Nov): one lookup allowance a search (`lookups_per_search`), shared by the job APIs'
+# snippet leads, aggregators' copies and the previews a short search reads — each lookup one Serper
+# search for where the employer posted the job, on its own client so it never eats discovery's cap.
+# Handed to the best matches first. The job APIs are asked before any Google tier, so they may take
+# at most `API_SHARE` of it, and only for leads at `LOOKUP_BAR` or better; the rest of the
+# allowance waits for the copies the tiers turn up and for the previews. A lead the allowance
+# doesn't reach is a preview, read with its lookup when someone asks.
+API_SHARE = 2 / 3
+LOOKUP_BAR = PREVIEW_GOOD
 
 
-def _waiting_key(queue: object) -> str | None:
-    pool = getattr(queue, "pool", None)
-    return f"{WAITING_KEY}{pool}" if pool and getattr(queue, "r", None) is not None else None
+def api_lookups(total: int) -> int:
+    """The job APIs' share of a search's lookups: 10 of 15."""
+    return int(total * API_SHARE + 1e-9)
 
 
-def _park(queue: object, parked: list[tuple[float, str, "feeds.FeedQuery", "feeds.Lead"]]) -> int:
-    """Keep leads that passed but couldn't be looked for, scored by their match. Returns how many
-    wait in all. A Redis failure costs the waiting list, never the search."""
-    key = _waiting_key(queue)
-    if key is None:
-        return 0
-    r = queue.r  # type: ignore[attr-defined]
-    try:
-        if parked:
-            r.zadd(key, {json.dumps({"feed": f, "query": asdict(q), "lead": asdict(lead)}): s for s, f, q, lead in parked})
-            r.zremrangebyrank(key, 0, -WAITING_MAX - 1)  # the best `WAITING_MAX` stay
-            r.expire(key, WAITING_TTL_SECONDS)
-        return int(r.zcard(key))
-    except Exception:  # noqa: BLE001
-        logfire.exception("Couldn't keep the leads waiting for lookups")
-        return 0
-
-
-def waiting(queue: object) -> int:
-    """How many leads wait for lookups for this pool (`WAITING_KEY`)."""
-    key = _waiting_key(queue)
-    try:
-        return int(queue.r.zcard(key)) if key else 0  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001
-        return 0
-
-
-def look_for_waiting(
-    queue: object, *, profile: SearchProfile | None, sites: list[Site], known_urls: set[str], resource: Serper
-) -> tuple[int, int]:
-    """The waiting leads' originals, looked for with `resource`'s lookups, the found ones queued:
-    what "Find more" reads once the plan has been sent (20 Nov). Returns (looked for, queued)."""
-    from ..sources.feeds import resource as finding
-
-    if getattr(resource, "stopped", None):
-        return 0, 0
-    lookups = getattr(resource, "max_queries", RESOURCE_QUERIES) - getattr(resource, "sent", 0)
-    back = _resume(queue, lookups)
-    known = {canonical_url(u) or u for u in known_urls}
-    found: list[Target] = []
-    for feed_id, query, lead in back:
-        hit = finding.original(lead, serper=resource, sites=sites, gl=query.country, hl="en", exclude=[])  # type: ignore[arg-type]
-        if hit is None or (profile is not None and _excluded(hit.title, profile)) or (canonical_url(hit.url) or hit.url) in known:
-            continue
-        q = f"{feeds.FEEDS[feed_id].name}: {query.title}" + (f" in {query.city}" if query.city else "")
-        found.append(
-            Target(hit.url, host_of(hit.url).removeprefix("www."), "open", q, len(found), hit.title, hit.snippet, lead.date, via=feed_id, country=query.country)
-        )  # fmt: skip
-    return len(back), queue.push(found)  # type: ignore[attr-defined]
-
-
-def _resume(queue: object, n: int) -> list[tuple[str, "feeds.FeedQuery", "feeds.Lead"]]:
-    """Up to `n` waiting leads, best first, taken off the list to be looked for now."""
-    from ..sources import feeds as feed_types
-
-    key = _waiting_key(queue)
-    if key is None or n <= 0:
-        return []
-    r = queue.r  # type: ignore[attr-defined]
-    try:
-        rows = r.zrevrange(key, 0, n - 1)
-        if rows:
-            r.zrem(key, *rows)
-    except Exception:  # noqa: BLE001
-        logfire.exception("Couldn't read the leads waiting for lookups")
-        return []
-    out = []
-    for raw in rows:
-        item = json.loads(raw)
-        out.append((item["feed"], feed_types.FeedQuery(**item["query"]), feed_types.Lead(**item["lead"])))
-    return out
-
+# 21 Nov (H4): those lookups 4 at a time. One at a time, ten lookups were ten round trips to
+# Serper end to end; they are independent questions, and each is answered from Redis when any
+# search asked it in the last six hours (SRCH-33), so four at once is four round trips' wait at
+# most, not four times the spend. The order the leads are handled in is still best match first:
+# which lead takes a slot, and which copy of a duplicate is kept, never depends on which answered
+# first.
+LOOKUPS_AT_ONCE = 4
+# 21 Nov: the waiting list (`wera:waiting:`, 20 Nov) is retired. Leads that passed but weren't
+# looked for are saved as previews instead (`FeedDiscovery.previews`), where the person can see
+# them and read any in full, rather than kept out of sight for a later search's lookups.
 
 # And no date filter on them: the lead's date is the API's, and the employer's page may have been
 # indexed weeks before it (13 Nov: with discovery's three weeks, 10 lookups found no original).
@@ -892,12 +1154,25 @@ class FeedDiscovery:
     dropped: Counter = field(default_factory=Counter)
     # Snippet leads that passed but weren't looked for, the lookups' cap being spent on better ones.
     not_looked_for: int = 0
-    # 20 Nov: those leads, kept for when lookups are back (`WAITING_KEY`): how many wait now, and
-    # how many this search took back out to look for.
-    waiting: int = 0
-    resumed: int = 0
+    # 21 Nov: every snippet lead that passed and wasn't queued — past the lookups' cap, or looked
+    # for with no original found — best match first. The pipeline saves them as previews, after
+    # the hard filters (`Store.save_previews`), with no model call.
+    previews: list["Preview"] = field(default_factory=list)
     # Leads dropped only for their title, best match first: Upskills' near misses (UPSK-06).
     near_misses: list[NearMiss] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Preview:
+    """A snippet lead kept to show rather than read (21 Nov): what `normalise.from_lead` needs,
+    and its `lead_ranker` score, which becomes the job's `preview_match`. An aggregator's copy
+    (22 Nov) has no `feed` and says which site it is a copy on (`found_on`)."""
+
+    feed: str | None
+    country: str | None
+    lead: "feeds.Lead"
+    score: float | None
+    found_on: FoundOn | None = None
 
 
 def discover_feeds(
@@ -913,6 +1188,8 @@ def discover_feeds(
     resource: Serper | None = None,
     on_step: Step | None = None,
     rank: Ranker | None = None,
+    lookups: int | None = None,
+    bar: float | None = None,
 ) -> FeedDiscovery:
     """Ask every job API this search can use, all at once, and queue what they found.
 
@@ -935,6 +1212,15 @@ def discover_feeds(
     Adzuna and Careerjet leads, whichever country and API they came from.
 
     Leads dropped for their title alone are kept on `near_misses`, best first (UPSK-06).
+
+    **Lookups (22 Nov).** At most `lookups` of `resource`'s searches (all it has left, without one),
+    and only for leads whose match is at least `bar` — the search's one allowance is shared with
+    the Google tiers and the previews a short search reads (`API_SHARE`, `LOOKUP_BAR`).
+
+    **Previews (21 Nov).** The best snippet leads spend the lookups, `LOOKUPS_AT_ONCE` at a time,
+    and become postings as before. Every other snippet lead that passes — past the lookups' cap,
+    or looked for with no original found — is returned on `previews`, best first, for the pipeline
+    to save after the hard filters. Nothing here calls a model, and no tracked link is requested.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1013,16 +1299,13 @@ def discover_feeds(
         answers = [(asks[i], results[i]) for i in range(len(asks))]
         # Leads with no full text, each needing a search for where the employer posted it — as
         # many as the lookups' own cap allows, best first.
-        lookups = getattr(resource, "max_queries", RESOURCE_QUERIES) - getattr(resource, "sent", 0)
-        to_find = min(sum(len(leads) for (f, _q), (leads, _h) in answers if not feeds.FEEDS[f].full_text), max(lookups, 0))
-        looked = 0
+        room = max(getattr(resource, "max_queries", wera().lookups_per_search) - getattr(resource, "sent", 0), 0)
+        lookups = room if lookups is None else max(min(lookups - getattr(resource, "sent", 0), room), 0)
+        can_look = resource is not None and not getattr(resource, "stopped", None)
 
         known = {canonical_url(u) or u for u in known_urls}
-        taken: set[str] = set()
         tried: set[str] = set()  # a lead two APIs (or one API twice) returned is looked for once
         oldest = now - RECENCY_MS["21d"]
-        found: list[Target] = []
-        parked: list[tuple[float, str, feeds.FeedQuery, feeds.Lead]] = []
         entries: list[tuple[str, feeds.FeedQuery, feeds.Lead]] = []
         for (feed_id, query), (leads, how) in answers:
             stats = out.by_feed[feed_id]
@@ -1030,11 +1313,6 @@ def discover_feeds(
             stats["leads"] += len(leads)  # type: ignore[operator]
             stats["how"][how] += 1  # type: ignore[index]
             entries += [(feed_id, query, lead) for lead in leads]
-        # Leads an earlier search couldn't look for, when there are lookups to spend now (20 Nov).
-        if resource is not None and not getattr(resource, "stopped", None) and lookups > 0:
-            back = [(f, q, lead) for f, q, lead in _resume(queue, lookups) if "skipped" not in out.by_feed.get(f, {"skipped": 1})]
-            out.resumed = len(back)
-            entries = back + entries
         scores: list[float | None] = [None] * len(entries)
         if rank is not None and entries:
             ranked = rank([(lead.title, lead.snippet) for _f, _q, lead in entries])
@@ -1044,9 +1322,12 @@ def discover_feeds(
             from . import prefilter
 
             prefilter.warm_titles([*profile.titles, *(lead.title for _f, _q, lead in entries)])
+
+        # Pass 1, best first: which leads pass, and which of the snippet leads take a lookup.
+        # "feed" is read from the API, "look" is looked for, "preview" is kept to show (21 Nov).
+        passing: list[tuple[str, str, feeds.FeedQuery, feeds.Lead, float | None]] = []
+        to_look: list[tuple[feeds.Lead, str, str]] = []
         for (feed_id, query, lead), score in zip(entries, scores, strict=True):
-            stats = out.by_feed[feed_id]
-            feed = feeds.FEEDS[feed_id]
             # The same job from two APIs, or an agency's repost of it naming the employer in its
             # title ("… - Citi"), is one lead (`dedupe.same_posting_key`).
             same = dedupe.same_posting_key(lead.company, lead.title)
@@ -1066,25 +1347,78 @@ def discover_feeds(
                 out.dropped["old"] += 1
                 continue
             out.passed += 1
-            if feed.full_text:
-                url, title, snippet, source, payload = lead.url, lead.title, lead.snippet, "feed", lead.payload
-            elif resource is None or getattr(resource, "stopped", None) or looked >= max(lookups, 0):
-                out.not_looked_for += 1  # the lookups are spent, on better-ranked leads
-                parked.append((score if score is not None else 0.0, feed_id, query, lead))
-                continue
+            if feeds.FEEDS[feed_id].full_text:
+                how_read = "feed"
+            elif can_look and (bar is None or score is None or score >= bar):
+                how_read = "look"  # a candidate: which candidates take a lookup is decided below
             else:
+                how_read = "preview"
+                out.not_looked_for += 1  # under the bar, or no lookups at all
+            passing.append((how_read, feed_id, query, lead, score))
+        # SRCH-32 (22 Nov): the lookups go to each ticked country's floor first, then best match
+        # first (`targets.floors_first`, the reads' own rule) — not best match first alone, which
+        # gave the British leads every one and left the Swiss ones waiting.
+        candidates = [i for i, row in enumerate(passing) if row[0] == "look"]
+        taking = {
+            candidates[j]
+            for j in floors_first(candidates, lookups, countries, lambda i: passing[i][2].country)  # type: ignore[arg-type]
+        }
+        for i in candidates:
+            how_read, feed_id, query, lead, score = passing[i]
+            if i in taking:
+                to_look.append((lead, query.country, feeds.FEEDS[feed_id].name))
+            else:
+                passing[i] = ("preview", feed_id, query, lead, score)
+                out.not_looked_for += 1  # the lookups are spent on better-ranked leads
+
+        # The lookups, `LOOKUPS_AT_ONCE` at a time (21 Nov), each told as it lands. Their answers
+        # are used in the order above, so the result doesn't depend on which came back first.
+        originals: dict[int, object] = {}
+        if to_look:
+            with ThreadPoolExecutor(max_workers=min(LOOKUPS_AT_ONCE, len(to_look))) as pool:
+                futures = {
+                    pool.submit(finding.original, lead, serper=resource, sites=sites, gl=gl, hl="en", exclude=exclude): i  # type: ignore[arg-type]
+                    for i, (lead, gl, _name) in enumerate(to_look)
+                }
+                for future in as_completed(futures):
+                    i = futures[future]
+                    originals[i] = future.result()
+                    lead, _gl, name = to_look[i]
+                    tell(
+                        ANSWERS_SHARE + (1 - ANSWERS_SHARE) * len(originals) / len(to_look),
+                        f"Finding where the employer posted {name}'s {lead.title} at {lead.company}",
+                        len(originals),
+                        len(to_look),
+                    )
+
+        # Pass 2, in the same order: postings to queue, and previews to keep.
+        taken: set[str] = set()
+        found: list[Target] = []
+        looked = 0
+        for how_read, feed_id, query, lead, score in passing:
+            stats = out.by_feed[feed_id]
+            feed = feeds.FEEDS[feed_id]
+            if how_read == "feed":
+                url, title, snippet, source, payload = lead.url, lead.title, lead.snippet, "feed", lead.payload
+            elif how_read == "look":
+                hit = originals.get(looked)
                 looked += 1
-                tell(
-                    ANSWERS_SHARE + (1 - ANSWERS_SHARE) * min(looked / max(to_find, 1), 1),
-                    f"Finding where the employer posted {feed.name}'s {lead.title} at {lead.company}",
-                    looked,
-                    to_find,
-                )
-                hit = finding.original(lead, serper=resource, sites=sites, gl=query.country, hl="en", exclude=exclude)  # type: ignore[arg-type]
-                if hit is None or (profile is not None and _excluded(hit.title, profile)):
+                if hit is not None and profile is not None and _excluded(hit.title, profile):  # type: ignore[attr-defined]
+                    continue  # its own posting names a title the person said no to
+                if hit is None:
                     stats["no_original"] = int(stats.get("no_original", 0)) + 1  # type: ignore[call-overload]
-                    continue
-                url, title, snippet, source, payload = hit.url, hit.title, hit.snippet, "open", None
+                    # 21 Nov: no longer dropped. The lead is a real job the API listed; it is kept as a
+                    # preview, and "Read the full ad" scores it on its summary, rough-only.
+                    how_read = "preview"
+                else:
+                    url, title, snippet, source, payload = hit.url, hit.title, hit.snippet, "open", None  # type: ignore[attr-defined]
+            if how_read == "preview":
+                link = canonical_url(lead.url) or lead.url
+                if link not in known and link not in taken:
+                    taken.add(link)
+                    out.previews.append(Preview(feed_id, query.country, lead, score))
+                    stats["previews"] = int(stats.get("previews", 0)) + 1  # type: ignore[call-overload]
+                continue
             if (canonical_url(url) or url) in known or (canonical_url(url) or url) in taken:
                 continue
             taken.add(canonical_url(url) or url)
@@ -1108,7 +1442,6 @@ def discover_feeds(
             stats["queued"] += 1  # type: ignore[operator]
 
         out.queued = queue.push(found)
-        out.waiting = _park(queue, parked)
         if resource is not None:
             out.errors += list(resource.errors)
         flat = {
@@ -1125,8 +1458,7 @@ def discover_feeds(
                 "passed": out.passed,
                 "dropped": dict(out.dropped),
                 "not_looked_for": out.not_looked_for,
-                "waiting": out.waiting,
-                "resumed": out.resumed,
+                "previews": len(out.previews),
                 "near_misses": len(out.near_misses),
             }
         )
@@ -1145,10 +1477,23 @@ def _ms(day: str) -> int | None:
 # SRCH-26 tier 4 is page 2 of a tier-1 query, and worth a credit only when page 1 was mostly
 # postings: a query whose first ten results held two postings won't hold more on its second ten.
 # Measured 13 Nov: 12 page-2 queries, sent for every tier-1 query, surfaced one job.
+#
+# That is the rule within one search. Across searches (21 Nov), a query whose page 1 gave any posting
+# at all earns its page 2 on the next search, through the rotation's memory (`sources.rotation`):
+# by then page 1 is "already saved", and its next ten are the likeliest place for new jobs.
 PAGE_TWO_MIN_POSTINGS = 5
 
 
+def page_key(q: str, page: int) -> str:
+    """How one page of a query is named in a search's postings count: page 1 by its words alone."""
+    return q if page <= 1 else f"{q} #page{page}"
+
+
 def page_two_worth_asking(planned: list[PlannedQuery], postings: dict[str, int]) -> list[PlannedQuery]:
-    """The plan with each page-2 query kept only if its page 1 returned enough postings. A page 1
-    never sent (or not remembered) keeps its page 2 out: there is no evidence it is worth a credit."""
-    return [q for q in planned if q.page == 1 or postings.get(q.q, 0) >= PAGE_TWO_MIN_POSTINGS]
+    """The plan with each tier-4 query (the next page of a tier-1 query) kept only if the page
+    before it returned enough postings. A page never sent (or not remembered) keeps the next out:
+    there is no evidence it is worth a credit. Since 21 Nov the tier-1 query may itself be at page
+    2 (the rotation sent it there), so its tier 4 is page 3, judged by page 2's count."""
+    return [
+        q for q in planned if q.page == 1 or q.tier != 4 or postings.get(page_key(q.q, q.page - 1), 0) >= PAGE_TWO_MIN_POSTINGS
+    ]

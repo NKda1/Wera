@@ -73,3 +73,37 @@ def seed_to_job(s: dict[str, Any], now: int, status: str | None = None) -> tuple
 
 def first_run_seeds() -> list[dict[str, Any]]:
     return fixture("jobs.json")["firstRun"]
+
+
+def seed_to_preview(s: dict[str, Any], now: int) -> Job:
+    """A demo preview (21 Nov): a job API's lead kept rather than read — its summary, a tracked
+    link nothing fetches, and the match it was ranked by. `fullDescription`, when a seed has one,
+    is what "Read the full ad" finds in the demo (DEMO-02: no outbound request); without one the
+    demo shows a preview scored on its summary, rough-only."""
+    posted = now - s["postedDaysAgo"] * DAY
+    return Job.model_validate(
+        {
+            "id": s["id"],
+            "dedupeKey": f"url:{s['applyUrl'].removeprefix('https://').removeprefix('www.')}",
+            "title": s["title"],
+            "company": s["company"],
+            "location": {"city": s["city"], "country": s["country"], "raw": f"{s['city']}, {s['country']}"},
+            "remote": None,
+            "descriptionMd": s["summary"],
+            "descriptionStatus": "partial",
+            "applyUrl": s["applyUrl"],
+            "sources": [{"channel": "board_search", "detail": s["via"], "seenAt": iso(posted + 60 * MIN)}],
+            "language": "en",
+            "postedAt": iso(posted),
+            "postedPrecision": "approximate",
+            "firstSeen": iso(posted + 60 * MIN),
+            "lastSeen": iso(now),
+            "status": "preview",
+            "via": s["via"],
+            "previewMatch": s["previewMatch"],
+        }
+    )
+
+
+def preview_seeds() -> list[dict[str, Any]]:
+    return fixture("jobs.json").get("previews", [])

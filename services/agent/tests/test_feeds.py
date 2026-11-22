@@ -237,6 +237,15 @@ class TestFindingTheOriginal:
         category = FakeSerper({"Cudos": [Result("https://cudos.ch/de/jobs/informatik/", "Junior Software Engineer im Cross-Company-Programm", "Cudos AG", None, 1)]})  # fmt: skip
         assert resource.original(lead, serper=category, sites=[], gl="ch", hl="en", exclude=[]) is None
 
+    def test_a_tracked_link_on_any_country_site_is_never_the_original(self):
+        """SRCH-32 (21 Nov): `adzuna.ca` and `careerjet.de` aren't in the aggregators' list, and
+        the original is a page WERA reads."""
+        serper = FakeSerper({"TD Bank": [
+            Result("https://www.adzuna.ca/jobs/details/4567891234", "2027 Technology Graduate Programme - TD Bank", "TD Bank", None, 1),
+            Result("https://www.careerjet.de/jobad/de1234", "2027 Technology Graduate Programme - TD Bank", "TD Bank", None, 2),
+        ]})  # fmt: skip
+        assert resource.original(self.LEAD, serper=serper, sites=[], gl="ca", hl="en", exclude=[]) is None
+
     def test_a_different_job_at_the_same_company_isnt_it(self):
         serper = FakeSerper({"TD Bank": [Result("https://td.wd3.myworkdayjobs.com/en-US/x/job/London/Senior-Risk-Analyst_R9", "Senior Risk Analyst", "TD Bank", None, 1)]})  # fmt: skip
         assert resource.original(self.LEAD, serper=serper, sites=[], gl="gb", hl="en", exclude=[]) is None
@@ -290,47 +299,145 @@ class TestDiscoveringFromTheApis:
         assert queue.peek() == []
 
 
-class TestLeadsWaitForLookups:
-    """20 Nov, live: with the day's Serper allowance spent, 228 snippet leads that passed every
-    filter were never looked for, and "Find more" found nothing. They wait for the next search
-    that has lookups to spend, best match first."""
+def adzuna_rows(*titles: str, company: str = "Arch Capital Group") -> dict:
+    """Adzuna's answer with these titles, each a lead with a summary and a tracked link."""
+    return {
+        "results": [
+            {
+                "redirect_url": f"https://www.adzuna.co.uk/jobs/land/ad/{9000 + i}?se=test&utm_medium=api",
+                "title": title,
+                "company": {"display_name": f"{company} {i}" if company else ""},
+                "location": {"display_name": "London, UK"},
+                "created": "2026-11-10T09:00:00Z",
+                "description": f"{title}: build services for our London technology team. " * 4,
+            }
+            for i, title in enumerate(titles)
+        ]
+    }
+
+
+class TestOverflowLeadsArePreviews:
+    """21 Nov, replacing the 20 Nov waiting list: a snippet lead that passed but wasn't looked
+    for — past the lookups' cap, or looked for with no original found — is kept as a preview the
+    person can see and read, not dropped or parked out of sight. Nothing here calls a model, and
+    the tracked link is never requested."""
 
     def _profile(self, store):
-        return store.get_profile().model_copy(update={"titles": ["Graduate Software Engineer", "Technology Graduate Programme"], "locations": ["London, UK"], "seniority": ["graduate"], "exclude": ["Senior"]})  # fmt: skip
+        return TestDiscoveringFromTheApis()._profile(store)
 
     @respx.mock(assert_all_called=False)
-    def test_a_lead_kept_while_serper_is_spent_is_looked_for_by_the_next_search(self, keys, reviewed, redis, store, respx_mock):
+    def test_a_lead_past_the_lookups_is_a_preview_and_its_link_is_never_requested(self, keys, reviewed, redis, store, respx_mock):
         respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
-        adzuna_search = respx_mock.get(adzuna.SEARCH.format(country="gb"))
-        adzuna_search.mock(return_value=httpx.Response(200, json=fixture("adzuna_search")))
+        respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json=fixture("adzuna_search")))
+        tracked = respx_mock.get(url__startswith="https://www.adzuna.co.uk/").mock(return_value=httpx.Response(200))
         spent = FakeSerper({})
         spent.stopped = "daily_budget"
         queue = TargetQueue(redis, "plan")
 
-        first = strategist.discover_feeds(planned(), self._profile(store), queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=spent)  # fmt: skip
-        assert first.waiting >= 1 and queue.peek() == [] and spent.asked == []
+        found = strategist.discover_feeds(planned(), self._profile(store), queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=spent)  # fmt: skip
 
-        adzuna_search.mock(return_value=httpx.Response(200, json={"results": []}))  # nothing new today
-        serper = FakeSerper({'"Arch Capital Group"': [Result("https://boards.greenhouse.io/archcapital/jobs/42", "Technology & Change Graduate Programme 2027", "Arch Capital Group, London", None, 1)]})  # fmt: skip
-        second = strategist.discover_feeds(planned(), self._profile(store), queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=serper)  # fmt: skip
-        assert second.resumed >= 1
-        assert [t.url for t in queue.peek()] == ["https://boards.greenhouse.io/archcapital/jobs/42"]
+        assert queue.peek() == [] and spent.asked == []
+        assert [(p.feed, p.country, p.lead.company) for p in found.previews] == [("adzuna", "gb", "Arch Capital Group")]
+        assert found.not_looked_for == 1 and found.by_feed["adzuna"]["previews"] == 1
+        assert not tracked.called
+        assert not hasattr(strategist, "WAITING_KEY") and not hasattr(strategist, "look_for_waiting")
 
     @respx.mock(assert_all_called=False)
-    def test_find_more_looks_for_them_once_the_plan_is_sent(self, keys, reviewed, redis, store, respx_mock):
+    def test_a_lead_looked_for_with_no_original_is_a_preview_not_dropped(self, keys, reviewed, redis, store, respx_mock):
+        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
+        respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json=fixture("adzuna_search")))
+        serper = FakeSerper({})  # asked, and nothing found
+        found = strategist.discover_feeds(planned(), self._profile(store), queue=TargetQueue(redis, "plan"), known_urls=set(), sites=[], now=NOW, redis=redis, resource=serper)  # fmt: skip
+        assert len(serper.asked) == 1 and found.by_feed["adzuna"]["no_original"] == 1
+        assert [p.lead.company for p in found.previews] == ["Arch Capital Group"]
+
+    @respx.mock(assert_all_called=False)
+    def test_the_best_leads_take_the_lookups_and_the_rest_are_previews_best_first(
+        self, keys, reviewed, redis, store, respx_mock, monkeypatch
+    ):
+        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
+        titles = [f"Technology Graduate Programme {team}" for team in ("Payments", "Risk", "Data", "Cloud", "Ops")]
+        respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json=adzuna_rows(*titles)))
+        serper = FakeSerper({})
+        serper.max_queries = 2
+        order = {"Cloud": 5.0, "Data": 4.0, "Ops": 3.0, "Payments": 2.0, "Risk": 1.0}
+        prefer = lambda items: [order[title.rsplit(" ", 1)[-1]] for title, _ in items]  # noqa: E731
+        found = strategist.discover_feeds(planned(), self._profile(store), queue=TargetQueue(redis, "plan"), known_urls=set(), sites=[], now=NOW, redis=redis, resource=serper, rank=prefer)  # fmt: skip
+        assert sorted(q.split('"')[1].rsplit(" ", 1)[-1] for q in serper.asked) == ["Cloud", "Data"]
+        # The two looked for found nothing, so they are previews too — every lead best first.
+        assert [p.lead.title.rsplit(" ", 1)[-1] for p in found.previews] == ["Cloud", "Data", "Ops", "Payments", "Risk"]
+        assert [p.score for p in found.previews] == [5.0, 4.0, 3.0, 2.0, 1.0]
+        assert found.not_looked_for == 3
+
+    @respx.mock(assert_all_called=False)
+    def test_an_excluded_or_too_senior_lead_is_never_a_preview(self, keys, reviewed, redis, store, respx_mock):
+        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
+        rows = adzuna_rows(
+            "Senior Technology Graduate Programme", "Technology Graduate Programme Director", "Technology Graduate Programme"
+        )
+        respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json=rows))
+        spent = FakeSerper({})
+        spent.stopped = "daily_budget"
+        found = strategist.discover_feeds(planned(), self._profile(store), queue=TargetQueue(redis, "plan"), known_urls=set(), sites=[], now=NOW, redis=redis, resource=spent)  # fmt: skip
+        assert [p.lead.title for p in found.previews] == ["Technology Graduate Programme"]
+        assert found.dropped["term"] + found.dropped["senior"] == 2
+
+    @respx.mock(assert_all_called=False)
+    def test_a_lead_already_saved_isnt_a_preview_again(self, keys, reviewed, redis, store, respx_mock):
         respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
         respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json=fixture("adzuna_search")))
         spent = FakeSerper({})
         spent.stopped = "daily_budget"
-        queue = TargetQueue(redis, "plan")
-        strategist.discover_feeds(planned(), self._profile(store), queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=spent)  # fmt: skip
-        assert strategist.waiting(queue) >= 1
+        lead = next(r for r in fixture("adzuna_search")["results"] if r["company"]["display_name"] == "Arch Capital Group")
+        known = {lead["redirect_url"]}
+        found = strategist.discover_feeds(planned(), self._profile(store), queue=TargetQueue(redis, "plan"), known_urls=known, sites=[], now=NOW, redis=redis, resource=spent)  # fmt: skip
+        assert found.previews == []
 
-        serper = FakeSerper({'"Arch Capital Group"': [Result("https://boards.greenhouse.io/archcapital/jobs/42", "Technology & Change Graduate Programme 2027", "Arch Capital Group, London", None, 1)]})  # fmt: skip
-        looked, queued = strategist.look_for_waiting(
-            queue, profile=self._profile(store), sites=[], known_urls=set(), resource=serper
-        )
-        assert looked >= 1 and queued == 1 and strategist.waiting(queue) == 0
+
+class TestLookupsFourAtATime:
+    """H4, 21 Nov: the in-search lookups run `LOOKUPS_AT_ONCE` at a time, and the postings are
+    queued best match first whichever lookup answered first."""
+
+    @respx.mock(assert_all_called=False)
+    def test_at_most_four_at_once_and_the_order_is_the_ranking(self, keys, reviewed, redis, store, respx_mock):
+        import threading
+        import time
+
+        respx_mock.get(reed.SEARCH).mock(return_value=httpx.Response(200, json={"results": []}))
+        teams = ["Payments", "Risk", "Data", "Cloud", "Ops", "Audit"]
+        titles = [f"Technology Graduate Programme {t}" for t in teams]
+        respx_mock.get(adzuna.SEARCH.format(country="gb")).mock(return_value=httpx.Response(200, json=adzuna_rows(*titles)))
+        lock, live, most = threading.Lock(), [0], [0]
+
+        class SlowSerper(FakeSerper):
+            def search(self, q, *, gl, hl, page=1):
+                with lock:
+                    live[0] += 1
+                    most[0] = max(most[0], live[0])
+                team = q.split('"')[1].rsplit(" ", 1)[-1]
+                # The best lead answers last, so the order can't come from the answers.
+                time.sleep(0.05 * (len(teams) - teams.index(team)))
+                with lock:
+                    live[0] -= 1
+                    self.sent += 1
+                company = q.split('"')[3]
+                return [
+                    Result(
+                        f"https://boards.greenhouse.io/archcapital/jobs/{4200 + teams.index(team)}",
+                        f"Technology Graduate Programme {team}",
+                        company,
+                        None,
+                        1,
+                    )
+                ]
+
+        serper = SlowSerper({})
+        serper.max_queries = 10
+        rank = lambda items: [float(len(teams) - teams.index(t.rsplit(" ", 1)[-1])) for t, _ in items]  # noqa: E731
+        queue = TargetQueue(redis, "plan")
+        strategist.discover_feeds(planned(), TestDiscoveringFromTheApis()._profile(store), queue=queue, known_urls=set(), sites=[], now=NOW, redis=redis, resource=serper, rank=rank)  # fmt: skip
+        assert 1 < most[0] <= strategist.LOOKUPS_AT_ONCE
+        assert [t.title.rsplit(" ", 1)[-1] for t in queue.peek()] == teams
 
 
 class TestTheBestLeadsFirst:

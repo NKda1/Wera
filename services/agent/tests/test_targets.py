@@ -139,3 +139,44 @@ class TestThePool:
         first = q.take(1)
         q.put_back(first)
         assert q.take(1)[0].url == first[0].url
+
+
+class TestCountryFloorsForLookups:
+    """SRCH-32 (22 Nov): a search's lookups, and a short search's preview reads, give each ticked
+    country its floor (`Balance`'s rule: n ÷ countries) first, then go best match first. With GB, CH
+    and NL ticked, best match first alone gave every lookup to the British leads."""
+
+    # Best match first: more British leads, and better, than Swiss or Dutch ones.
+    LEADS = [("gb", 0.95), ("gb", 0.94), ("gb", 0.93), ("gb", 0.92), ("gb", 0.91), ("gb", 0.9), ("gb", 0.89),
+             ("gb", 0.88), ("ch", 0.8), ("ch", 0.78), ("nl", 0.76), ("ch", 0.75), ("ch", 0.6), ("nl", 0.5)]  # fmt: skip
+
+    def take(self, n: int, countries: list[str], leads=None) -> list[tuple[str, float]]:
+        leads = self.LEADS if leads is None else leads
+        chosen = targets.floors_first(leads, n, countries, lambda x: x[0], floor_ok=lambda x: x[1] >= 0.72)
+        return [leads[i] for i in chosen]
+
+    def test_each_country_above_the_bar_gets_its_floor_before_better_british_leads(self):
+        got = self.take(6, ["gb", "ch", "nl"])  # a floor of 2 each
+        assert len(got) == 6
+        assert sum(c == "ch" for c, _ in got) == 2 and sum(c == "gb" for c, _ in got) == 3
+        # The Netherlands has one lead above the bar: it takes that, and gives the other slot back,
+        # to the best left whichever country.
+        assert [x for x in got if x[0] == "nl"] == [("nl", 0.76)]
+        assert ("gb", 0.93) in got
+
+    def test_a_country_with_no_leads_gives_its_share_back(self):
+        british = [x for x in self.LEADS if x[0] != "nl"]
+        got = self.take(15, ["gb", "ch", "nl"], british)
+        assert len(got) == len(british) == 12  # every lead, never more than there are
+        got = self.take(9, ["gb", "ch", "nl"], british)
+        assert len(got) == 9 and sum(c == "ch" for c, _ in got) == 3  # CH's 3 above the bar; NL's 3 to the rest
+
+    def test_never_more_than_the_allowance_and_one_country_is_best_first(self):
+        for n in range(0, 16):
+            assert len(self.take(n, ["gb", "ch", "nl"])) == min(n, len(self.LEADS))
+        assert self.take(3, ["gb"]) == self.LEADS[:3]
+
+    def test_a_limit_orders_them_all_floors_first(self):
+        order = targets.floors_first(self.LEADS, 6, ["gb", "ch", "nl"], lambda x: x[0], limit=len(self.LEADS))
+        assert sorted(order) == list(range(len(self.LEADS)))
+        assert {self.LEADS[i][0] for i in order[:3]} == {"gb", "ch", "nl"}  # one each, before a second British one

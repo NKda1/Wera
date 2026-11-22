@@ -41,6 +41,19 @@ export function CompanyPanel({
 }) {
   const brief = app.pack?.company;
   const company = app.job.company;
+  if (!brief && !app.job.employerNamed) {
+    // 22 Nov: a board's or agency's post that names no employer has no company to read about —
+    // the agent would only say so (`company_page.read`), so the button isn't offered.
+    return (
+      <Card className="p-6">
+        <h2 className="text-h2">The employer isn&apos;t named</h2>
+        <p className="mt-2 max-w-[60ch] text-ink-2">
+          {company} posted this job without naming the employer, so there&apos;s no company site to learn from. Your letter is written to the
+          hiring team.
+        </p>
+      </Card>
+    );
+  }
   if (!brief) {
     return (
       <Card className="p-6">

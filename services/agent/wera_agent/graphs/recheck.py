@@ -30,6 +30,7 @@ import logfire
 from ..clock import iso, now_ms, parse_ms
 from ..db.session import transaction
 from ..settings import get_settings
+from ..sources import normalise
 
 # How long before the sweep will run again. SPEC §11.3 permits polling "at most daily", so the
 # floor is the compliance boundary, not a performance tweak — and it is enforced here rather than
@@ -213,7 +214,11 @@ def check_one(job_id: str, *, force: bool = False) -> str:
     with transaction() as session:
         store = Store(session, now)
         job = store._job(store._job_row(job_id))
-    if job.status in ("closed", "hidden", "rejected", "archived"):
+    if job.status in ("closed", "hidden", "rejected", "archived", "preview"):
+        return "skipped"
+    # 21 Nov: a job API's tracked link — all a preview read without its original has — is never
+    # requested, to check it or for anything else (SRCH-32).
+    if normalise.is_tracked_link(job.apply_url):
         return "skipped"
     if not force and job.last_checked_at and now - parse_ms(job.last_checked_at) < RECHECK_ONE_AFTER_HOURS * 3_600_000:
         return "skipped"

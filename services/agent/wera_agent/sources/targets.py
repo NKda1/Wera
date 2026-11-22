@@ -62,6 +62,9 @@ class Target:
     # The country it was searched for (a query's `gl`, lower case), so a pool kept across a change
     # of where can serve only the places now ticked. None when a search had no country.
     country: str | None = None
+    # The page of jobs a hunted link was found on (SRCH-22, 21 Nov), None for anything else. What a
+    # search doesn't read of these becomes a preview at its end, named for that page's site.
+    listing: str | None = None
 
 
 # How a pool scores postings: (title, snippet) pairs to scores, higher better. `prefilter.lead_ranker`.
@@ -98,6 +101,58 @@ def source_of(target: Target) -> str:
     return "firecrawl" if target.query.startswith("firecrawl:") else "google"
 
 
+def country_floor(n: int, countries: "list[str] | tuple[str, ...]") -> int:
+    """Each ticked country's floor of `n` reads or lookups (SRCH-26): `n ÷ countries`, none with
+    one country. `Balance` and `floors_first` share it, so a search's lookups are shared out by
+    the same rule as its reads."""
+    return n // len(countries) if len(countries) > 1 else 0
+
+
+def floors_first(
+    ordered: "list[Any]",
+    n: int,
+    countries: "list[str] | tuple[str, ...]",
+    country: "Callable[[Any], str | None]",
+    *,
+    floor_ok: "Callable[[Any], bool] | None" = None,
+    limit: int | None = None,
+) -> list[int]:
+    """Which of `ordered` (best match first) take `n` slots — a search's lookups, or the previews a
+    short search reads (SRCH-32, 22 Nov) — by `Balance.choose`'s rule: a ticked country under its
+    floor (`country_floor` of `n`) goes first with its best, the one with fewest first, from those
+    `floor_ok` allows (the ones at the lookup bar or above); then the rest best match first,
+    whichever country. A country with none left gives the rest of its share back. Returns the
+    positions in the order they were taken, `limit` of them (default `n`).
+
+    The allowance went best match first until 22 Nov, so with Great Britain, Switzerland and the
+    Netherlands ticked the British leads took it all: 28 Swiss previews waited, one Swiss job read."""
+    take = n if limit is None else limit
+    if take <= 0 or not ordered:
+        return []
+    ticked = list(dict.fromkeys(c.lower() for c in countries))
+    floor = country_floor(n, ticked)
+    got = dict.fromkeys(ticked, 0)
+    dry: set[str] = set()
+    left = list(range(len(ordered)))
+    chosen: list[int] = []
+    place = [(country(x) or "").lower() for x in ordered]
+    while len(chosen) < take and left:
+        pick = None
+        behind = [c for c in ticked if got[c] < floor and c not in dry]
+        for c in sorted(behind, key=lambda c: got[c]):
+            pick = next((i for i in left if place[i] == c and (floor_ok is None or floor_ok(ordered[i]))), None)
+            if pick is not None:
+                break
+            dry.add(c)
+        if pick is None:
+            pick = left[0]
+        left.remove(pick)
+        chosen.append(pick)
+        if place[pick] in got:
+            got[place[pick]] += 1
+    return chosen
+
+
 @dataclass
 class Balance:
     """A search's reads so far, and the one soft limit on them (SRCH-26).
@@ -120,7 +175,7 @@ class Balance:
 
     @property
     def floor(self) -> int:
-        return self.per_run // len(self.countries) if len(self.countries) > 1 else 0
+        return country_floor(self.per_run, self.countries)
 
     def note(self, target: Target) -> None:
         if target.country:

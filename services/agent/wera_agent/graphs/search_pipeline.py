@@ -20,13 +20,22 @@ today's scoring limit, or no more searches in the plan. It never pads with weak 
 
 **Find more** starts from what is already waiting: jobs saved but never scored, then the queue,
 then the tiers this plan hasn't sent yet.
+
+**Short of 8, the previews (22 Nov).** A search — or "Find more" — that has read everything it
+queued and has nothing left to send, still under `surface.min`, reads its best previews in full,
+best match first, until it has 8 or its budgets end (`_read_short`): a hunted link is read where it
+is, a job API's lead or an aggregator's copy with a lookup from the search's one allowance
+(`lookups_per_search`), and every read is scored within the day's limit (MATCH-05). At its end,
+the hunted links still queued — the ones this search didn't read — become previews themselves.
+Since the evening of 22 Nov: each ticked country's floor first, a good match with no lookup left
+scored on its summary, and a preview read counted as found by this search (`Store.upsert_jobs`).
 """
 
 import contextvars
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
@@ -40,7 +49,7 @@ from ..domain.dedupe import canonical_url
 from ..errors import ApiError
 from ..nodes import prefilter, strategist
 from ..settings import get_settings
-from ..sources import feeds, harvest, targets
+from ..sources import feeds, harvest, hunt, rotation, targets
 from ..sources.firecrawl_search import FirecrawlSearch, SearchCaps, SearchOutcome
 from ..sources.provider_guard import Guard
 from ..sources.serper import Serper
@@ -57,6 +66,11 @@ STAGES: tuple[str, ...] = ("planning", "apis", "searching", "reading")
 PHASE_OF = {"planning": "planning", "apis": "apis", "searching": "searching", "reading": "harvesting"}
 # How often a step that waits on one long call (the Strategist's plan) moves its bar.
 PACE_SECONDS = 2.0
+# 22 Nov: a short search's previews, read this many at once, and at most this many a search — the
+# read budget on top of the lookups' and the day's scoring limit. A round is about what one more
+# round of the queue would have read; three of them is about a search's worth of misses.
+PREVIEW_ROUND = 8
+PREVIEW_READS = 24
 # How a posting was read, as the run's log says it.
 READ_HOW = {
     "json-ld": "from the page's job data",
@@ -161,6 +175,8 @@ class Piped:
     results: int = 0
     kinds: Counter = field(default_factory=Counter)
     listings_read: int = 0
+    # SRCH-22 (21 Nov): what the hunter did across the search's tiers.
+    hunted: hunt.Hunted = field(default_factory=hunt.Hunted)
     tiers: list[int] = field(default_factory=list)
     read: int = 0
     by_path: Counter = field(default_factory=Counter)
@@ -180,6 +196,13 @@ class Piped:
     leads: dict[str, int] = field(default_factory=dict)
     # UPSK-06: what the near-miss pass read (`services.near_misses.Captured`).
     near_misses: object | None = None
+    # 22 Nov: previews saved this run — aggregators' copies the lookups didn't reach, and hunted
+    # links it didn't read — and previews it read in full because it was short.
+    previews_saved: int = 0
+    previews_read: int = 0
+    # 22 Nov, for the log: scored under the fit bar, and new on the list with no score yet.
+    under_bar: int = 0
+    unscored: int = 0
 
     @property
     def partial(self) -> bool:
@@ -213,6 +236,21 @@ def run(
                     "results": out.results,
                     "postings": out.kinds["posting"],
                     "listings_read": out.listings_read,
+                    # SRCH-22 (21 Nov): the hunter's pages, renders, refusals and what they gave.
+                    "hunt_pages": out.hunted.pages,
+                    "hunt_listings": out.hunted.listings,
+                    "hunt_followed": out.hunted.followed,
+                    "hunt_rendered": out.hunted.rendered,
+                    "hunt_credits": out.hunted.credits,
+                    "hunt_refused": out.hunted.refused,
+                    "hunt_skipped_refused": out.hunted.skipped,
+                    "hunt_disallowed": out.hunted.disallowed,
+                    "hunt_render_capped": out.hunted.render_capped,
+                    "hunt_found": out.hunted.found,
+                    "hunt_new": out.hunted.new,
+                    "hunt_copies": out.hunted.copies,
+                    "hunt_originals": out.hunted.originals,
+                    "hunt_postings_by_page": out.hunted.by_page,
                     "read": out.read,
                     "accepted_by": dict(out.by_path),
                     "rejected": dict(out.rejected),
@@ -221,6 +259,8 @@ def run(
                     "queued": out.queued,
                     "short": out.short or "",
                     "countries_dry": out.dry,
+                    "previews_saved": out.previews_saved,
+                    "previews_read": out.previews_read,
                 }
             )
     return out
@@ -267,16 +307,24 @@ def _run(
         # SRCH-26 (17 Nov): the pool is read best match first, scored against the CV for free.
         cv = store.cv()
         rank = prefilter.lead_ranker(cv, profile.titles if profile else [], demo_mode=get_settings().wera_demo_mode)
+        credits_week = store.credits_this_week()
     if not planned:
         out.errors.append(("NO_QUERIES", "Add a target title to your search profile to search."))
         return
-    bar.done("planning", _plan_note(planned, matrix, now), started)
 
     # Redis and Serper are checked before anything is spent: a run that can't queue or can't ask
     # stops here, not after paying for half of it.
     client = targets.connect()
     queue = targets.TargetQueue(client, key, pool=pool, rank=rank, reader=reader)
-    serper = Serper(max_queries=caps.max_serper_queries, guard=Guard(client, "serper"))
+    # SRCH-20 (21 Nov): what this search sends — each planned search's first phrasing and page this
+    # pool hasn't asked in the last few days, in the plan's order. `planned` stays whole for the job
+    # APIs, which ask by title and place, not by these words.
+    memory = rotation.Asked(client, pool, now=now)
+    turned = rotation.rotate(planned, memory.recall(), now=now)
+    bar.done("planning", _plan_note(planned, matrix, now, turned), started)
+    meter = Guard(client, "serper")
+    _allowance(run_ids, bar, meter, credits_week)
+    serper = Serper(max_queries=caps.max_serper_queries, guard=meter)
     queue.retire_others()
     boards = sites()
     tiers = sorted({q.tier for q in planned})
@@ -301,14 +349,30 @@ def _run(
     if any(feeds.skipped(f, countries=countries, person=person) is None for f in feeds.FEEDS):
         tiers = [0, *tiers]
     pending = [t for t in tiers if mode == "search" or t not in queue.tiers_sent()]
-    # Serper for finding snippet leads' originals (SRCH-32), on its own cap; made when tier 0 runs.
-    resource: list[Serper] = []
+    # SRCH-32 (22 Nov): the search's one lookup allowance — the job APIs' snippet leads, the
+    # aggregators' copies the tiers turn up, and the previews a short search reads — on one Serper
+    # client of its own, made the first time anything needs a lookup.
+    lookups = _Lookups(
+        lambda: Serper(max_queries=wera().lookups_per_search, window=strategist.RESOURCE_WINDOW, guard=Guard(client, "serper")),
+        wera().lookups_per_search,
+    )
     # UPSK-06: the leads the title rule dropped, for Upskills once reading is done.
     near: list[strategist.NearMiss] = []
 
     # SRCH-26 (18 Nov): Firecrawl's search, asked instead when Serper's day is spent or it is
     # failing — never for the run's own cap, which is the person's limit, not a provider's.
     stand_in = FirecrawlSearch(max_queries=wera().source_share.firecrawl_searches, spend=out.spend, caps=caps)
+    # SRCH-22 (21 Nov): one hunter for the search, so its caps, refusals and hunt cache span every
+    # tier. Renders are charged to the run's credits; aggregators' originals take the search's lookups.
+    hunter = hunt.Hunter(
+        redis=client,
+        run=run_ids.get("board_search") or next(iter(run_ids.values()), None),
+        spend=out.spend,
+        caps=caps,
+        render=bool(get_settings().firecrawl_api_key),
+        lookup=lookups.get,
+        countries=sorted(countries),
+    )
 
     def searcher() -> "Serper | FirecrawlSearch | None":
         if not serper.stopped:
@@ -318,7 +382,7 @@ def _run(
         return None
 
     def sent() -> int:
-        return serper.sent + stand_in.sent + sum(r.sent for r in resource)
+        return serper.sent + stand_in.sent + lookups.sent
 
     def discover_next(only: set[str] | None = None) -> bool:
         """Stage 2 for the next tier. False when there is no tier left or Serper stopped.
@@ -333,9 +397,6 @@ def _run(
         started = time.monotonic()
         if tier == 0:
             bar.at("apis", 0.0, "Asking the job APIs for your titles in each place")
-            resource.append(
-                Serper(max_queries=strategist.RESOURCE_QUERIES, window=strategist.RESOURCE_WINDOW, guard=Guard(client, "serper"))
-            )
             asked = strategist.discover_feeds(
                 planned,
                 profile,
@@ -345,32 +406,45 @@ def _run(
                 now=now,
                 redis=client,
                 person=person,
-                resource=resource[0],
+                resource=lookups.get(),
                 on_step=bar.step("apis"),
                 rank=rank,
+                # Two-thirds of the allowance at most, and only for good matches: the Google tiers'
+                # copies and a short search's previews are still to come (22 Nov).
+                lookups=strategist.api_lookups(lookups.total),
+                bar=strategist.LOOKUP_BAR,
             )
             near.extend(asked.near_misses)
             queue.mark_tier_sent(0)
-            bar.done("apis", _feeds_note(asked), started)
+            # 21 Nov: the leads past the lookups, kept as previews — after the hard filters, with
+            # no model call — for the person to read on demand, and for "Find more" to read.
+            previewed = _save_previews(asked.previews, run_ids, now=now)
+            out.previews_saved += previewed
+            bar.done("apis", _feeds_note(asked, previewed), started)
             out.feeds = asked.by_feed
             out.leads = {
                 "unique": asked.unique,
                 "passed": asked.passed,
                 "queued": asked.queued,
                 "not_looked_for": asked.not_looked_for,
+                "previews": previewed,
             }
             out.leads |= {f"dropped_{why}": n for why, n in asked.dropped.items()}
             out.queries = sent()
             out.errors += [("SEARCH", message) for message in asked.errors if ("SEARCH", message) not in out.errors]
             return True
-        plan = planned if tier != 4 else strategist.page_two_worth_asking(planned, queue.postings_by_query())
+        # The rotated plan: what this search asks (`rotation.rotate`). A search whose every phrasing
+        # was asked lately is resting, so a tier can be shorter than planned, or empty.
+        plan = turned.plan if tier != 4 else strategist.page_two_worth_asking(turned.plan, queue.postings_by_query())
         if only is not None:
             plan = [q for q in plan if q.gl in only]
         sending = sum(1 for q in plan if q.tier == tier)
         if not sending:
             if only is not None:
                 return False
-            queue.mark_tier_sent(tier)  # no page 1 was rich enough for its page 2: nothing to pay for
+            # No page 1 was rich enough for its page 2, or every search in the tier was asked
+            # lately (rotation): nothing to pay for.
+            queue.mark_tier_sent(tier)
             return discover_next()
         engine = searcher()
         if engine is stand_in:
@@ -394,15 +468,22 @@ def _run(
             profile=profile,
             on_step=bar.step("searching"),
             engine="firecrawl" if engine is stand_in else "google",
+            hunter=hunter,
+            on_asked=memory.note,
         )
         if only is None:
             queue.mark_tier_sent(tier)
-        bar.done("searching", _search_note(tier, found, "Firecrawl" if engine is stand_in else "Google", only), started)
+        # 22 Nov: aggregators' copies the lookups didn't reach, kept to read when asked.
+        previewed = _save_previews(found.previews, run_ids, now=now)
+        out.previews_saved += previewed
+        note = _search_note(tier, found, "Firecrawl" if engine is stand_in else "Google", only, previewed)
+        bar.done("searching", note + _google_left(meter), started)
         out.tiers.append(tier)
         out.queries = sent()
         out.results += found.results
         out.kinds.update(found.kinds)
         out.listings_read += found.listings_read
+        out.hunted.add(found.hunted)
         out.errors += [("SEARCH", message) for message in found.errors if ("SEARCH", message) not in out.errors]
         return True
 
@@ -423,7 +504,8 @@ def _run(
     # 20 Nov: postings are read a few at once (`harvest.READERS`), so the browser lives on a thread
     # of its own that every reader hands its pages to.
     topped_up = False
-    resumed_waiting = False
+    read_previews = False
+    tried: set[str] = set()
     with harvest.browser_lane() as fetch_html:
         while out.surfaced < surface_max:
             with transaction() as session:
@@ -442,21 +524,36 @@ def _run(
                     break
                 if discover_next():
                     continue
-                # 20 Nov: leads an earlier search kept because the day's lookups were spent — "Find
-                # more" looks for their originals once, before saying there is nothing left.
-                if not resumed_waiting and strategist.waiting(queue):
-                    resumed_waiting = True
-                    lookup = Serper(
-                        max_queries=strategist.RESOURCE_QUERIES, window=strategist.RESOURCE_WINDOW, guard=Guard(client, "serper")
+                # 22 Nov: nothing left to read or send, and short of `surface.min` — a search or
+                # "Find more" alike reads its best previews in full, best match first, until it has
+                # 8 or its budgets end, and scores them like any posting it read (21 Nov this was
+                # "Find more" only, once every tier was sent).
+                if not read_previews:
+                    read_previews = True
+                    errors = _read_short(
+                        out,
+                        run_ids,
+                        lookups=lookups,
+                        tried=tried,
+                        surface_min=surface_min,
+                        surface_max=surface_max,
+                        boards=boards,
+                        profile=profile,
+                        caps=caps,
+                        now=now,
+                        cache=cache,
+                        fetch_html=fetch_html,
+                        redis=client,
+                        countries=sorted(countries),
+                        at=bar.edges["reading"][0]
+                        + (bar.edges["reading"][1] - bar.edges["reading"][0]) * out.surfaced / surface_max,
                     )
-                    resource.append(lookup)
-                    looked, queued = strategist.look_for_waiting(
-                        queue, profile=profile, sites=boards, known_urls=known, resource=lookup
-                    )
-                    if looked:
-                        message = f"Looked for {_count(looked, 'lead')} kept from an earlier search: {queued} queued to read"
-                        intake.report(run_ids, phase="searching", progress=bar.edges["reading"][0], detail=message, note=message)
-                    if queued:
+                    if errors is not None:
+                        out.queries = sent()
+                        if _stops(errors):
+                            code = next(c for c, _ in errors if c in intake.STOPS_THE_RUN or c == "DAILY_CAP")
+                            out.short = None if out.surfaced >= surface_min else _code_reason(code)
+                            break
                         continue
                 out.short = _why_short(serper, pending, out.spend)
                 break
@@ -501,12 +598,20 @@ def _run(
             out.surfaced += judged.surfaced
             # New and on the shortlist: a job saved hidden is new to the database, not to the person.
             out.new_ids |= judged.visible_new
+            out.under_bar += judged.under_bar
+            out.unscored += judged.unscored
             out.errors += judged.errors
             if _stops(judged.errors):
                 code = next(c for c, _ in judged.errors if c in intake.STOPS_THE_RUN or c == "DAILY_CAP")
                 out.short = None if out.surfaced >= surface_min else _code_reason(code)
                 break
 
+    # 22 Nov: the hunted links still queued are the ones this search didn't read: each becomes a
+    # preview now, and leaves this person's queue, so it is one or the other and never both.
+    out.previews_saved += _hunted_to_previews(
+        queue, here, rank=rank, boards=boards, run_ids=run_ids, now=now, at=bar.edges["reading"][1]
+    )
+    out.queries = sent()
     out.queued = queue.size(accept=here)
     out.dry = [f"{c} {got} of {floor}" for c, got, floor in balance.short()]
     if out.read or out.surfaced:
@@ -590,6 +695,244 @@ def _near_misses(
         )
 
 
+class _Lookups:
+    """A search's one lookup allowance (SRCH-32, 22 Nov): a Serper client of its own with
+    `lookups_per_search` searches, made the first time something needs a lookup — most searches'
+    copies and previews need none, and a client that is never asked shouldn't exist."""
+
+    def __init__(self, make: "Callable[[], Serper]", total: int) -> None:
+        self._make, self.total = make, total
+        self.client: Serper | None = None
+
+    def get(self) -> Serper:
+        if self.client is None:
+            self.client = self._make()
+        return self.client
+
+    @property
+    def sent(self) -> int:
+        return self.client.sent if self.client is not None else 0
+
+    def left(self) -> int:
+        """Lookups this search can still send: none once the client stopped (its cap, the day's
+        share, the breaker). A lookup answered from Redis costs nothing, so this is the least left."""
+        if self.total <= 0:
+            return 0
+        client = self.get()
+        return 0 if client.stopped else max(client.max_queries - client.sent, 0)
+
+
+def _save_previews(found: list["strategist.Preview"], run_ids: dict[str, str], *, now: int) -> int:
+    """The job APIs' leads past the lookups, saved as previews (21 Nov): built as jobs
+    (`normalise.from_lead`), through the hard filters, ranked by their `lead_ranker` score, and
+    never shown to a model. Returns how many are new. A failure here costs the previews, never the
+    search. An aggregator's copy (22 Nov) is saved the same way, with the site it is a copy on."""
+    from ..services.store import Store
+    from ..sources import normalise
+
+    if not found:
+        return 0
+    try:
+        jobs = [normalise.from_lead(p.lead, p.feed, p.country, now, match=p.score, found_on=p.found_on) for p in found]
+        with transaction() as session:
+            return Store(session, now).save_previews(jobs, run_ids=run_ids)
+    except intake.Cancelled:
+        raise
+    except Exception:  # noqa: BLE001 — previews are extra, never a reason a search fails
+        logfire.exception("Couldn't save the search's previews")
+        return 0
+
+
+def _hunted_to_previews(
+    queue: targets.TargetQueue,
+    here: "Callable[[targets.Target], bool]",
+    *,
+    rank: "targets.Ranker | None",
+    boards: list,
+    run_ids: dict[str, str],
+    now: int,
+    at: float = 1.0,
+) -> int:
+    """22 Nov: the hunted links this search queued and didn't read, taken off this person's queue
+    and saved as previews (`normalise.from_hunted`): keyed by their own address, ranked by the
+    queue's ranker on their link text, through the hard filters, with no model call — a short
+    search, or the person, reads one where it is with no lookup. A link for a country no longer
+    ticked stays pooled for it. Returns how many previews are new."""
+    from ..services.store import Store
+    from ..sources import normalise
+
+    left = queue.take(1_000_000, accept=lambda t: t.listing is not None and here(t))
+    if not left:
+        return 0
+    try:
+        scores = rank([(t.title, t.snippet) for t in left]) if rank is not None else [None] * len(left)
+        jobs = []
+        for target, score in zip(left, scores, strict=True):
+            title, employer = hunt.employer_of(target.url, target.title)
+            jobs.append(
+                normalise.from_hunted(
+                    target.url,
+                    title=title or target.title,
+                    employer=employer,
+                    site=hunt.site_name(target.listing or target.url, boards),
+                    listing=target.listing,
+                    now=now,
+                    match=score,
+                )
+            )
+        with transaction() as session:
+            saved = Store(session, now).save_previews(jobs, run_ids=run_ids)
+    except intake.Cancelled:
+        raise
+    except Exception:  # noqa: BLE001 — previews are extra; the links are put back rather than lost
+        logfire.exception("Couldn't save the hunted links as previews")
+        queue.put_back(left)
+        return 0
+    if saved:
+        message = f"{_count(saved, 'link')} the hunter found and this search didn't read saved as previews"
+        intake.report(run_ids, phase="harvesting", progress=at, detail=message, note=message)
+    logfire.info("Hunted links saved as previews: {saved} new of {left}", saved=saved, left=len(left))
+    return saved
+
+
+def _read_short(
+    out: Piped,
+    run_ids: dict[str, str],
+    *,
+    lookups: _Lookups,
+    tried: set[str],
+    surface_min: int,
+    surface_max: int,
+    boards: list,
+    profile: object,
+    caps: SearchCaps,
+    now: int,
+    cache: "CrawlCache | None",
+    fetch_html: object,
+    redis: object,
+    at: float,
+    countries: "list[str] | None" = None,
+) -> list[tuple[str, str]] | None:
+    """A search short of `surface_min` with nothing left to read or send (22 Nov): its best
+    previews read in full, `PREVIEW_ROUND` at a time, until it has `surface_min` or a budget ends —
+    `PREVIEW_READS` a search, the lookups left (a hunted link needs none; a job API's lead or an
+    aggregator's copy needs one), the day's scoring limit (MATCH-05, `intake.judge`), the Firecrawl
+    caps. Scored like the postings a search reads, fit bar included. Returns the scoring's errors,
+    or None when there was nothing to read.
+
+    **Each ticked country's floor first** (SRCH-32, 22 Nov): the previews are read in
+    `targets.floors_first`'s order — each country's floor of `PREVIEW_READS`, from its previews at
+    the lookup bar or above, then the rest best match first — so the lookups they take are shared
+    out by country too. Best match first alone read British previews only, with 28 Swiss ones
+    waiting.
+
+    **Out of lookups, a good match is scored on its summary** (SRCH-26, MATCH-04, 22 Nov): a job
+    API's lead or a copy at `LOOKUP_BAR` (Good) or better that can't get a lookup is scored rough
+    on its summary, capped, rather than waiting for the person; a weaker one waits. The tracked
+    link is never requested either way."""
+    from ..services.store import Store
+    from ..sources import previews
+
+    with transaction() as session:
+        waiting = [p for p in Store(session, now).list_previews() if p.id not in tried]
+
+    def good(p: object) -> bool:
+        match = getattr(p, "preview_match", None)
+        return match is None or match >= strategist.LOOKUP_BAR
+
+    ticked = list(countries or [])
+    if ticked:
+        # A preview for a place no longer ticked waits for it: the filters would only hide it.
+        waiting = [p for p in waiting if not p.location.country or p.location.country.lower() in ticked]
+    order = targets.floors_first(waiting, PREVIEW_READS, ticked, lambda p: p.location.country, floor_ok=good, limit=len(waiting))
+    waiting = [waiting[i] for i in order]
+    read = originals = summary = unread = 0
+    added = under = unscored = 0
+    errors: list[tuple[str, str]] = []
+    while waiting and out.surfaced < surface_min and read < PREVIEW_READS:
+        with transaction() as session:
+            intake._check_cancelled(session, list(run_ids.values()))
+            allowance = Store(session, now).score_allowance()
+            cap_message = Store(session, now).score_cap_message() if allowance == 0 else ""
+        if allowance == 0:
+            # Nothing read that can't be scored: the lookups and the reads keep for the person.
+            errors.append(("DAILY_CAP", cap_message))
+            out.errors.append(("DAILY_CAP", cap_message))
+            break
+        room = min(PREVIEW_ROUND, PREVIEW_READS - read, allowance if allowance is not None else PREVIEW_ROUND)
+        left = None  # asked only when a preview needs a lookup
+        pick: list = []
+        on_summary: set[str] = set()
+        for preview in waiting:
+            if len(pick) >= room:
+                break
+            if previews.is_direct(preview):
+                pick.append(preview)
+                continue
+            if preview.title and preview.company:
+                left = lookups.left() if left is None else left
+                if left > 0:
+                    pick.append(preview)
+                    left -= 1
+                    continue
+            if good(preview) and preview.preview_match is not None:
+                pick.append(preview)  # Good or better, and no lookup for it: scored on its summary
+                on_summary.add(preview.id)
+        if not pick:
+            break  # what is left needs lookups this search hasn't got, and is under Good: it waits
+        chosen = {p.id for p in pick}
+        tried |= chosen
+        waiting = [p for p in waiting if p.id not in chosen]
+        looking = any(not previews.is_direct(p) and p.id not in on_summary for p in pick)
+        got = previews.read_many(
+            pick,
+            serper=lookups.get() if looking else None,
+            sites=boards,
+            profile=profile,  # type: ignore[arg-type]
+            caps=caps,
+            spend=out.spend,
+            now=now,
+            cache=cache,
+            fetch_html=fetch_html,  # type: ignore[arg-type]
+            parse=intake.normalise_with_model,
+            redis=redis,
+            lookups_at_once=strategist.LOOKUPS_AT_ONCE,
+            no_lookup=on_summary,
+        )
+        read += len(pick)
+        summary += len(on_summary)
+        originals += got.originals
+        unread += len(got.unread)
+        if not got.jobs:
+            continue
+        judged = intake.judge(
+            got.jobs, now=now, run_ids=run_ids, progress_from=at, progress_to=at, limit=len(got.jobs), only_these=True
+        )
+        out.surfaced += judged.surfaced
+        out.new_ids |= judged.visible_new
+        out.under_bar += judged.under_bar
+        out.unscored += judged.unscored
+        added += len(judged.visible_new)
+        under += judged.under_bar
+        unscored += judged.unscored
+        out.errors += judged.errors
+        errors += judged.errors
+        if _stops(judged.errors):
+            break
+    if not read:
+        return errors or None
+    out.read += read
+    out.by_path["preview"] += read - unread
+    out.previews_read += read
+    full = read - summary
+    did = [f"read {_count(full, 'preview')} in full ({originals} had their original)" if full else ""]
+    did.append(f"{summary} scored on their summary (no lookups left)" if summary else "")
+    did.append(f"{unread} couldn't be read" if unread else "")
+    message = f"{_added_note(added, under, unscored)} · short of {surface_min}: {', '.join(d for d in did if d)}"
+    intake.report(run_ids, phase="harvesting", progress=at, detail=message, note=message)
+    return errors
+
+
 def _stops(errors: list[tuple[str, str]]) -> bool:
     return any(code in intake.STOPS_THE_RUN or code == "DAILY_CAP" for code, _ in errors)
 
@@ -631,45 +974,80 @@ def _count(n: int, noun: str, plural: str | None = None) -> str:
     return f"{n} {noun if n == 1 else plural or noun + 's'}"
 
 
-def _plan_note(planned: list, matrix: object | None, now: int) -> str:
-    """What planning came to, for the run's log."""
+def _plan_note(planned: list, matrix: object | None, now: int, turned: "rotation.Rotated | None" = None) -> str:
+    """What planning came to, for the run's log — and, since 21 Nov, how much of it is new to ask."""
     from ..clock import iso
 
     countries = _count(len({q.gl for q in planned if q.gl}), "country", "countries")
     searches = _count(len(planned), "search", "searches")
     if matrix is None:
-        return f"The Strategist didn't answer, so the searches use your titles as written: {searches} in {countries}"
-    if getattr(matrix, "generated_at", None) == iso(now):
-        return f"The Strategist planned {searches} in {countries}"
-    return f"Today's plan still fits your CV and profile: {searches} in {countries}"
+        text = f"The Strategist didn't answer, so the searches use your titles as written: {searches} in {countries}"
+    elif getattr(matrix, "generated_at", None) == iso(now):
+        text = f"The Strategist planned {searches} in {countries}"
+    else:
+        text = f"Today's plan still fits your CV and profile: {searches} in {countries}"
+    return text + (_rotation_note(turned) if turned is not None else "")
 
 
-def _feeds_note(asked: "strategist.FeedDiscovery") -> str:
+def _rotation_note(turned: "rotation.Rotated") -> str:
+    """SRCH-20 (21 Nov): how this search's queries differ from the plan's own words, which a
+    search a day earlier may already have sent. Nothing to say when it asks the plan as written."""
+    parts = [
+        f"{turned.rephrased} in other words" if turned.rephrased else "",
+        f"{turned.deeper} at a later page" if turned.deeper else "",
+        f"{turned.rested} asked lately, resting" if turned.rested else "",
+    ]
+    said = [p for p in parts if p]
+    return f" · {', '.join(said)}" if said else ""
+
+
+def _allowance(run_ids: dict[str, str], bar: Bar, meter: Guard, credits_week: int) -> None:
+    """H4 (21 Nov): what is left of the providers' allowances as the search starts, as a line in
+    its log — the Serper day every run and person shares (`guard.daily`, the share a search may
+    use), and the week's Firecrawl credits (`max_credits_per_week`). Said before anything is spent,
+    so a short search can be read against what it had."""
+    week = wera().max_credits_per_week
+    parts = [f"Firecrawl credits left this week: {max(week - credits_week, 0)} of {week}"]
+    if (left_of := meter.left_today()) is not None:
+        parts.insert(0, f"Google searches left today: {left_of[0]} of {left_of[1]}")
+    message = " · ".join(parts)
+    intake.report(run_ids, phase="planning", progress=bar.edges["planning"][1], stage=1.0, detail=message, note=message)
+
+
+def _google_left(meter: Guard) -> str:
+    """The Serper day left after a tier, for its note: " · 88 of 120 Google searches left today"."""
+    left_of = meter.left_today()
+    return f" · {left_of[0]} of {left_of[1]} Google searches left today" if left_of else ""
+
+
+def _feeds_note(asked: "strategist.FeedDiscovery", previewed: int = 0) -> str:
     used = {f: st for f, st in asked.by_feed.items() if "skipped" not in st}
     searches = sum(int(st.get("searches", 0)) for st in used.values())  # type: ignore[call-overload]
     leads = sum(int(st.get("leads", 0)) for st in used.values())  # type: ignore[call-overload]
     each = ", ".join(f"{feeds.FEEDS[f].name} {st['searches']}" for f, st in used.items() if st.get("searches"))
     left = [feeds.FEEDS[f].name for f, st in asked.by_feed.items() if st.get("skipped")]
-    text = f"Job APIs: {_count(searches, 'search', 'searches')}, {_count(leads, 'posting')}, {asked.queued} queued to read"
+    # 22 Nov: links and reads, not jobs — "683 postings, 35 queued" was read as jobs found.
+    text = f"Job APIs: {_count(searches, 'search', 'searches')}, {_count(leads, 'link')} to postings, {asked.queued} to read"
     if each:
         text += f" ({each})"
     if asked.unique:
         text += f" · {asked.passed} of {asked.unique} passed your filters"
-    if asked.resumed:
-        text += f" · {asked.resumed} kept from an earlier search looked for"
-    if asked.waiting:
-        text += f" · {_count(asked.waiting, 'lead')} waiting for the next search with Google to spare"
+    if previewed:
+        # 21 Nov: the leads past the lookups, kept to show and read on demand.
+        text += f" · {previewed} saved as previews"
     if left:
         text += f" · not asked: {', '.join(left)}"
     return text
 
 
-def _search_note(tier: int, found: "strategist.Discovery", engine: str = "Google", only: set[str] | None = None) -> str:
+def _search_note(
+    tier: int, found: "strategist.Discovery", engine: str = "Google", only: set[str] | None = None, previewed: int = 0
+) -> str:
     postings = found.kinds["posting"]
     where = f" for {', '.join(sorted(c.upper() for c in only))}" if only else ""
     text = (
         f"{engine}, tier {tier}{where}: {_count(found.asked, 'search', 'searches')}, "
-        f"{_count(found.results, 'result')}, {_count(postings, 'posting')}, {found.queued} queued to read"
+        f"{_count(found.results, 'result')}, {_count(postings, 'link')} to postings, {found.queued} to read"
     )
     skipped = [
         part
@@ -679,16 +1057,54 @@ def _search_note(tier: int, found: "strategist.Discovery", engine: str = "Google
         )
         if part
     ]
-    return text + (f" ({', '.join(skipped)})" if skipped else "")
+    text += (f" ({', '.join(skipped)})" if skipped else "") + _hunt_note(found.hunted)
+    if previewed:
+        text += f" · {_count(previewed, 'copy', 'copies')} saved as previews"
+    return text
+
+
+def _hunt_note(hunted: hunt.Hunted) -> str:
+    """SRCH-22 (21 Nov): what hunting the pass's pages of jobs came to, after the search's own
+    counts — "Hunted 12 pages (3 rendered): 85 links to postings, 41 not seen before", and the
+    pages it left alone, which say why a page gave nothing. Empty when the pass had no page to hunt."""
+    if not (hunted.listings or hunted.refused or hunted.skipped or hunted.disallowed or hunted.originals):
+        return ""
+    text = (
+        f" · Hunted {_count(hunted.pages, 'page')} ({hunted.rendered} rendered): "
+        f"{_count(hunted.found, 'link')} to postings, {hunted.new} not seen before"
+    )
+    left = hunted.refused + hunted.skipped
+    alone = [
+        part
+        for part in (
+            f"{left} refused" if left else "",
+            f"{hunted.disallowed} barred by robots.txt" if hunted.disallowed else "",
+            f"{_count(hunted.originals, 'original')} behind aggregators" if hunted.originals else "",
+        )
+        if part
+    ]
+    return text + (f" ({', '.join(alone)})" if alone else "")
+
+
+def _added_note(added: int, under: int, unscored: int) -> str:
+    """What reached the person, first in a reading step's log line (22 Nov): "9 added to your list
+    (2 not scored yet), 1 under your bar". The step's other numbers are links and reads, and were
+    read as jobs — "35 queued to read", then 1 on the list."""
+    text = f"{added} added to your list"
+    if unscored:
+        text += f" ({unscored} not scored yet)"
+    return text + (f", {under} under your bar" if under else "")
 
 
 def _reading_note(out: Piped, split: str = "") -> str:
-    """What reading came to, short enough for the log's 200 characters: the split by place and
-    source first (SRCH-26), then what was kept and scored. How each was read is in Logfire."""
+    """What reading came to, short enough for the log's 200 characters: what reached the list first
+    (22 Nov), then the reads, split by place and source (SRCH-26), and what they came to. How each
+    was read is in Logfire."""
     refused = sum(out.rejected.values())
     where = f" ({split})" if split else ""
-    text = f"Read {_count(out.read, 'posting')}{where}: {sum(out.by_path.values())} kept"
+    text = f"{_added_note(len(out.new_ids), out.under_bar, out.unscored)} · read {_count(out.read, 'posting')}{where}"
+    text += f": {sum(out.by_path.values())} readable"
     if refused:
         top = out.rejected.most_common(1)[0][0].replace("-", " ")
         text += f", {refused} refused (most: {top})"
-    return text + f" · {_count(out.surfaced, 'job')} scored, {len(out.new_ids)} new on your shortlist"
+    return text
