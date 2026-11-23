@@ -69,6 +69,11 @@ export function isNew(job: Pick<Job, "foundBy" | "seenAt">): boolean {
   return Boolean(job.foundBy) && !job.seenAt;
 }
 
+/** SRCH-25, 22 Nov: whether a job belongs in the Jobs screen's New view. The server's answer, not
+ *  this session's opens: a card opened here loses its "New" tag at once but stays in the view until
+ *  the next load, so opening it never makes it vanish. */
+export const inNewView = (job: Pick<Job, "foundBy" | "seenAt">): boolean => isNew(job);
+
 const ORIGIN: Record<Channel, string> = {
   board_search: "Search",
   email_alert: "Email",

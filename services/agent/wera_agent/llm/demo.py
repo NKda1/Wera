@@ -923,6 +923,26 @@ def _cv_parse_output(variables: dict) -> dict:
     }
 
 
+def _demo_optimise(context: dict) -> dict:
+    """ATSC-10's demo: each target's first bullet, with "drawing on {keyword}" added and the line
+    that carries the keyword cited. No model reads the text, so it says no more than that."""
+    out = []
+    for target in context.get("optimise", [])[:3]:
+        if not target.get("bullets") or not target.get("lines"):
+            continue
+        first = target["bullets"][0]
+        out.append(
+            {
+                "bullet": first["bullet"],
+                "text": f"{first['text'].rstrip('. ')}, drawing on {target['keyword']}.",
+                "sources": [*first["sources"], *target["lines"][:1]],
+                "keyword": target["keyword"],
+                "reason": f"Adds {target['keyword']} from a line of the same role.",
+            }
+        )
+    return {"bullets": out}
+
+
 def respond(task: str, variables: dict, context: dict | None, demo_input: PackInput | None = None) -> dict:
     """The demo answer for one §9.3 task.
 
@@ -958,6 +978,22 @@ def respond(task: str, variables: dict, context: dict | None, demo_input: PackIn
         return _demo_cv_profile(cv)
     if task == "strategist.plan":
         return _demo_strategy(context or {})
+    if task == "upskills.analyse":
+        # UPSK-08: a label per term from its category in code, never a merge — the demo has no
+        # model to notice two spellings, and a guessed merge would change the counts.
+        kinds = {"tool": "tool", "qualification": "qualification"}
+        return {
+            "notes": [
+                {
+                    "term": t["term"],
+                    "kind": kinds.get(t.get("category") or "", "skill"),
+                    "evidence": "Name it in a bullet where you used it"
+                    if t.get("status") == "quick_win"
+                    else f"A project or course using {t['term']}",
+                }
+                for t in (context or {}).get("upskills", [])
+            ]
+        }
     if task == "email.extract":
         # Demo mode never opens a mailbox (DEMO-02), so there is no email to read. Returning
         # nothing is honest; inventing cards would make the demo look like it had an inbox.
@@ -970,6 +1006,8 @@ def respond(task: str, variables: dict, context: dict | None, demo_input: PackIn
         # The demo writer only ever copies master-CV lines, so there is nothing to repair. Saying
         # so (rather than inventing a fix) is what the real model does when it can't help either.
         return {"item": None}
+    if task == "cv.optimise":
+        return _demo_optimise(context or {})
     if demo_input is None:
         raise KeyError(f"The demo responder for {task!r} needs demo_input=PackInput")
     if task == "cv.tailor":

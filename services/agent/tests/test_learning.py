@@ -241,3 +241,26 @@ class TestTitlesWeraNearlyMatched:
         for i, firm in enumerate(["A", "B", "C"]):
             self._signal(store, 20 + i, "Procurement Analyst", firm, similarity=0.6)
         assert not [s for s in store.learning_suggestions().items if s.kind == "add_title"]
+
+
+class TestASlashInASuggestedTitle:
+    """22 Nov: "Accept" on "Equity Analyst/in Schweizer Aktien" answered "Something went wrong." The id
+    carried the title's slash; the server decoded the browser's %2F before routing, and 404'd."""
+
+    def test_a_gendered_ending_comes_off_the_title(self):
+        assert learning._clean_title("Equity Analyst/in Schweizer Aktien") == "Equity Analyst Schweizer Aktien"
+        assert learning._clean_title("Business Analyst:in Facility") == "Business Analyst Facility"
+        assert learning._clean_title("Berater/innen Finanzen") == "Berater Finanzen"
+        assert learning._clean_title("Analyst/Associate, Investment M&A") == "Analyst/Associate"  # a real slash stays
+
+    def test_an_id_with_a_slash_is_accepted_and_dismissed_over_http(self, api, store, monkeypatch):
+        from wera_agent.schemas.learning import Suggestion
+        from wera_agent.services.store import Store
+
+        suggestion = Suggestion(
+            id="add_title:analyst/associate", kind="add_title", value="Analyst/Associate", message="m", evidence=3
+        )
+        monkeypatch.setattr(Store, "_suggestion", lambda self, sid: suggestion if sid == suggestion.id else None)
+        profile = api.ok("POST", "/learning/suggestions/add_title%3Aanalyst%2Fassociate/accept")
+        assert "Analyst/Associate" in profile["titles"]
+        api.ok("POST", "/learning/suggestions/add_title%3Aanalyst%2Fassociate/dismiss")

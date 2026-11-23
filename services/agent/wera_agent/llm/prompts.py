@@ -21,7 +21,14 @@ from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from ..schemas.llm_outputs import CULTURE_LIMIT, KEYWORD_LIMIT, PROPOSALS_PER_PLAN, REASON_LIMIT
+from ..schemas.llm_outputs import (
+    CULTURE_LIMIT,
+    EVIDENCE_LIMIT,
+    FAMILY_NOTE_LIMIT,
+    KEYWORD_LIMIT,
+    PROPOSALS_PER_PLAN,
+    REASON_LIMIT,
+)
 
 OPEN = "<<<UNTRUSTED DATA"
 CLOSE = "UNTRUSTED DATA>>>"
@@ -230,6 +237,41 @@ KEYWORDS_EXTRACT = ChatPromptTemplate.from_messages(
             "meaningless.\n\n" + _PARSE_RULES + "\n\n" + _DATA_RULE,
         ),
         ("human", "{job}"),
+    ]
+)
+
+# UPSK-08 (22 Nov): labels and explains Upskills' gap terms; never counts or ranks them. Every
+# field is checked again in code (`services.upskills_analyst`, `upskills.report`): a `same_as`
+# must name a term in the same report and can't chain, the texts are trimmed. The terms, their
+# spellings and the example lines are the posts' words, so they go in as untrusted data. Where the
+# CV stands on each term comes from code, never from the model, and no CV text is sent.
+UPSKILLS_ANALYSE = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You help a job seeker read the skills their target jobs ask for and their CV doesn't "
+            "show yet. WERA has already counted and ranked them; you only label and explain. For "
+            "each term in the list return one note with the term exactly as given:\n"
+            "- `same_as`: only when the term is another spelling, abbreviation or plain synonym of "
+            'a different term in the list or the other report terms ("financial models" and '
+            '"financial modelling", "MS Excel" and "Excel"), that term exactly as written. '
+            "Never for terms that are merely related (Python and pandas, CFA and accounting). "
+            "Leave it out when unsure.\n"
+            "- `kind`: `skill` (a competence someone shows through work: valuation, SQL, contract "
+            "drafting), `qualification` (a certification, licence or exam: CFA Level I, ACCA, "
+            "PMP), `tool` (named software, a platform or a library: Bloomberg Terminal, Xero, "
+            "Docker) or `trait` (a personal quality or way of working: attention to detail, "
+            "resilience). A trait is never shown as a gap, so use it only for those.\n"
+            f"- `evidence`: what would close the gap on a CV, in at most {EVIDENCE_LIMIT} "
+            'characters and plain words: "a project using SQL", "CFA Level I", "name it in '
+            'a bullet where you used it". For a term marked `on the CV, not in skills`, say how '
+            "to show it, not how to learn it. Never claim the applicant has or lacks anything "
+            "beyond the status given.\n"
+            f"- `family_note`: optional, at most {FAMILY_NOTE_LIMIT} characters, only when the "
+            'kinds of role asking say something worth knowing: "mostly quant roles".\n\n'
+            "Work only from the list. Don't add terms. " + _DATA_RULE,
+        ),
+        ("human", "{terms}"),
     ]
 )
 
@@ -871,7 +913,44 @@ GUARD_CLAIMS = ChatPromptTemplate.from_messages(
     ]
 )
 
+# ATSC-10 (22 Nov): the CV-for-ATS optimiser, on a redraft. It rewords a few tailored bullets so
+# each carries one keyword the post asks for and the applicant's own CV already says, drawing only
+# on the bullet's own line and the CV lines that carry the keyword. Every rewrite is checked again
+# in code (`nodes.ats_optimise`): the citation guard, the keyword rule, the length and the page.
+# The post's keywords and the person's change note are untrusted data.
+CV_OPTIMISE = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You improve how a tailored CV reads to an applicant-tracking system, honestly. Each "
+            "target below is a keyword the job post asks for that the applicant's own CV already "
+            "backs in a line not shown on this CV. For each target you get up to three bullets "
+            "from the same role, each with its own master-CV line id, and the CV lines that carry "
+            "the keyword, with their ids.\n\n"
+            "Rewrite at most three bullets in all, one target each, so the bullet carries its "
+            "keyword in the CV's own words:\n"
+            "- Keep everything the bullet already says, and add only what the keyword's lines "
+            "say. Never add a number, a skill, a tool, an employer or a result that isn't in "
+            "those lines.\n"
+            "- `sources`: the bullet's own id first, then the ids of the keyword's lines you drew "
+            "on. Never an id that wasn't given.\n"
+            "- `keyword`: the target keyword exactly as given, and the rewrite must contain it.\n"
+            "- Keep it one CV line: an action verb first, past tense for past roles, no longer "
+            "than the length given for it.\n"
+            "- `reason`: one short line, what you added and from where.\n"
+            "If a keyword can't be worked into a bullet honestly, leave that bullet out; an "
+            "empty list is a fine answer. Follow the applicant's change note where it doesn't "
+            "conflict with these rules. " + _HONESTY + " " + _DATA_RULE,
+        ),
+        (
+            "human",
+            "Targets:\n{targets}\n\nAll the post's keywords:\n{keywords}\n\nThe applicant's change note:\n{note}",
+        ),
+    ]
+)
+
 TEMPLATES: dict[str, ChatPromptTemplate] = {
+    "cv.optimise": CV_OPTIMISE,
     "profile.generate": PROFILE_GENERATE,
     "cv.parse": CV_PARSE,
     "cv.tailor": CV_TAILOR,
@@ -882,6 +961,7 @@ TEMPLATES: dict[str, ChatPromptTemplate] = {
     "guard.repair": GUARD_REPAIR,
     "guard.claims": GUARD_CLAIMS,
     "keywords.extract": KEYWORDS_EXTRACT,
+    "upskills.analyse": UPSKILLS_ANALYSE,
     "job.analyse": JOB_ANALYSE,
     "job.summary": JOB_SUMMARY,
     "company.brief": COMPANY_BRIEF,

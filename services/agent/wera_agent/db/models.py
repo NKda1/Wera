@@ -310,3 +310,25 @@ class JobSignalRow(Base):
     education: Mapped[dict[str, Any] | None] = mapped_column(Json)
     job_hash: Mapped[str | None] = mapped_column(String(32))
     seen_at: Mapped[str] = mapped_column(Iso, index=True)
+
+
+class SkillNoteRow(Base):
+    """UPSK-08 (22 Nov): what the Upskills analyst said about one gap term, for one CV version.
+
+    `term` is the term's group key (`vocab.group_key`), the key Upskills counts it under. `kind`
+    is skill, qualification, tool or trait; `same_as` the group key of a term in the same report
+    it is a spelling of, when the vocabulary missed it; `evidence` one short line on what would
+    close the gap; `family_note` an optional word on who asks. Applied in code (`upskills.report`),
+    which checks every field again. Written once per term and CV version, so a term is never sent
+    twice. Migration 0018.
+    """
+
+    __tablename__ = "skill_notes"
+    term: Mapped[str] = mapped_column(String(200), primary_key=True)
+    cv_version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    same_as: Mapped[str | None] = mapped_column(String(200))
+    evidence: Mapped[str | None] = mapped_column(_Text)
+    family_note: Mapped[str | None] = mapped_column(_Text)
+    model: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[str] = mapped_column(Iso, index=True)

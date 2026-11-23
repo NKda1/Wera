@@ -307,6 +307,73 @@ class KeywordList(Model):
         return v if post is None else in_post(v, post)
 
 
+# ---- upskills.analyse (UPSK-08) ----
+#
+# Labels and an explanation per Upskills gap term, never a count: what to merge, what kind of
+# thing it is, what would close it. Every field is checked again where it is applied
+# (`services.upskills_analyst`, `services.upskills.report`), so a bad label is dropped, not argued
+# with: a `same_as` naming no term of the report, or a chain, is ignored there.
+
+# Limits a provider's strict mode won't enforce (`maxLength` is ignored), so they are stated in
+# the prompt and enforced here by trimming, which costs no retry.
+EVIDENCE_LIMIT = 90
+FAMILY_NOTE_LIMIT = 60
+type SkillKind = Literal["skill", "qualification", "tool", "trait"]
+
+
+def trim(text: str | None, limit: int) -> str | None:
+    """`text` cut to `limit` characters at a word, or None when nothing is left."""
+    text = " ".join((text or "").split())
+    if len(text) > limit:
+        text = text[: limit + 1].rsplit(" ", 1)[0].rstrip(" ,;:-") or text[:limit]
+    return text or None
+
+
+class TermNote(Model):
+    term: Term  # the term as it was sent
+    same_as: Opt[str] = None  # another term in the list this is a spelling or near-synonym of
+    kind: SkillKind
+    evidence: Opt[str] = None  # what would close the gap, in a few words
+    family_note: Opt[str] = None  # who mostly asks, when that's worth saying
+
+    @field_validator("evidence")
+    @classmethod
+    def _short_evidence(cls, v: str | None) -> str | None:
+        return trim(v, EVIDENCE_LIMIT)
+
+    @field_validator("family_note")
+    @classmethod
+    def _short_note(cls, v: str | None) -> str | None:
+        return trim(v, FAMILY_NOTE_LIMIT)
+
+    @field_validator("same_as")
+    @classmethod
+    def _blank_is_none(cls, v: str | None) -> str | None:
+        return (v or "").strip() or None
+
+
+class UpskillsNotes(Model):
+    notes: list[TermNote]
+
+    @field_validator("notes")
+    @classmethod
+    def _only_terms_sent(cls, v: list[TermNote], info: ValidationInfo) -> list[TermNote]:
+        """A note for a term that wasn't sent is dropped, and only the first note a term gets is
+        kept: the same filter `KeywordList` applies, so one stray line doesn't cost a retry."""
+        sent = (info.context or {}).get("terms") if info.context else None
+        if sent is None:
+            return v
+        allowed = {t.lower() for t in sent}
+        seen: set[str] = set()
+        out: list[TermNote] = []
+        for note in v:
+            key = note.term.strip().lower()
+            if key in allowed and key not in seen:
+                seen.add(key)
+                out.append(note)
+        return out
+
+
 # ---- job.analyse ----
 #
 # The parts of the job-description rubric a model has to read for. Title, company and the
@@ -895,3 +962,49 @@ class JobCard(Model):
 
 class JobCardList(Model):
     cards: list[JobCard]
+
+
+# ---- cv.optimise (ATSC-10, 22 Nov) ----
+#
+# The CV-for-ATS optimiser's rewrites. Each is held to its cited lines in code after this
+# (`nodes.ats_optimise._check`): the citation guard, the keyword rule, the bullet's length and the
+# page. So this filters only what can't be argued with — a bullet that wasn't sent is dropped,
+# and only the first rewrite of each is kept — and trims the reason rather than costing a retry.
+# No `composed` field: WERA's own code marks a rewrite composed, never a model.
+
+OPTIMISE_REASON_LIMIT = 120
+
+
+class OptimisedBullet(Model):
+    bullet: Term  # the bullet's key, as sent ("s0.i1.b2")
+    text: Term  # the bullet rewritten
+    sources: list[str]  # master-CV line ids the rewrite draws on, the bullet's own first
+    keyword: Term  # the target keyword it now carries
+    reason: str = ""  # one line: what changed and why
+
+    @field_validator("reason")
+    @classmethod
+    def _short_reason(cls, v: str) -> str:
+        v = " ".join((v or "").split())
+        if len(v) > OPTIMISE_REASON_LIMIT:
+            v = v[: OPTIMISE_REASON_LIMIT + 1].rsplit(" ", 1)[0].rstrip(" ,;:-") or v[:OPTIMISE_REASON_LIMIT]
+        return v
+
+
+class OptimiseOutput(Model):
+    bullets: list[OptimisedBullet]
+
+    @field_validator("bullets")
+    @classmethod
+    def _only_bullets_sent(cls, v: list[OptimisedBullet], info: ValidationInfo) -> list[OptimisedBullet]:
+        sent = (info.context or {}).get("bullets") if info.context else None
+        if sent is None:
+            return v
+        seen: set[str] = set()
+        out: list[OptimisedBullet] = []
+        for b in v:
+            key = b.bullet.strip()
+            if key in sent and key not in seen:
+                seen.add(key)
+                out.append(b.model_copy(update={"bullet": key}))
+        return out

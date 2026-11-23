@@ -19,6 +19,7 @@ from ..llm.demo import PackInput
 from ..nodes.analyse import analyse as analyse_job
 from ..nodes.answers import answers as draft_answers
 from ..nodes.ats import build_ats, place_required, reconcile_skills
+from ..nodes.ats_optimise import optimise as optimise_cv
 from ..nodes.tailor import letter as write_letter
 from ..nodes.tailor import tailor as tailor_cv
 from ..schemas.pack import CoverLetter, JobAnalysis, TailoredCV
@@ -82,6 +83,30 @@ def step_ats(session: Session, app_id: str, *, note: str | None) -> None:
     letter = store.load_document(app_id, "letter", CoverLetter)
     report = build_ats(doc, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, letter=letter)
     store.save_document(app_id, "ats", report)
+
+
+def step_optimise(session: Session, app_id: str, *, note: str | None) -> None:
+    """ATSC-10, on a redraft only (the graph decides): a few bullets reworded to carry keywords the
+    CV backs, then the CV and the ATS report saved again, with the `optimise` document beside them
+    saying what changed. Nothing is saved but that document when nothing changed.
+
+    A failed call costs the pack nothing: the CV stays as tailored, and the document says so.
+    """
+    cfg = wera().optimise
+    if cfg.max_rounds <= 0 or cfg.max_calls <= 0:
+        return
+    store = Store(session)
+    inp = store.draft_input(app_id, note=note)
+    doc = store.load_document(app_id, "cv", TailoredCV)
+    letter = store.load_document(app_id, "letter", CoverLetter)
+    better, report = optimise_cv(
+        session, doc, cv=inp.cv, evidence=inp.evidence, job=inp.job, cv_pages=inp.cv_pages, note=inp.note, letter=letter
+    )
+    if better.model_dump() != doc.model_dump():
+        store.save_document(app_id, "cv", better)
+        ats = build_ats(better, cv=inp.cv, evidence=inp.evidence, cv_pages=inp.cv_pages, job=inp.job, letter=letter)
+        store.save_document(app_id, "ats", ats)
+    store.save_document(app_id, "optimise", report)
 
 
 def step_answers(session: Session, app_id: str, *, note: str | None) -> None:

@@ -19,7 +19,9 @@ if TYPE_CHECKING:
 # CV already says, and returns ids rather than prose. Split out from `writing` because the two
 # want opposite models — selection is a short, cheap, near-deterministic call, while prose is
 # where reliability is worth paying for, and one tier could not be both.
-type Tier = Literal["fast", "select", "scoring", "writing"]
+# `optimise` (22 Nov, ATSC-10) is the CV-for-ATS optimiser's own tier, so its model can be A/B'd
+# and changed without moving any other task.
+type Tier = Literal["fast", "select", "scoring", "writing", "optimise"]
 type Effort = Literal["off", "low", "on"]
 
 
@@ -235,6 +237,8 @@ class Models(BaseModel):
     select: str
     scoring: str
     writing: str
+    # ATSC-10. Not in Settings: it follows config/wera.yaml, whose default the A/B chooses.
+    optimise: str = "qwen/qwen3.7-flash"
 
 
 class Weights(BaseModel):
@@ -351,6 +355,9 @@ class UpskillsConfig(BaseModel):
     near_miss_weight: float = 0.5
     # Extractions at once: each is a short fast-tier call. 1 on SQLite, whatever this says.
     near_miss_workers: int = 6
+    # UPSK-08 (22 Nov): gap terms the Upskills analyst labels in its one call a search, those not
+    # labelled for this CV version yet (`services.upskills_analyst`). 0 turns it off.
+    analyst_terms: int = 40
 
 
 class CompanyBriefConfig(BaseModel):
@@ -379,6 +386,17 @@ class LettersConfig(BaseModel):
     # Paragraph calls in flight at once, on Postgres. SQLite runs them one after another in the
     # caller's session, as `scoring_workers` does: it has one write lock to share.
     workers: int = 4
+
+
+class OptimiseConfig(BaseModel):
+    """ATSC-10 (22 Nov): the CV-for-ATS optimiser's caps (`nodes.ats_optimise`). A round is one
+    measure, one `cv.optimise` call and one measure again; it stops at `max_rounds`, at
+    `max_calls`, or at a round that raised the score by less than `min_gain` points."""
+
+    max_rounds: int = 2
+    min_gain: float = 1
+    max_targets: int = 5
+    max_calls: int = 2
 
 
 class MarketsConfig(BaseModel):
@@ -524,7 +542,7 @@ class WeraConfig(BaseModel):
     lookups_per_search: int = 15
     max_scored_per_day: int = 100
     # Jobs scored at once (`intake.judge`); 1 on SQLite whatever this says.
-    scoring_workers: int = 3
+    scoring_workers: int = 6
     # SRCH-26: 8–12 jobs a search. Replaces MATCH-05's two batches of eight, which scored sixteen
     # whether anyone wanted them or not; `max_scored_per_day` is still the day's ceiling.
     surface: SurfaceConfig = SurfaceConfig()
@@ -536,6 +554,7 @@ class WeraConfig(BaseModel):
     upskills: UpskillsConfig = UpskillsConfig()
     company_brief: CompanyBriefConfig = CompanyBriefConfig()
     letters: LettersConfig = LettersConfig()
+    optimise: OptimiseConfig = OptimiseConfig()
     # SRCH-30: hosts an open search often returns, each with a posting path there, whose robots.txt
     # is asked before a search alongside the boards'. Those that refuse it are left out.
     unreadable_hint: dict[str, str] = {}

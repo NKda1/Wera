@@ -402,12 +402,14 @@ def learning_suggestions(s: S) -> SuggestionList:
     return s.learning_suggestions()
 
 
-@router.post("/learning/suggestions/{suggestion_id}/accept")
+# `:path` (22 Nov): a suggested title can carry a slash ("Equity Analyst/in …"), and so can its id;
+# the browser encodes it, the server decodes it before routing, and a plain segment then 404'd.
+@router.post("/learning/suggestions/{suggestion_id:path}/accept")
 def accept_suggestion(s: S, suggestion_id: str) -> SearchProfile:
     return s.accept_suggestion(suggestion_id)
 
 
-@router.post("/learning/suggestions/{suggestion_id}/dismiss")
+@router.post("/learning/suggestions/{suggestion_id:path}/dismiss")
 def dismiss_suggestion(s: S, suggestion_id: str) -> SuggestionList:
     return s.dismiss_suggestion(suggestion_id)
 

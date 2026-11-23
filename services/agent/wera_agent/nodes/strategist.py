@@ -20,6 +20,7 @@ postings in Redis (`sources.targets`) for the Harvester. Nothing here reads a po
 Firecrawl: those are the Harvester's.
 """
 
+import contextvars
 import hashlib
 import json
 import re
@@ -1291,6 +1292,13 @@ def discover_feeds(
     remote_wish = profile.remote if profile else "any"
 
     def ask(feed_id: str, query: feeds.FeedQuery) -> tuple[list[feeds.Lead], str]:
+        # 22 Nov (SPEC 3.30): one span a feed call, so a slow API shows in Logfire by name.
+        with logfire.span("feed {feed}", feed=feed_id, title=query.title, country=query.country) as span:
+            leads, how = _ask(feed_id, query)
+            span.set_attributes({"leads": len(leads), "how": how})
+            return leads, how
+
+    def _ask(feed_id: str, query: feeds.FeedQuery) -> tuple[list[feeds.Lead], str]:
         guard = Guard(redis, feed_id)
         if feed_id == "arbeitnow":
             cfg = feeds.config("arbeitnow")
@@ -1327,7 +1335,8 @@ def discover_feeds(
         # which one a duplicate keeps, must not depend on which API answered fastest.
         results: dict[int, tuple[list[feeds.Lead], str]] = {}
         with ThreadPoolExecutor(max_workers=max(1, min(8, len(asks)))) as pool:
-            futures = {pool.submit(ask, *a): i for i, a in enumerate(asks)}
+            # Each call carries this thread's context, so its `feed` span sits under this one.
+            futures = {pool.submit(contextvars.copy_context().run, ask, *a): i for i, a in enumerate(asks)}
             for future in as_completed(futures):
                 i = futures[future]
                 results[i] = future.result()

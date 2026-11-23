@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiRequestError, type Decision } from "@/lib/api";
-import { formatDate, formatLocation, formatPostedAge, foundLabel, isNew, URGENCY_GROUPS } from "@/lib/format";
+import { formatDate, formatLocation, formatPostedAge, foundLabel, inNewView, isNew, URGENCY_GROUPS } from "@/lib/format";
 import type { IntakeChannel, IntakeRun, PlaceOption, ScoredJob, SearchProfile, ShortlistMeta, SuggestionList } from "@/lib/types";
 import { Button } from "@/lib/ui/Button";
 import { LearningCard } from "./LearningCard";
@@ -217,13 +217,14 @@ export function JobsScreen({
     for (const f of facets.filter((f) => filters.includes(f.id))) {
       chosen.set(f.group, [...(chosen.get(f.group) ?? []), f]);
     }
-    const list = live.filter(
-      (j) => (!newOnly || (isNew(j) && !seen.has(j.id))) && [...chosen.values()].every((group) => group.some((f) => f.test(j))),
-    );
+    // The New view is the server's answer (22 Nov): a card opened here loses its tag at once but
+    // stays listed until the next load, as its place in the order does — it used to vanish the
+    // moment it was clicked (`seen` was in this test), which read as the job disappearing.
+    const list = live.filter((j) => (!newOnly || inNewView(j)) && [...chosen.values()].every((group) => group.some((f) => f.test(j))));
     if (sort === "date") return [...list].sort((a, b) => (b.postedAt ?? "").localeCompare(a.postedAt ?? ""));
     if (sort === "found") return [...list].sort((a, b) => (b.foundBy?.at ?? "").localeCompare(a.foundBy?.at ?? ""));
     return list;
-  }, [live, facets, filters, sort, newOnly, seen]);
+  }, [live, facets, filters, sort, newOnly]);
   // "By urgency" groups rather than re-sorts: inside a group the new jobs come first (SRCH-25) and
   // then the best match, because once you've decided what to look at today you want what you
   // haven't seen, and the best of it, at the top. New is read from the server's answer, not from

@@ -32,6 +32,20 @@ test("J2: search, filter and approve from the shortlist", async ({ page }) => {
   await expect(page.getByText("Search finished: 2 new jobs added.")).toBeVisible();
   await expect(cards(page)).toHaveCount(12);
 
+  // SRCH-25, 22 Nov: opening a card in the New view takes its tag off but leaves it listed — it used
+  // to vanish the moment it was clicked.
+  const filtersRow = page.getByRole("group", { name: "Filter jobs" });
+  await filtersRow.getByRole("button", { name: /^New/ }).click();
+  const fresh = await cards(page).count();
+  expect(fresh).toBeGreaterThan(0);
+  const first = cards(page).first();
+  const title = (await first.textContent())?.trim() ?? "";
+  await first.getByRole("button").click();
+  await expect(cards(page)).toHaveCount(fresh);
+  await expect(page.getByRole("region", { name: title }).getByText("New", { exact: true })).toHaveCount(0);
+  await filtersRow.getByRole("button", { name: /^All/ }).click();
+  await expect(cards(page)).toHaveCount(12);
+
   const filters = page.getByRole("group", { name: "Filter jobs" });
   await filters.getByRole("button", { name: /^Fit/ }).click();
   await page.getByRole("checkbox", { name: /8\+/ }).check();

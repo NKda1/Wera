@@ -96,6 +96,7 @@ from ..schemas.pack import (
     CvItem,
     CvSection,
     JobAnalysis,
+    OptimiseReport,
     Pack,
     TailoredCV,
 )
@@ -1534,11 +1535,15 @@ class Store:
         (G2-02), a line with no sources is the empty summary of a CV that has none, and a line
         marked `composed` was written from its sources rather than copied from one of them.
 
-        That third case is the professional profile of a CV whose master has no summary (TAIL-07),
-        and it is the only one. It is exempted from *this* check and no other: `check_cited` still
-        holds it to the lines it cites, which is the check that fits prose — "is this carried by
-        its sources" rather than "is this a copy of its source". A selected bullet that drifts by
-        a character still fails here, which is the property this function exists to defend.
+        That third case is the professional profile of a CV whose master has no summary (TAIL-07)
+        and, since 22 Nov, a bullet the CV-for-ATS optimiser reworded to carry a keyword its cited
+        lines back (ATSC-10, `nodes.ats_optimise`) — TAIL-01 relaxed, deliberately and for those
+        two only, and the person sees every reworded bullet beside its original. Both are exempted
+        from *this* check and no other: `check_cited` still holds them to the lines they cite,
+        which is the check that fits prose — "is this carried by its sources" rather than "is this
+        a copy of its source" — and the optimiser adds its own keyword rule on top. A selected
+        bullet that drifts by a character still fails here, which is the property this function
+        exists to defend; `composed` is set only by WERA's own code, never by a model's reply.
         """
         lines = cv_line_index(self.cv())
         items = [doc.summary, *(b for s in doc.sections for i in s.items for b in i.bullets)]
@@ -2014,6 +2019,7 @@ class Store:
             analysis=JobAnalysis.model_validate(latest["analysis"]) if "analysis" in latest else None,
             cv_file=CvFileState.model_validate(latest["rendercv"]) if "rendercv" in latest else None,
             company=CompanyBrief.model_validate(latest["company"]) if "company" in latest else None,
+            optimise=OptimiseReport.model_validate(latest["optimise"]) if "optimise" in latest else None,
         )
 
     def _save_pack(self, app_id: str, pack: Pack, kinds: tuple[str, ...] = PACK_KINDS) -> None:

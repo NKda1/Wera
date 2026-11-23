@@ -95,6 +95,7 @@ export interface Pack {
   cv: TailoredCV;
   cvFile?: CvFileState;
   letter: CoverLetter;
+  optimise?: OptimiseReport;
 }
 /**
  * The job-description rubric, filled in for the job a pack is written for.
@@ -280,6 +281,58 @@ export interface Paragraph {
   sourceIds: string[];
   text: string;
   theme?: string;
+}
+/**
+ * ATSC-10 (22 Nov): what the CV-for-ATS optimiser did on a redraft, saved as the `optimise`
+ * document beside the CV version it produced. `score_before` is the redraft as tailored;
+ * `score_after` is what the saved CV scores. `stopped` says why it stopped: `no_targets` (no
+ * missing keyword the CV backs, or none in a shown role), `no_gain` (a round raised the score
+ * by less than `optimise.min_gain`; a round that didn't raise it at all is undone), `max_rounds`,
+ * `max_calls`, `error` (the call failed; the CV is as tailored) or `off`.
+ */
+export interface OptimiseReport {
+  calls: number;
+  changes: OptimiseChange[];
+  refused: OptimiseRefusal[];
+  rounds: OptimiseRound[];
+  scoreAfter: number;
+  scoreBefore: number;
+  stopped: "no_targets" | "no_gain" | "max_rounds" | "max_calls" | "error" | "off";
+}
+/**
+ * ATSC-10 (22 Nov): one bullet the optimiser reworded, before and after.
+ *
+ * `location` is where it was written (`s0.i1.b2`, the review screen's edit target); the screen
+ * finds the line by its text, since a line added or removed since moves the indices. `before`
+ * is the line as it was, so "Undo this change" can put it back through the per-line edit
+ * (G2-02). `source_ids` are the master-CV lines the rewrite cites, the original's first.
+ */
+export interface OptimiseChange {
+  after: string;
+  before: string;
+  keyword: string;
+  location: string;
+  reason: string;
+  roleId: string;
+  sourceIds: string[];
+}
+/**
+ * A rewrite the guard turned down, which left its line as it was.
+ */
+export interface OptimiseRefusal {
+  detail: string;
+  keyword: string;
+  location: string;
+  rule: string;
+}
+export interface OptimiseRound {
+  kept: boolean;
+  refused: number;
+  rewritten: number;
+  round: number;
+  scoreAfter: number;
+  scoreBefore: number;
+  targets: string[];
 }
 export interface ApplicationJob {
   applyUrl?: string;
@@ -1081,9 +1134,12 @@ export interface SkillDemand {
 export interface Upskill {
   category?: KeywordCategory;
   closeTo: string[];
+  evidence?: string;
   examples: UpskillJob[];
   families: FamilyShare[];
+  familyNote?: string;
   jobs: number;
+  merged: string[];
   nearMissExamples: NearMissJob[];
   nearMisses: number;
   outsideField: boolean;
@@ -1103,9 +1159,11 @@ export interface Upskill {
  */
 export interface QuickWin {
   category?: KeywordCategory;
+  evidence?: string;
   importance: number;
   jobs: number;
   line: string;
+  merged: string[];
   nearMisses: number;
   share: number;
   term: string;

@@ -154,6 +154,19 @@ CREATE TABLE IF NOT EXISTS settings (
 	PRIMARY KEY (id)
 );
 
+CREATE TABLE IF NOT EXISTS skill_notes (
+	term VARCHAR(200) NOT NULL,
+	cv_version INTEGER NOT NULL,
+	kind VARCHAR(16) NOT NULL,
+	same_as VARCHAR(200),
+	evidence TEXT,
+	family_note TEXT,
+	model VARCHAR(128) NOT NULL,
+	created_at VARCHAR(32) NOT NULL,
+	PRIMARY KEY (term, cv_version)
+);
+CREATE INDEX IF NOT EXISTS ix_skill_notes_created_at ON skill_notes (created_at);
+
 CREATE TABLE IF NOT EXISTS applications (
 	id VARCHAR(80) NOT NULL,
 	job_id VARCHAR(64) NOT NULL,
@@ -239,6 +252,7 @@ alter table llm_calls enable row level security;
 alter table master_cv enable row level security;
 alter table search_profile enable row level security;
 alter table settings enable row level security;
+alter table skill_notes enable row level security;
 alter table applications enable row level security;
 alter table fit_reports enable row level security;
 alter table documents enable row level security;

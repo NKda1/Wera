@@ -211,3 +211,19 @@ export function jobsAsking(x: { jobs: number; nearMisses: number }, of: number):
   if (!x.nearMisses) return `${x.jobs} of ${of} job${of === 1 ? "" : "s"}`;
   return `${x.jobs} on your list · ${x.nearMisses} you nearly matched`;
 }
+
+/** UPSK-08 (22 Nov): the analyst's words for a gap row, as the table shows them. `who` sits beside
+ * "Mostly asked by …" when the row has one, else on its own; `also` names the spellings merged
+ * into the row ("also written as Data Build Tool"), never the row's own term. */
+export function gapNotes(u: { term: string; evidence?: string | null; familyNote?: string | null; merged?: string[] }): {
+  evidence: string | null;
+  who: string | null;
+  also: string | null;
+} {
+  const merged = (u.merged ?? []).filter((t, i, all) => t.toLowerCase() !== u.term.toLowerCase() && all.indexOf(t) === i);
+  return {
+    evidence: u.evidence?.trim() || null,
+    who: u.familyNote?.trim() || null,
+    also: merged.length ? `also written as ${merged.join(", ")}` : null,
+  };
+}

@@ -66,6 +66,13 @@ class Upskill(Model):
     # outside the person's own field — C++ for a finance CV, asked by quantitative roles.
     families: list[FamilyShare] = []
     outside_field: bool = False
+    # UPSK-08 (22 Nov), from the Upskills analyst, once it has labelled the term for this CV
+    # version: what would close the gap ("a project using SQL"), a word on who asks ("mostly quant
+    # roles"), and the terms it found to be this one under another spelling, whose jobs are counted
+    # here ("also written as …"). Empty until then; the counts never depend on them.
+    evidence: Opt[str] = None
+    family_note: Opt[str] = None
+    merged: list[str] = []
 
 
 class QuickWin(Model):
@@ -81,6 +88,9 @@ class QuickWin(Model):
     # ordered by — each job's `upskills.lift`, a near miss at half (see `SkillDemand.importance`).
     near_misses: int = 0
     importance: float = 0.0
+    # UPSK-08 (22 Nov): as on `Upskill` — how to show it, and the spellings merged into it.
+    evidence: Opt[str] = None
+    merged: list[str] = []
 
 
 # Where a skill the posts ask for stands against the CV: in its skills list, in a line but not

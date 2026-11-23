@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attribution, displayCase, employerLine, formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, formatTime, isNew, allowanceParts, previewLabel, previewsLeft, previewSource, sortPreviews, upskillAnchor } from "./format";
+import { attribution, displayCase, employerLine, formatClosing, formatEvergreen, formatLiveness, formatOrigin, formatPostedAge, formatTime, inNewView, isNew, allowanceParts, previewLabel, previewsLeft, previewSource, sortPreviews, upskillAnchor } from "./format";
 
 describe("new jobs (SRCH-25)", () => {
   const foundBy = { runId: "run-7", channel: "board_search" as const, at: "2026-11-11T08:00:00Z" };
@@ -165,5 +165,14 @@ describe("employerLine (22 Nov)", () => {
   it("shows an agency's repost under the employer it names, with the agency beside it", () => {
     expect(employerLine({ company: "Citi", postedBy: "eFinancialCareers", employerNamed: true })).toBe("Citi (via eFinancialCareers)");
     expect(employerLine({ company: "Citi" })).toBe("Citi");
+  });
+});
+
+describe("inNewView (SRCH-25, 22 Nov)", () => {
+  it("keeps a job in the New view after it is opened here, until the server says it was seen", () => {
+    const found = { foundBy: { channel: "board_search" as const, at: "2026-11-22T10:00:00Z" } };
+    expect(inNewView({ ...found, seenAt: undefined })).toBe(true);
+    expect(inNewView({ ...found, seenAt: "2026-11-22T11:00:00Z" })).toBe(false);
+    expect(inNewView({ foundBy: undefined, seenAt: undefined })).toBe(false);
   });
 });

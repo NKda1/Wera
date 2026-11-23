@@ -16,6 +16,10 @@ models:
   # a cover letter goes from about $0.0015 to $0.0055: noise against the $0.06–0.08 an
   # application costs in fit scoring, and it buys back the calls that produced nothing at all.
   writing: qwen/qwen3.8-27b
+  # ATSC-10 (22 Nov): the CV-for-ATS optimiser on a redraft (`nodes.ats_optimise`), rewording 2–3
+  # bullets to carry keywords the CV already backs. Cheap and without thinking; the default is
+  # to be chosen from `python -m wera_agent.evaluate optimise` (qwen3.7-flash vs glm-5.3-flash).
+  optimise: qwen/qwen3.7-flash
 
 # Tried in order when the tier's model fails with a transport or server error. A different
 # vendor first, so a provider outage doesn't take every attempt with it.
@@ -24,6 +28,7 @@ fallbacks:
   select: [qwen/qwen3.8-27b]
   scoring: [qwen/qwen3.7-flash]
   writing: [deepseek/deepseek-v4.1-flash-1017]
+  optimise: [z-ai/glm-5.3-flash]
 
 # USD per million tokens, used to price llm_calls rows and enforce the weekly budget (COST-01).
 # Read from OpenRouter's /models on 2026-10-17 — re-check after changing a model id, because a
@@ -37,6 +42,8 @@ prices:
   deepseek/deepseek-v4.1-flash-1017: { in: 0.15, out: 0.60 }
   mistralai/mistral-small-3.2-24b-instruct: { in: 0.09, out: 0.25 }
   google/gemini-2.5-flash-lite: { in: 0.10, out: 0.40 }
+  # 22 Nov, from the user's figures for the optimiser A/B (ATSC-10): re-check on OpenRouter /models.
+  z-ai/glm-5.3-flash: { in: 0.028, out: 0.208 }
 
 # SPEC §9.3, one row per task. No task has tools.
 tasks:
@@ -63,6 +70,12 @@ tasks:
   # The job-description rubric, once per drafted pack (`nodes.analyse`). Short quotes and a few
   # labels; no thinking, because what it does is find sentences, not reason about them.
   job.analyse: { tier: fast, max_tokens: 900, reasoning: "off" }
+  # UPSK-08 (22 Nov): the Upskills analyst, once a search at most, on the near-miss thread. It
+  # labels up to `upskills.analyst_terms` gap terms (a kind, a merge, one line of evidence each);
+  # the counts and weights stay in code. Short labels, no thinking.
+  # 22 Nov, live: 1200 cut the reply off at 40 terms (a note is ~30–40 tokens). 2400 fits 40 with room;
+  # only what is generated is billed (qwen3.7-flash: 2400 × $0.13/M ≈ $0.0003 at most).
+  upskills.analyse: { tier: fast, max_tokens: 2400, reasoning: "off" }
   # A job's summary, on click (18 Nov). Short phrases, each held to the post in code
   # (`llm_outputs.JobSummaryOutput`); no thinking, because it is reading, not judging.
   job.summary: { tier: fast, max_tokens: 700, reasoning: "off" }
@@ -144,6 +157,11 @@ tasks:
   # paragraph says about the applicant that its cited lines don't. Scoring tier, not fast: this
   # is a judgement about meaning, and a false positive costs a paragraph a repair call.
   guard.claims: { tier: scoring, max_tokens: 600, reasoning: "off" }
+  # ATSC-10 (22 Nov): the CV-for-ATS optimiser, on a redraft only, at most `optimise.max_calls`
+  # a redraft. Up to three bullets reworded to carry a keyword the CV backs, each with its sources
+  # and a one-line reason — about 300 tokens of JSON. No thinking: the rewrite is a merge of two
+  # cited lines, and every one is checked in code after.
+  cv.optimise: { tier: optimise, max_tokens: 900, reasoning: "off" }
 
 # §8.2 fit weights. Normalised in code, so they needn't sum to 1.
 weights:
@@ -395,6 +413,9 @@ upskills:
   near_miss_min_similarity: 0.70
   near_miss_weight: 0.5
   near_miss_workers: 6
+  # UPSK-08 (22 Nov): gap terms the analyst labels in one call (`upskills.analyse`), new ones only,
+  # once a search. 0 turns it off.
+  analyst_terms: 40
 
 # "Learn about the company" on the review screen (18 Nov): one About page, read with plain HTTP
 # after robots.txt, and one Serper search at most to find the site. Off turns the button off.
@@ -404,10 +425,12 @@ company_brief:
   max_chars: 4000
 
 # How many jobs are scored at once. Scoring sets a search's length — 12 s a job, one after
-# another, was 4 of a search's 11 minutes on 13 Nov — and it costs the same in parallel. Three,
-# not more: the weekly budget is checked before each call, so jobs in flight can overshoot it by
-# up to two calls. SQLite (the unit tests) always scores one at a time: one writer, fixed order.
-scoring_workers: 3
+# another, was 4 of a search's 11 minutes on 13 Nov — and it costs the same in parallel. Six since
+# 22 Nov (SPEC 3.30): Postgres now, so no shared SQLite write lock, and `fit.score` measured 3.3 s
+# on average, 5.2 s at the 90th percentile (22 Nov), so three at a time left scoring at ~100 s for
+# 45 calls. The weekly budget is checked before each call, so jobs in flight can overshoot it by up
+# to five calls. SQLite (the unit tests) always scores one at a time: one writer, fixed order.
+scoring_workers: 6
 
 # SRCH-26: how many jobs one search surfaces. It stops reading postings once `max` are scored,
 # and below `min` it goes on to the Strategist's next tier of queries until it gets there or a cap
@@ -444,6 +467,17 @@ unreadable_hint:
 letters:
   mode: paragraphs
   workers: 4
+
+# ATSC-10 (22 Nov): the CV-for-ATS optimiser, on a redraft only (`nodes.ats_optimise`). Each round
+# measures the ATS score, rewords up to three bullets in one `cv.optimise` call to carry missing
+# keywords the master CV backs, checks every rewrite against its cited lines, and measures again.
+# It stops after `max_rounds`, at `max_calls`, or when a round raises the score by less than
+# `min_gain` points. `max_targets` is the most keywords one call is asked about. 0 calls is off.
+optimise:
+  max_rounds: 2
+  min_gain: 1
+  max_targets: 5
+  max_calls: 2
 
 # LTR-04: phrases that make a cover letter read like a form. A hit triggers one rewrite, and the
 # phrase is quoted back so the model knows which words to lose rather than guessing at "be less

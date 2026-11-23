@@ -201,7 +201,18 @@ class TestFinanceWritesInAbbreviations:
 
     @pytest.mark.parametrize(
         "term",
-        ["Financial Modeling", "financial modelling", "discounted cash flow", "comps", "Leveraged Buyout", "Excel modeling"],
+        [
+            "Financial Modeling",
+            "financial modelling",
+            "discounted cash flow",
+            "comps",
+            "Leveraged Buyout",
+            "Excel modeling",
+            # 22 Nov: 3 of 45 live packs asked for the long form, and the ATS called it unbacked.
+            "discounted cash flow analysis",
+            "DCF analysis",
+            "DCF modelling",
+        ],
     )
     def test_the_cv_shows_it(self, term):
         assert text_has_term(self.CV, term)

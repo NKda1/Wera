@@ -1380,6 +1380,304 @@ def letters_as_markdown(report: LettersReport) -> str:
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------------------
+# The CV-for-ATS optimiser, model against model (ATSC-10, 22 Nov)
+#
+# `python -m wera_agent.evaluate optimise --models a,b` — with DATABASE_URL pointing at a `*_eval`
+# database, as `letters` is. Reads up to `n` approved packs from the live database, read-only (each
+# with its job, fit evidence, the master CV it was built from and the change note it was last
+# redrafted with), and runs the optimiser on each with each model in turn, the `optimise` tier
+# overridden for the run and its fallbacks off, so a row's model is the one that answered. The
+# calls are recorded in the eval database; the live one is never written to.
+
+OPTIMISE_TASK = "cv.optimise"
+# Drafted packs, reviewed or not (22 Nov): a redraft — where the optimiser runs — happens at review, and
+# the live install had 45 packs ready for review and none approved yet.
+APPROVED = ("ready_for_review", "changes_requested", "approved", "submitted", "interview", "offer")
+
+
+@dataclass
+class OptimisePack:
+    app_id: str
+    job: Any  # schemas.jobs.Job
+    cv: Any  # schemas.cv.MasterCV
+    evidence: Any  # schemas.jobs.FitEvidence
+    doc: Any  # schemas.pack.TailoredCV
+    letter: Any = None  # schemas.pack.CoverLetter
+    cv_pages: int = 1
+    note: str | None = None
+
+
+@dataclass
+class OptimiseRow:
+    app_id: str
+    title: str
+    company: str
+    model: str
+    error: str | None = None
+    before: float = 0.0
+    after: float = 0.0
+    rewritten: int = 0
+    refused: int = 0
+    refused_by_rule: dict[str, int] = field(default_factory=dict)
+    calls: int = 0
+    failed_calls: int = 0
+    reasoning_tokens: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
+    call_ms: int = 0  # the model calls' own latency, summed
+    seconds: float = 0.0  # the whole optimiser, measuring included
+    stopped: str = ""
+    models_used: list[str] = field(default_factory=list)  # what `llm_calls` says answered
+    changes: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def gain(self) -> float:
+        return self.after - self.before
+
+
+@dataclass
+class OptimiseEvalReport:
+    ran_at: str
+    models: list[str]
+    rows: list[OptimiseRow] = field(default_factory=list)
+
+    def of(self, model: str) -> list[OptimiseRow]:
+        return [r for r in self.rows if r.model == model]
+
+
+def read_approved_packs(source_url: str, n: int) -> list[OptimisePack]:
+    """Up to `n` approved packs from the live database, newest first, read-only."""
+    from sqlalchemy import select, text
+    from sqlalchemy.orm import Session
+
+    from .db.models import ApplicationRow, DecisionRow, DocumentRow, FitReportRow, JobRow, MasterCvRow
+    from .db.session import make_engine
+    from .nodes.fit import with_posted_keywords
+    from .schemas.cv import MasterCV
+    from .schemas.jobs import FitEvidence, Job
+    from .schemas.pack import CoverLetter, TailoredCV
+    from .services.store import current_view
+
+    out: list[OptimisePack] = []
+    source = make_engine(source_url)
+    try:
+        with Session(source) as live:
+            live.execute(text("SET TRANSACTION READ ONLY"))
+            pages = int(
+                ((live.execute(text("SELECT data FROM settings ORDER BY id LIMIT 1")).scalar() or {}).get("cvPages")) or 1
+            )
+            apps = live.scalars(
+                select(ApplicationRow).where(ApplicationRow.status.in_(APPROVED)).order_by(ApplicationRow.created_at.desc())
+            ).all()
+            for app in apps:
+                if len(out) >= n:
+                    break
+                docs = live.scalars(
+                    select(DocumentRow).where(DocumentRow.application_id == app.id).order_by(DocumentRow.version)
+                ).all()
+                latest = {d.kind: d.content for d in docs}
+                job_row, fit_row = live.get(JobRow, app.job_id), live.get(FitReportRow, app.job_id)
+                if "cv" not in latest or job_row is None or fit_row is None:
+                    continue
+                doc = TailoredCV.model_validate(latest["cv"])
+                cv_row = live.get(MasterCvRow, doc.cv_version)
+                if cv_row is None:
+                    continue
+                job = current_view(Job.model_validate(job_row.data))
+                note = live.scalar(
+                    select(DecisionRow.note)
+                    .where(DecisionRow.job_id == app.job_id, DecisionRow.gate == 2, DecisionRow.decision == "request_changes")
+                    .order_by(DecisionRow.decided_at.desc())
+                    .limit(1)
+                )
+                out.append(
+                    OptimisePack(
+                        app_id=app.id,
+                        job=job,
+                        cv=MasterCV.model_validate(cv_row.data),
+                        evidence=with_posted_keywords(FitEvidence.model_validate(fit_row.evidence), job),
+                        doc=doc,
+                        letter=CoverLetter.model_validate(latest["letter"]) if "letter" in latest else None,
+                        cv_pages=pages,
+                        note=note,
+                    )
+                )
+            live.rollback()
+    finally:
+        source.dispose()
+    return out
+
+
+def optimise_packs(packs: list[OptimisePack], models: list[str], *, ran_at: str) -> OptimiseEvalReport:
+    """The optimiser on every pack with every model, in the current database. Each pack's CV is
+    the approved one as it was stored, so the models start from the same lines."""
+    import logfire
+
+    from .config import wera
+    from .db.session import transaction
+    from .errors import ApiError
+    from .llm import gateway
+    from .nodes.ats_optimise import optimise
+
+    seen: list[dict[str, Any]] = []
+    publish = gateway._publish
+
+    def keep(row: dict[str, Any]) -> None:
+        seen.append(row)
+        publish(row)
+
+    cfg = wera()
+    tier_model, fallbacks = cfg.models.optimise, cfg.fallbacks.get("optimise")
+    gateway._publish = keep  # type: ignore[assignment]
+    cfg.fallbacks["optimise"] = []
+    report = OptimiseEvalReport(ran_at=ran_at, models=models)
+    total = len(packs) * len(models)
+    try:
+        for m_index, model in enumerate(models):
+            cfg.models.optimise = model
+            for p_index, pack in enumerate(packs):
+                label = f"{model} · {pack.job.title} — {pack.job.company}"
+                _tick(m_index * len(packs) + p_index, total, label)
+                row = OptimiseRow(pack.app_id, pack.job.title, pack.job.company, model)
+                mark = len(seen)
+                started = time.monotonic()
+                try:
+                    with transaction() as session:
+                        _doc, result = optimise(
+                            session,
+                            pack.doc,
+                            cv=pack.cv,
+                            evidence=pack.evidence,
+                            job=pack.job,
+                            cv_pages=pack.cv_pages,
+                            note=pack.note,
+                            letter=pack.letter,
+                        )
+                    row.before, row.after, row.stopped = result.score_before, result.score_after, result.stopped
+                    row.rewritten, row.refused = len(result.changes), len(result.refused)
+                    for r in result.refused:
+                        row.refused_by_rule[r.rule] = row.refused_by_rule.get(r.rule, 0) + 1
+                    row.changes = [c.model_dump(mode="json") for c in result.changes]
+                except ApiError as exc:
+                    row.error = exc.code
+                except Exception as exc:  # noqa: BLE001 — one bad pack must not end the eval
+                    row.error = type(exc).__name__
+                    logfire.warn("Optimiser eval {id} raised {kind}", id=pack.app_id, kind=type(exc).__name__)
+                row.seconds = round(time.monotonic() - started, 1)
+                calls = [r for r in seen[mark:] if r["task"] == OPTIMISE_TASK]
+                row.calls = len(calls)
+                row.failed_calls = sum(1 for r in calls if not r["ok"])
+                row.reasoning_tokens = sum(r["reasoning_tokens"] or 0 for r in calls)
+                row.tokens_in = sum(r["input_tokens"] or 0 for r in calls)
+                row.tokens_out = sum(r["output_tokens"] or 0 for r in calls)
+                row.cost_usd = sum(r["cost_usd"] or 0 for r in calls)
+                row.call_ms = sum(r["latency_ms"] or 0 for r in calls)
+                row.models_used = sorted({r["model"] for r in calls})
+                report.rows.append(row)
+        _tick(total, total, "done")
+    finally:
+        gateway._publish = publish  # type: ignore[assignment]
+        cfg.models.optimise = tier_model
+        if fallbacks is None:
+            cfg.fallbacks.pop("optimise", None)
+        else:
+            cfg.fallbacks["optimise"] = fallbacks
+        gateway.flush_unrecorded()
+    return report
+
+
+def run_optimise(*, source_url: str, n: int, models: list[str]) -> OptimiseEvalReport:
+    """`optimise_packs` over `n` approved live packs, refusing anything but an `*_eval` database."""
+    from sqlalchemy.engine import make_url
+
+    from .clock import iso, now_ms
+    from .main import ensure_database
+    from .settings import get_settings
+
+    target = make_url(get_settings().db_url)
+    if not (target.database or "").endswith("_eval") or make_url(source_url).database == target.database:
+        raise SystemExit(f"Refusing to run: DATABASE_URL must name an *_eval database, not {target.database!r}.")
+    if get_settings().wera_demo_mode:
+        raise SystemExit("Demo mode answers from the demo responders; run this with WERA_DEMO_MODE=false.")
+    ensure_database()
+    packs = read_approved_packs(source_url, n)
+    if not packs:
+        raise SystemExit("No approved packs in the source database to optimise.")
+    return optimise_packs(packs, models, ran_at=iso(now_ms()))
+
+
+def optimise_as_markdown(report: OptimiseEvalReport) -> str:
+    models = report.models
+
+    def line(label: str, fn: Any) -> str:
+        return f"| {label} | " + " | ".join(fn(report.of(m)) for m in models) + " |"
+
+    def ok(rows: list[OptimiseRow]) -> list[OptimiseRow]:
+        return [r for r in rows if r.error is None]
+
+    def calls(rows: list[OptimiseRow]) -> int:
+        return sum(r.calls for r in rows)
+
+    out = [
+        "# CV-for-ATS optimiser: model against model (ATSC-10)",
+        "",
+        f"{report.ran_at} · {len({r.app_id for r in report.rows})} approved packs · reasoning off · fallbacks off",
+        "",
+        "| | " + " | ".join(f"`{m}`" for m in models) + " |",
+        "|---|" + "---:|" * len(models),
+        line("Packs run", lambda rows: f"{len(ok(rows))} of {len(rows)}"),
+        line("ATS before, mean", lambda rows: f"{_mean([r.before for r in ok(rows)]):.1f}"),
+        line("ATS after, mean", lambda rows: f"{_mean([r.after for r in ok(rows)]):.1f}"),
+        line("Gain, mean", lambda rows: f"{_mean([r.gain for r in ok(rows)]):+.1f}"),
+        line("Packs improved", lambda rows: str(sum(1 for r in ok(rows) if r.gain > 0))),
+        line("Bullets rewritten", lambda rows: str(sum(r.rewritten for r in rows))),
+        line("Refused by the guard", lambda rows: str(sum(r.refused for r in rows))),
+        line(
+            "Refused, by rule",
+            lambda rows: (
+                ", ".join(
+                    f"{k} {v}"
+                    for k, v in sorted(
+                        {k: sum(r.refused_by_rule.get(k, 0) for r in rows) for r in rows for k in r.refused_by_rule}.items()
+                    )
+                )
+                or "none"
+            ),
+        ),
+        line("Model calls", lambda rows: str(calls(rows))),
+        line("Failed calls", lambda rows: str(sum(r.failed_calls for r in rows))),
+        line("Reasoning tokens", lambda rows: str(sum(r.reasoning_tokens for r in rows))),
+        line("Tokens in / out", lambda rows: f"{sum(r.tokens_in for r in rows)} / {sum(r.tokens_out for r in rows)}"),
+        line("Cost", lambda rows: f"${sum(r.cost_usd for r in rows):.4f}"),
+        line("Seconds a call, mean", lambda rows: f"{(sum(r.call_ms for r in rows) / max(calls(rows), 1)) / 1000:.1f}"),
+        line("Seconds a pack, max", lambda rows: f"{max([r.seconds for r in rows], default=0):.1f}"),
+        "",
+        "## Per pack",
+        "",
+        "| Pack | Model | Before | After | Rewritten | Refused | Calls | Reasoning | Cost | Secs | Stopped |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for r in report.rows:
+        out.append(
+            f"| {r.title} — {r.company} | {r.model} | {r.before:.0f} | {r.after:.0f} | {r.rewritten} | {r.refused} | "
+            f"{r.calls} | {r.reasoning_tokens} | ${r.cost_usd:.4f} | {r.seconds} | {r.error or r.stopped} |"
+        )
+    out += ["", "## The rewrites, for checking by hand", ""]
+    for r in report.rows:
+        for c in r.changes:
+            out += [
+                f"### {r.title} — {r.company} · {r.model} · {c['keyword']}",
+                "",
+                f"- Before: {c['before']}",
+                f"- After: {c['after']}",
+                f"- Cites: {', '.join(c['sourceIds'])} · {c['reason']}",
+                "",
+            ]
+    return "\n".join(out)
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -1392,6 +1690,16 @@ if __name__ == "__main__":
     letters.add_argument("--cs", type=int, default=10)
     letters.add_argument("--visa", action="store_true", help="only software posts that mention visas or sponsorship")
     letters.add_argument("--out", type=Path, required=True)
+    opt = sub.add_parser("optimise", help="run the CV-for-ATS optimiser on approved packs with each model (ATSC-10)")
+    opt.add_argument("--source", default="postgresql://localhost:5432/wera", help="the live database, read only")
+    opt.add_argument("--n", type=int, default=15, help="how many approved packs (default 15)")
+    opt.add_argument("--models", required=True, help="comma-separated model ids for the optimise tier")
+    opt.add_argument("--out", type=Path, required=True)
+    # SPEC 3.30: one board search on wera_eval, per step, against a baseline (`search_latency`).
+    lat = sub.add_parser("search-latency", help="time one board search on wera_eval, step by step, against a baseline")
+    lat.add_argument("--baseline", type=Path, required=True, help="the baseline JSON; written on the first run")
+    lat.add_argument("--save-baseline", action="store_true", help="save this run as the new baseline")
+    lat.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     os.environ.setdefault("WERA_RUN_LABEL", "eval")
     from .logging import configure as configure_logging
@@ -1399,6 +1707,24 @@ if __name__ == "__main__":
 
     configure_logging()
     configure_observability()
+    if args.cmd == "search-latency":
+        from . import search_latency
+
+        timed = search_latency.run(baseline_path=args.baseline, save_baseline=args.save_baseline)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(search_latency.as_markdown(timed), encoding="utf-8")
+        args.out.with_suffix(".json").write_text(json.dumps(timed.__dict__, indent=2), encoding="utf-8")
+        print(f"Wrote {args.out}", file=sys.stderr)
+        sys.exit(1 if timed.slower else 0)
+    if args.cmd == "optimise":
+        found = run_optimise(source_url=args.source, n=args.n, models=[m.strip() for m in args.models.split(",") if m.strip()])
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(optimise_as_markdown(found), encoding="utf-8")
+        args.out.with_suffix(".json").write_text(
+            json.dumps([{**r.__dict__, "gain": r.gain} for r in found.rows], indent=2), encoding="utf-8"
+        )
+        print(f"Wrote {args.out}", file=sys.stderr)
+        sys.exit(0)
     result = run_letters(source_url=args.source, finance=args.finance, cs=args.cs, visa=args.visa)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(letters_as_markdown(result), encoding="utf-8")

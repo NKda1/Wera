@@ -6,7 +6,7 @@ import { upskillAnchor as anchor } from "@/lib/format";
 import type { Upskill } from "@/lib/types";
 import { Card } from "@/lib/ui/Card";
 import { cn } from "@/lib/ui/cn";
-import { mostlyPoor } from "@/lib/upskills";
+import { gapNotes, mostlyPoor } from "@/lib/upskills";
 
 // Rows shown before "Show all": the gaps worth acting on this week, not an endless scroll.
 const FIRST = 10;
@@ -26,7 +26,11 @@ const TREND: Record<Upskill["trend"], { label: string; icon: typeof Minus }> = {
  * 20 Nov: a click on a gap's bar in the chart above lands here too (`highlight`, with a click
  * count so the same bar clicked twice scrolls again): the row is opened if it is past the first
  * ten, scrolled to, marked and given focus, so a keyboard user lands on it as well. A gap asked
- * mostly by jobs the CV matched poorly says so — those weigh more in the order (`upskills.lift`). */
+ * mostly by jobs the CV matched poorly says so — those weigh more in the order (`upskills.lift`).
+ *
+ * UPSK-08 (22 Nov): once the Upskills analyst has labelled a gap, its row says what would close it
+ * (`evidence`), who mostly asks beside "Mostly asked by …" (`familyNote`), and the spellings it
+ * merged in ("also written as …") — words only; every count and the order are the code's. */
 export function GapTable({ missing, jobs, highlight }: { missing: Upskill[]; jobs: number; highlight?: { term: string; at: number } | null }) {
   const [all, setAll] = useState(false);
   useEffect(() => {
@@ -74,6 +78,7 @@ export function GapTable({ missing, jobs, highlight }: { missing: Upskill[]; job
             const own = anchor(u.term);
             const others = u.spellings.map(anchor).filter((id, i, list) => id !== own && list.indexOf(id) === i);
             const trend = TREND[u.trend];
+            const notes = gapNotes(u);
             return (
               <tr
                 key={u.term}
@@ -87,6 +92,8 @@ export function GapTable({ missing, jobs, highlight }: { missing: Upskill[]; job
                     <span key={id} id={id} className="block scroll-mt-20" aria-hidden="true" />
                   ))}
                   <span className="text-[14px] font-semibold text-ink [overflow-wrap:anywhere]">{u.term}</span>
+                  {notes.also ? <span className="block text-ink-2">{notes.also}</span> : null}
+                  {notes.evidence ? <span className="block text-ink">{notes.evidence}</span> : null}
                   {mostlyPoor(u) ? (
                     <span className="flex items-center gap-1 text-ink-2">
                       <CircleAlert className="size-3.5 shrink-0" aria-hidden="true" /> Mostly from jobs you matched poorly
@@ -96,7 +103,10 @@ export function GapTable({ missing, jobs, highlight }: { missing: Upskill[]; job
                     // UPSK-07 (21 Nov): asked mostly by another kind of role than the person's own.
                     <span className="block text-ink-2" title={u.families.map((f) => `${f.label}: ${f.jobs + f.nearMisses}`).join("\n")}>
                       Mostly asked by {u.families[0].label.toLowerCase()}
+                      {notes.who ? ` · ${notes.who}` : null}
                     </span>
+                  ) : notes.who ? (
+                    <span className="block text-ink-2">{notes.who[0].toUpperCase() + notes.who.slice(1)}</span>
                   ) : null}
                   {u.closeTo.length ? <span className="block text-ink-2">Closest you have: {u.closeTo.join(", ")}</span> : null}
                   {u.examples.length ? (

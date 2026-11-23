@@ -15,8 +15,10 @@ class Cited(Model):
     source_ids: list[str]
     edited_by_user: Opt[bool] = None  # G2-02
     # TAIL-07: this line was *written* from the lines it cites, not copied from one of them.
-    # True for exactly one thing — the composed professional profile of a CV whose master has no
-    # summary (`nodes.tailor._profile`) — and it exists because `Store._assert_verbatim` requires
+    # True for two things — the composed professional profile of a CV whose master has no
+    # summary (`nodes.tailor._profile`), and since 22 Nov a bullet the CV-for-ATS optimiser
+    # reworded to carry a keyword its cited lines back (ATSC-10, `nodes.ats_optimise`, shown to
+    # the person as a before-and-after) — and it exists because `Store._assert_verbatim` requires
     # every cited line to equal the master line it names, which a composed line can never do.
     #
     # Without it the two rules collide and the pack is lost: the eval measured `CV_DRIFTED` on 2
@@ -25,7 +27,8 @@ class Cited(Model):
     #
     # Narrow on purpose. It exempts a line from the *verbatim* check only; `domain.guard.check_cited`
     # still holds it to its sources, and that is the right check for prose. A model cannot set it:
-    # `SummaryDraft` has no such field, so the only writer is WERA's own code.
+    # neither `SummaryDraft` nor `OptimisedBullet` has such a field, so the only writer is WERA's
+    # own code.
     composed: Opt[bool] = None
 
 
@@ -336,6 +339,59 @@ class WritingReport(Model):
     skills: WritingTarget
 
 
+class OptimiseChange(Model):
+    """ATSC-10 (22 Nov): one bullet the optimiser reworded, before and after.
+
+    `location` is where it was written (`s0.i1.b2`, the review screen's edit target); the screen
+    finds the line by its text, since a line added or removed since moves the indices. `before`
+    is the line as it was, so "Undo this change" can put it back through the per-line edit
+    (G2-02). `source_ids` are the master-CV lines the rewrite cites, the original's first."""
+
+    location: str
+    role_id: str
+    before: str
+    after: str
+    keyword: str
+    reason: str
+    source_ids: list[str]
+
+
+class OptimiseRefusal(Model):
+    """A rewrite the guard turned down, which left its line as it was."""
+
+    location: str
+    keyword: str
+    rule: str  # "sources", "numbers", "terms", "keyword", "unbacked", "length", "pages"
+    detail: str
+
+
+class OptimiseRound(Model):
+    round: int
+    score_before: float
+    score_after: float
+    targets: list[str]  # the keywords this round asked for
+    rewritten: int
+    refused: int
+    kept: bool  # False when the round didn't raise the score, and its rewrites were undone
+
+
+class OptimiseReport(Model):
+    """ATSC-10 (22 Nov): what the CV-for-ATS optimiser did on a redraft, saved as the `optimise`
+    document beside the CV version it produced. `score_before` is the redraft as tailored;
+    `score_after` is what the saved CV scores. `stopped` says why it stopped: `no_targets` (no
+    missing keyword the CV backs, or none in a shown role), `no_gain` (a round raised the score
+    by less than `optimise.min_gain`; a round that didn't raise it at all is undone), `max_rounds`,
+    `max_calls`, `error` (the call failed; the CV is as tailored) or `off`."""
+
+    score_before: float
+    score_after: float
+    rounds: list[OptimiseRound]
+    changes: list[OptimiseChange]
+    refused: list[OptimiseRefusal]
+    calls: int
+    stopped: Literal["no_targets", "no_gain", "max_rounds", "max_calls", "error", "off"]
+
+
 class AnswerItem(Model):
     id: str
     question: str
@@ -358,3 +414,5 @@ class Pack(Model):
     # 18 Nov: the company brief, when the person asked for one. The letter is written with it when
     # it exists at drafting time, or rewritten with it on request.
     company: Opt[CompanyBrief] = None
+    # ATSC-10 (22 Nov): what the optimiser changed on the last redraft. Absent on a first draft.
+    optimise: Opt[OptimiseReport] = None

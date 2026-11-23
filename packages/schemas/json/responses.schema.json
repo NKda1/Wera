@@ -2987,6 +2987,164 @@
       "title": "NearMissView",
       "type": "object"
     },
+    "OptimiseChange": {
+      "description": "ATSC-10 (22 Nov): one bullet the optimiser reworded, before and after.\n\n`location` is where it was written (`s0.i1.b2`, the review screen's edit target); the screen\nfinds the line by its text, since a line added or removed since moves the indices. `before`\nis the line as it was, so \"Undo this change\" can put it back through the per-line edit\n(G2-02). `source_ids` are the master-CV lines the rewrite cites, the original's first.",
+      "properties": {
+        "after": {
+          "type": "string"
+        },
+        "before": {
+          "type": "string"
+        },
+        "keyword": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "roleId": {
+          "type": "string"
+        },
+        "sourceIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "location",
+        "roleId",
+        "before",
+        "after",
+        "keyword",
+        "reason",
+        "sourceIds"
+      ],
+      "title": "OptimiseChange",
+      "type": "object"
+    },
+    "OptimiseRefusal": {
+      "description": "A rewrite the guard turned down, which left its line as it was.",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "keyword": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "location",
+        "keyword",
+        "rule",
+        "detail"
+      ],
+      "title": "OptimiseRefusal",
+      "type": "object"
+    },
+    "OptimiseReport": {
+      "description": "ATSC-10 (22 Nov): what the CV-for-ATS optimiser did on a redraft, saved as the `optimise`\ndocument beside the CV version it produced. `score_before` is the redraft as tailored;\n`score_after` is what the saved CV scores. `stopped` says why it stopped: `no_targets` (no\nmissing keyword the CV backs, or none in a shown role), `no_gain` (a round raised the score\nby less than `optimise.min_gain`; a round that didn't raise it at all is undone), `max_rounds`,\n`max_calls`, `error` (the call failed; the CV is as tailored) or `off`.",
+      "properties": {
+        "calls": {
+          "type": "integer"
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/OptimiseChange"
+          },
+          "type": "array"
+        },
+        "refused": {
+          "items": {
+            "$ref": "#/$defs/OptimiseRefusal"
+          },
+          "type": "array"
+        },
+        "rounds": {
+          "items": {
+            "$ref": "#/$defs/OptimiseRound"
+          },
+          "type": "array"
+        },
+        "scoreAfter": {
+          "type": "number"
+        },
+        "scoreBefore": {
+          "type": "number"
+        },
+        "stopped": {
+          "enum": [
+            "no_targets",
+            "no_gain",
+            "max_rounds",
+            "max_calls",
+            "error",
+            "off"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "scoreBefore",
+        "scoreAfter",
+        "rounds",
+        "changes",
+        "refused",
+        "calls",
+        "stopped"
+      ],
+      "title": "OptimiseReport",
+      "type": "object"
+    },
+    "OptimiseRound": {
+      "properties": {
+        "kept": {
+          "type": "boolean"
+        },
+        "refused": {
+          "type": "integer"
+        },
+        "rewritten": {
+          "type": "integer"
+        },
+        "round": {
+          "type": "integer"
+        },
+        "scoreAfter": {
+          "type": "number"
+        },
+        "scoreBefore": {
+          "type": "number"
+        },
+        "targets": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "round",
+        "scoreBefore",
+        "scoreAfter",
+        "targets",
+        "rewritten",
+        "refused",
+        "kept"
+      ],
+      "title": "OptimiseRound",
+      "type": "object"
+    },
     "Pack": {
       "properties": {
         "analysis": {
@@ -3012,6 +3170,9 @@
         },
         "letter": {
           "$ref": "#/$defs/CoverLetter"
+        },
+        "optimise": {
+          "$ref": "#/$defs/OptimiseReport"
         }
       },
       "required": [
@@ -3314,6 +3475,9 @@
         "category": {
           "$ref": "#/$defs/KeywordCategory"
         },
+        "evidence": {
+          "type": "string"
+        },
         "importance": {
           "default": 0.0,
           "type": "number"
@@ -3323,6 +3487,13 @@
         },
         "line": {
           "type": "string"
+        },
+        "merged": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "nearMisses": {
           "default": 0,
@@ -3341,7 +3512,8 @@
         "share",
         "line",
         "nearMisses",
-        "importance"
+        "importance",
+        "merged"
       ],
       "title": "QuickWin",
       "type": "object"
@@ -4837,6 +5009,9 @@
           },
           "type": "array"
         },
+        "evidence": {
+          "type": "string"
+        },
         "examples": {
           "items": {
             "$ref": "#/$defs/UpskillJob"
@@ -4850,8 +5025,18 @@
           },
           "type": "array"
         },
+        "familyNote": {
+          "type": "string"
+        },
         "jobs": {
           "type": "integer"
+        },
+        "merged": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "nearMissExamples": {
           "default": [],
@@ -4923,7 +5108,8 @@
         "examples",
         "nearMissExamples",
         "families",
-        "outsideField"
+        "outsideField",
+        "merged"
       ],
       "title": "Upskill",
       "type": "object"

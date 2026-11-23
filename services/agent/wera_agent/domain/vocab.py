@@ -52,7 +52,7 @@ SYNONYMS: dict[str, list[str]] = {
         "jenkins",
         "circleci",
         "travis ci",
-    ],  # fmt: skip
+    ],
     "relational databases": ["relational database", "relational databases", "rdbms", "sql", "mysql", "sqlite", "mariadb"],
     "testing": [
         "testing",
@@ -69,7 +69,7 @@ SYNONYMS: dict[str, list[str]] = {
         "pytest",
         "jest",
         "junit",
-    ],  # fmt: skip
+    ],
     "debugging": ["debugging", "debug", "debugger", "fault finding", "troubleshooting"],
     "build tools": [
         "build tool",
@@ -95,7 +95,7 @@ SYNONYMS: dict[str, list[str]] = {
         "parallelism",
         "lock-free",
         "lock free",
-    ],  # fmt: skip
+    ],
     "performance profiling": [
         "performance profiling",
         "profiling",
@@ -113,7 +113,21 @@ SYNONYMS: dict[str, list[str]] = {
     # valuations", "comps" to one that ran "comparable company … benchmarking", and "Excel
     # modeling" to one that lists Excel. Finance writes its methods as abbreviations, and a CV and a
     # post rarely pick the same one.
-    "discounted cash flow": ["discounted cash flow", "dcf", "dcf valuation", "dcf valuations", "dcf model", "dcf models"],
+    # 22 Nov: "discounted cash flow analysis" (3 of 45 live packs) is the same method, and "analysis"
+    # is no qualifier tail in general ("credit analysis" isn't "credit"), so its long forms are named here.
+    "discounted cash flow": [
+        "discounted cash flow",
+        "discounted cash flow analysis",
+        "discounted cash flows",
+        "discounted cash flow modeling",
+        "dcf",
+        "dcf analysis",
+        "dcf modeling",
+        "dcf valuation",
+        "dcf valuations",
+        "dcf model",
+        "dcf models",
+    ],
     "comparable company analysis": [
         "comparable company analysis",
         "comparable companies",
@@ -122,7 +136,7 @@ SYNONYMS: dict[str, list[str]] = {
         "trading comps",
         "trading comparables",
         "comparables",
-    ],  # fmt: skip
+    ],
     "leveraged buyout": ["leveraged buyout", "leveraged buyouts", "lbo", "lbo model", "lbo models", "lbo modeling"],
     "mergers and acquisitions": ["mergers and acquisitions", "mergers & acquisitions", "m&a"],
     "financial modeling": ["financial modeling", "financial model", "financial models", "excel modeling", "3-statement model"],

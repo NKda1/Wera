@@ -21,6 +21,12 @@ model call, no fetch, and as current as the last search.
   its keywords matter"). Each job's keywords weigh its `lift`: 1 for a strong match, rising
   smoothly to 2 for a poor one, so a gap that poorly matched jobs keep naming climbs the list.
   The lift changes importance and order only — every "N jobs ask for it" stays a plain count.
+* **The analyst labels, code counts** (UPSK-08, 22 Nov). `services.upskills_analyst` asks the fast
+  tier once a search about the gap terms not yet labelled for this CV version, and its notes are
+  applied here, each checked again: a `same_as` naming another term of this report (never a chain)
+  merges that term's jobs into it before anything is counted or ranked, each job once and its lift
+  intact; a `kind` refines the category, and a `trait` is never a gap; the evidence line and the
+  family note are carried to the row. Without notes the report is exactly what it was.
 * **Each view carries its own charts** (20 Nov). The report's `demand`, `coverage` and
   `by_category` count the scored jobs; `with_near_misses` has the same three with the near misses
   in (UPSK-06), split by source, so the page's switch moves the charts as well as the table.
@@ -36,7 +42,7 @@ from ..clock import iso, parse_ms
 from ..config import degrees as degrees_file
 from ..config import wera
 from ..db import state
-from ..db.models import ApplicationRow, DecisionRow, DocumentRow, FitReportRow, JobRow, JobSignalRow
+from ..db.models import ApplicationRow, DecisionRow, DocumentRow, FitReportRow, JobRow, JobSignalRow, SkillNoteRow
 from ..domain import degrees, role_family
 from ..domain.scoring import DEFAULT_WEIGHTS, fit_total, freshness_score
 from ..domain.vocab import cv_line_index, group_key, master_cv_text, not_a_skill, skill_text, text_has_term
@@ -159,13 +165,51 @@ NEAR: dict[str, tuple[str, ...]] = {
 }  # fmt: skip
 
 
+# What a status beats when two spellings were merged (UPSK-08): the CV showing either counts.
+_STATUS_RANK = {"covered": 2, "quick_win": 1, "missing": 0}
+
+
+def notes_for(session: Session, cv_version: int) -> dict[str, SkillNoteRow]:
+    """The analyst's notes for this CV version, by term group key (UPSK-08)."""
+    return {n.term: n for n in session.scalars(select(SkillNoteRow).where(SkillNoteRow.cv_version == cv_version))}
+
+
+def merges(notes: dict[str, SkillNoteRow], present: set[str]) -> dict[str, str]:
+    """The `same_as` merges to apply, alias → canonical key (UPSK-08). Both terms must be in this
+    report, and a term merged into another can't take merges itself, so there is never a chain:
+    A → B with B → C applies only B → C, and A stays its own row."""
+    valid = {
+        key: note.same_as
+        for key, note in notes.items()
+        if note.same_as and note.same_as != key and key in present and note.same_as in present
+    }
+    # Two terms named as each other (22 Nov, live: "derivatives" ↔ "financial derivatives") would
+    # both be refused as a chain and stay two rows with no evidence. One direction is kept: the
+    # shorter term is the row, ties alphabetical.
+    for alias, canon in list(valid.items()):
+        if valid.get(canon) == alias and (len(alias), alias) < (len(canon), canon):
+            del valid[alias]
+    return {alias: canon for alias, canon in valid.items() if canon not in valid}
+
+
+def refined(category: str | None, kind: str | None) -> str | None:
+    """The category in code, refined by the analyst's kind (UPSK-08): a tool or a qualification
+    is that; a skill is a hard skill unless code already called it a methodology."""
+    if kind in ("tool", "qualification"):
+        return kind
+    if kind == "skill" and category not in ("hard_skill", "methodology"):
+        return "hard_skill"
+    return category
+
+
 def version(session: Session, cv: MasterCV, *, titles: list[str] | None = None) -> str:
     """What the report is built from, as a short fingerprint (22 Nov): the scores and their newest
     write, the near misses read (UPSK-06, on their own thread after a search), the packs' ATS
     reports, the decisions (which weigh the fit) and the CV and target titles. The page asks for it
     every few seconds while it is open and refreshes when it moves, so a search's jobs reach the
     charts without a reload (the user, 22 Nov: Upskills didn't refresh with each search). A handful
-    of aggregates, no report built."""
+    of aggregates, no report built. UPSK-08: and the analyst's notes for this CV version, which
+    land after a search on the near-miss thread."""
     import hashlib
 
     parts = [
@@ -174,6 +218,9 @@ def version(session: Session, cv: MasterCV, *, titles: list[str] | None = None) 
         *session.execute(select(func.count(), func.max(DocumentRow.id)).where(DocumentRow.kind == "ats")).one(),
         *session.execute(select(func.count(), func.max(DecisionRow.id)).select_from(DecisionRow)).one(),
         session.scalar(select(func.count()).select_from(ApplicationRow).where(ApplicationRow.status != "discarded")),
+        *session.execute(
+            select(func.count(), func.max(SkillNoteRow.created_at)).where(SkillNoteRow.cv_version == cv.version)
+        ).one(),
         cv.version,
         "|".join(titles or []),
     ]
@@ -206,6 +253,9 @@ def report(
     applied = set(session.scalars(select(ApplicationRow.job_id).where(ApplicationRow.status != "discarded")))
     weights = _weights(session)
     ats = _ats_by_job(session)
+    # UPSK-08: the analyst's notes. A trait is culture, like `not_a_skill`: never counted.
+    notes = notes_for(session, cv.version)
+    traits = {key for key, note in notes.items() if note.kind == "trait"}
 
     rows = session.execute(select(FitReportRow.evidence, JobRow).join(JobRow, JobRow.id == FitReportRow.job_id)).all()
     considered = 0
@@ -243,6 +293,8 @@ def report(
             if not term or not_a_skill(term) or degrees.looks_like_degree(term):
                 continue
             key = group_key(term)
+            if key in traits:
+                continue
             spelled[key][term] += 1
             if k.get("category"):
                 categories[key][k["category"]] += 1
@@ -278,6 +330,8 @@ def report(
             if not term or not_a_skill(term) or degrees.looks_like_degree(term):
                 continue
             key = group_key(term)
+            if key in traits:
+                continue
             spelled[key][term] += 1
             if k.get("category"):
                 categories[key][k["category"]] += 1
@@ -286,16 +340,42 @@ def report(
             )
             entry["required"] = entry["required"] or k.get("weight") == "required"
 
+    # UPSK-08: the analyst's merges, before anything is counted. The canonical term keeps its own
+    # spelling; each alias's jobs join it, a job asking both counted once (required if either was),
+    # each keeping the lift it came with.
+    own_term: dict[str, str] = {}
+    also: dict[str, list[str]] = defaultdict(list)
+    for alias, canon in merges(notes, set(asked) | set(nearly)).items():
+        own_term.setdefault(canon, spelled[canon].most_common(1)[0][0])
+        also[canon].append(spelled[alias].most_common(1)[0][0])
+        spelled[canon].update(spelled.pop(alias))
+        categories[canon].update(categories.pop(alias, Counter()))
+        for source in (asked, nearly):
+            for job_key, entry in source.pop(alias, {}).items():
+                into = source.setdefault(canon, {})
+                if job_key in into:
+                    into[job_key]["required"] = into[job_key]["required"] or entry["required"]
+                else:
+                    into[job_key] = entry
+
     def term_of(key: str) -> str:
-        return spelled[key].most_common(1)[0][0]
+        return own_term.get(key) or spelled[key].most_common(1)[0][0]
 
     def category_of(key: str) -> str | None:
-        return categories[key].most_common(1)[0][0] if categories[key] else None
+        found = categories[key].most_common(1)[0][0] if categories[key] else None
+        return refined(found, notes[key].kind if key in notes else None)
 
-    def status_of(key: str) -> str:
-        term = term_of(key)
+    def status_one(term: str) -> str:
         listed = any(text_has_term(skill_text(s), term) for s in cv.skills)
         return ("covered" if listed else "quick_win") if text_has_term(master, term) else "missing"
+
+    def status_of(key: str) -> str:
+        # A merged term stands where the best of its spellings does: the CV showing "financial
+        # modelling" shows "financial models" too.
+        return max((status_one(t) for t in [term_of(key), *also.get(key, [])]), key=_STATUS_RANK.__getitem__)
+
+    def note_of(key: str, field: str) -> str | None:
+        return getattr(notes[key], field) if key in notes else None
 
     def market(
         near: dict[str, dict[str, dict[str, Any]]],
@@ -340,7 +420,8 @@ def report(
                 setattr(counted, tally, getattr(counted, tally) + len(jobs))
                 setattr(counted, f"near_{tally}", getattr(counted, f"near_{tally}") + len(close))
             if status == "quick_win":
-                line = next((v["text"] for v in lines.values() if text_has_term(v["text"], term)), "")
+                said = [term, *also.get(key, [])]
+                line = next((v["text"] for v in lines.values() if any(text_has_term(v["text"], t) for t in said)), "")
                 wins.append(
                     QuickWin(
                         term=term,
@@ -350,6 +431,8 @@ def report(
                         line=line[:160],
                         near_misses=len(close),
                         importance=round(importance + near_importance, 3),
+                        evidence=note_of(key, "evidence"),
+                        merged=sorted(also.get(key, [])),
                     )
                 )
             if status == "missing":
@@ -404,6 +487,9 @@ def report(
             close_to=list(dict.fromkeys(_as_written(cv, other) for other in NEAR.get(key, ()) if text_has_term(master, other))),
             examples=[UpskillJob(id=e["job"].id, title=e["job"].title, company=e["job"].company) for e in examples],
             near_miss_examples=near_examples,
+            evidence=note_of(key, "evidence"),
+            family_note=note_of(key, "family_note"),
+            merged=sorted(also.get(key, [])),
         )
 
     def ranked(gaps: list[Upskill]) -> list[Upskill]:

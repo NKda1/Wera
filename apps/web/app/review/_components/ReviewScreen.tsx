@@ -234,7 +234,16 @@ export function ReviewScreen({ initial, cv, lines, vendor }: { initial: Applicat
               )}
             </div>
             <aside aria-label="Checks">
-              <ReviewRail pack={pack} appId={app.id} approved={approved} cvVersion={cv.version} missingSourceIds={missingSourceIds} />
+              <ReviewRail
+                pack={pack}
+                appId={app.id}
+                approved={approved}
+                cvVersion={cv.version}
+                missingSourceIds={missingSourceIds}
+                editable={editable}
+                busy={busy}
+                onUndo={(target, text) => void run(`edit-${target}`, () => api.editDocument(`${app.id}.cv`, { target, text }), "Change undone. The original line is back.")}
+              />
             </aside>
           </div>
         </>

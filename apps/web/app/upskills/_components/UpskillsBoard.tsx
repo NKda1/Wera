@@ -234,6 +234,8 @@ export function UpskillsBoard({ report, initial }: { report: UpskillsReport; ini
                     <span className="font-semibold">{w.term}</span>
                     <span className="text-ink-2"> · {jobsAsking(w, jobs)}</span>
                     {w.line ? <p className="line-clamp-2 text-small text-ink-2">“{w.line}”</p> : null}
+                    {/* UPSK-08: the analyst's line on how to show it, once it has labelled the term. */}
+                    {w.evidence ? <p className="text-small text-ink">{w.evidence}</p> : null}
                   </li>
                 ))}
               </ul>

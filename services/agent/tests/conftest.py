@@ -74,12 +74,17 @@ def isolated(tmp_path, monkeypatch) -> Iterator[None]:
     from wera_agent.nodes import prefilter
 
     monkeypatch.setattr(prefilter, "_cached", {"hash": prefilter.HashEmbedder(), "fast": prefilter.HashEmbedder()})
-    # Every job API starts unreviewed, whatever config/wera.yaml says (22 Nov): the user's own
-    # review dates there would otherwise switch APIs on in tests that mock only the ones they test —
-    # Arbeitnow and The Muse need no key, so nothing else would stop a real call. A test that wants
-    # an API asked reviews it itself (the `reviewed` fixtures).
+    # Every job API starts switched on and unreviewed, whatever config/wera.yaml says (22 Nov): the
+    # user's own review dates there would otherwise switch APIs on in tests that mock only the ones
+    # they test — Arbeitnow and The Muse need no key, so nothing else would stop a real call — and
+    # their on/off switches (The Muse is off) would change what a test sees. A test that wants an
+    # API asked reviews it itself (the `reviewed` fixtures); one that wants it off says so.
     for feed_id, cfg in list(wera().feeds.items()):
-        monkeypatch.setitem(wera().feeds, feed_id, cfg.model_copy(update={"terms_reviewed_on": None}))
+        monkeypatch.setitem(wera().feeds, feed_id, cfg.model_copy(update={"terms_reviewed_on": None, "enabled": True}))
+    # The Upskills analyst (UPSK-08) starts off: on Postgres it runs on the near-miss thread after a
+    # search, and a pipeline test that forbids model calls would see it ask one (22 Nov). Its own
+    # tests switch it on (`test_upskills_analyst.py`).
+    monkeypatch.setattr(wera().upskills, "analyst_terms", 0)
     get_settings.cache_clear()
     reset_caches()
     clock.freeze()

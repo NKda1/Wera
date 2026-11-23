@@ -122,6 +122,19 @@ def ats(state: AppState) -> dict[str, Any]:
     return {}
 
 
+def optimise(state: AppState) -> dict[str, Any]:
+    """ATSC-10: the CV-for-ATS optimiser, on a redraft only — the pack is being drafted again
+    because the person asked for changes at Gate 2. A first draft goes straight on: the tailor's
+    lines are the master's own, and the person sees them before anything is reworded.
+
+    The step shown stays `ats`: the optimiser is part of the ATS check to the person."""
+    if state.gate2 != "request_changes":
+        return {}
+    with transaction() as session:
+        drafting.step_optimise(session, _app(state), note=state.note)
+    return {}
+
+
 def answers(state: AppState) -> dict[str, Any]:
     _mark(state, "answers")
     with transaction() as session:
@@ -162,6 +175,7 @@ def build() -> StateGraph:
         ("tailor", tailor),
         ("letter", letter),
         ("ats", ats),
+        ("optimise", optimise),
         ("answers", answers),
         ("ready", ready),
         ("gate2", gate2),
@@ -173,7 +187,8 @@ def build() -> StateGraph:
     g.add_edge("snooze_wait", "gate1")
     g.add_edge("tailor", "letter")
     g.add_edge("letter", "ats")
-    g.add_edge("ats", "answers")
+    g.add_edge("ats", "optimise")
+    g.add_edge("optimise", "answers")
     g.add_edge("answers", "ready")
     g.add_edge("ready", "gate2")
     g.add_conditional_edges("gate2", after_gate2, {"tailor": "tailor", END: END})

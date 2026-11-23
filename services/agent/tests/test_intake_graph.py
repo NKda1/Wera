@@ -873,11 +873,21 @@ class TestScoringSeveralAtOnce:
     runs `scoring_workers` at once now — after one job has answered, so a refused key is still
     learned from a single call."""
 
-    def test_after_the_first_answer_three_are_scored_at_once(self, client, runs, channels, monkeypatch):
+    def test_six_at_once_by_default(self):
+        """22 Nov (SPEC 3.30): Postgres now, so six at once rather than three."""
+        from wera_agent.config import wera
+
+        assert wera().scoring_workers == 6
+
+    @pytest.mark.parametrize("workers", [3, 6])
+    def test_after_the_first_answer_scoring_workers_are_scored_at_once(self, client, runs, channels, monkeypatch, workers):
         import threading
         import time
         from types import SimpleNamespace
 
+        from wera_agent.config import wera
+
+        monkeypatch.setattr(wera(), "scoring_workers", workers)
         ids = runs(["board_search"])
         found = TestAccountLevelFailures.many(TestAccountLevelFailures(), 7)
         channels(from_board_search=lambda *a, **k: intake.ChannelOutcome(channel="board_search", jobs=found, results=7))
@@ -901,4 +911,92 @@ class TestScoringSeveralAtOnce:
         monkeypatch.setattr(intake.fit, "evidence_for", slow)
         intake.run(["board_search"], ids)
         assert order[0] == 1  # the first job alone
-        assert max(peak) == 3  # then three at a time, never more
+        assert max(peak) == workers  # then `scoring_workers` at a time, never more
+
+
+class TestEachChannelFinishesOnItsOwn:
+    """22 Nov (SPEC 3.30): the board search's row is finished when its pipeline returns. On
+    run-209 it waited about four minutes behind the watchlist's feeds and their shared scoring."""
+
+    @staticmethod
+    def board(*_a, **_k) -> intake.ChannelOutcome:
+        return intake.ChannelOutcome(channel="board_search", judged=True, queries=2, results=3, surfaced=1, new_ids={"x"})
+
+    @staticmethod
+    def watchlist_after(board_id: str, seen: dict):
+        """A watchlist fetch that waits (up to 10 s) for the board search's row to be finished."""
+        import time
+
+        def fetch(*_a, **_k) -> intake.ChannelOutcome:
+            deadline = time.monotonic() + 10
+            while row_for(board_id).finished_at is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            seen["board"] = row_for(board_id).status
+            return intake.ChannelOutcome(channel="watchlist", jobs=[job()], results=1)
+
+        return fetch
+
+    @pytest.mark.parametrize("side_by_side", [True, False])
+    def test_the_board_searchs_row_is_finished_before_the_watchlists_work_is(self, client, runs, channels, monkeypatch, side_by_side):  # fmt: skip
+        monkeypatch.setattr(intake, "_side_by_side", lambda: side_by_side)
+        ids = runs(["board_search", "watchlist"])
+        seen: dict = {}
+        channels(from_board_search=self.board, from_watchlist=self.watchlist_after(ids["board_search"], seen))
+        before = job_count()
+
+        summary = intake.run(["board_search", "watchlist"], ids)
+
+        assert seen["board"] == "succeeded"  # finished while the watchlist was still fetching
+        assert row_for(ids["watchlist"]).status == "succeeded"
+        assert row_for(ids["board_search"]).finished_at <= row_for(ids["watchlist"]).finished_at
+        assert summary["new_jobs"] == 2 and job_count() == before + 1  # its own "x", and the watchlist's job
+
+    def test_cancelling_the_board_search_stops_the_watchlist_too(self, client, runs, channels, monkeypatch):
+        monkeypatch.setattr(intake, "_side_by_side", lambda: True)
+        ids = runs(["board_search", "watchlist"])
+
+        def cancelled(*_a, **_k):
+            with transaction() as session:
+                Store(session).cancel_run(ids["board_search"])
+            raise intake.Cancelled
+
+        channels(
+            from_board_search=cancelled,
+            from_watchlist=lambda *a, **k: intake.ChannelOutcome(channel="watchlist", jobs=[job()], results=1),
+        )
+        before = job_count()
+        intake.run(["board_search", "watchlist"], ids)
+        assert row_for(ids["board_search"]).status == "cancelled"
+        assert job_count() == before  # the watchlist's jobs were never judged
+
+    def test_cancelling_the_watchlist_leaves_the_board_search_to_finish(self, client, runs, channels, monkeypatch):
+        monkeypatch.setattr(intake, "_side_by_side", lambda: True)
+        ids = runs(["board_search", "watchlist"])
+
+        def cancelled(*_a, **_k):
+            with transaction() as session:
+                Store(session).cancel_run(ids["watchlist"])
+            return intake.ChannelOutcome(channel="watchlist", jobs=[job()], results=1)
+
+        channels(from_board_search=self.board, from_watchlist=cancelled)
+        before = job_count()
+        intake.run(["board_search", "watchlist"], ids)
+        assert row_for(ids["board_search"]).status == "succeeded"
+        assert row_for(ids["watchlist"]).status == "cancelled"
+        assert job_count() == before
+
+    def test_a_watchlist_that_raises_on_its_thread_is_raised_by_the_run(self, client, runs, channels, monkeypatch):
+        monkeypatch.setattr(intake, "_side_by_side", lambda: True)
+        ids = runs(["board_search", "watchlist"])
+        channels(
+            from_board_search=self.board,
+            from_watchlist=lambda *a, **k: intake.ChannelOutcome(channel="watchlist", jobs=[job()], results=1),
+        )
+
+        def boom(*_a, **_k):
+            raise RuntimeError("judging exploded")
+
+        monkeypatch.setattr(intake, "judge", boom)
+        with pytest.raises(RuntimeError, match="judging exploded"):
+            intake.run(["board_search", "watchlist"], ids)
+        assert row_for(ids["board_search"]).status == "succeeded"

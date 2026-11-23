@@ -650,28 +650,56 @@ def _near_misses(
     of work, so it runs on its own thread once the search's jobs are in, and says what it read in
     the logs rather than the run's step log (the run has finished by then). SQLite and the demo
     keep it in line, in order, where the tests and the one writer need it.
-    """
-    from ..services import near_misses
 
-    if wera().upskills.near_miss_per_search <= 0:
+    UPSK-08 (22 Nov): then the Upskills analyst, on the same thread once its reads are done — one
+    fast-tier call at most, for the gap terms not labelled yet (`upskills_analyst.after_search`,
+    which never raises). Not in the demo, which has no gaps worth a label.
+    """
+    from ..services import near_misses, upskills_analyst
+
+    cfg = wera().upskills
+    if cfg.near_miss_per_search <= 0 and cfg.analyst_terms <= 0:
         return
     if db_engine().dialect.name != "sqlite" and not get_settings().wera_demo_mode:
 
         def later() -> None:
-            try:
-                got = near_misses.capture(near, cv=cv, rank=rank, now=now, redis=redis)  # type: ignore[arg-type]
-            except Exception:  # noqa: BLE001 — Upskills' extra evidence, never anything a search waits on
-                logfire.exception("Near misses for Upskills failed")
-                return
-            logfire.info(
-                "Upskills: {extracted} near misses read for what they ask ({above} close to the CV of {candidates})",
-                extracted=got.extracted,
-                above=got.above_floor,
-                candidates=got.candidates,
-                seconds=got.seconds,
-            )
+            if cfg.near_miss_per_search > 0:
+                try:
+                    got = near_misses.capture(near, cv=cv, rank=rank, now=now, redis=redis)  # type: ignore[arg-type]
+                except Exception:  # noqa: BLE001 — Upskills' extra evidence, never anything a search waits on
+                    logfire.exception("Near misses for Upskills failed")
+                else:
+                    logfire.info(
+                        "Upskills: {extracted} near misses read for what they ask ({above} close to the CV of {candidates})",
+                        extracted=got.extracted,
+                        above=got.above_floor,
+                        candidates=got.candidates,
+                        seconds=got.seconds,
+                    )
+            upskills_analyst.after_search(cv, now=now)
 
         threading.Thread(target=contextvars.copy_context().run, args=(later,), name="near-misses", daemon=True).start()
+        return
+    _near_misses_inline(out, run_ids, near, cv=cv, rank=rank, now=now, at=at, redis=redis)
+    if not get_settings().wera_demo_mode:
+        upskills_analyst.after_search(cv, now=now)
+
+
+def _near_misses_inline(
+    out: Piped,
+    run_ids: dict[str, str],
+    near: list["strategist.NearMiss"],
+    *,
+    cv: object,
+    rank: object,
+    now: int,
+    at: float,
+    redis: object | None = None,
+) -> None:
+    """UPSK-06 in line with the run, on SQLite and in the demo, with its step in the run's log."""
+    from ..services import near_misses
+
+    if wera().upskills.near_miss_per_search <= 0:
         return
     started = time.monotonic()
     intake.report(run_ids, phase="harvesting", progress=at, detail="Reading the jobs you nearly matched, for Upskills")

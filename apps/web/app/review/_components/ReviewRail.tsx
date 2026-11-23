@@ -10,6 +10,7 @@ import { buttonClass } from "@/lib/ui/Button";
 import { Card } from "@/lib/ui/Card";
 import { Chip, ChipList } from "@/lib/ui/Chip";
 import { cn } from "@/lib/ui/cn";
+import { OptimiseCard } from "./OptimiseCard";
 
 export function ReviewRail({
   pack,
@@ -17,12 +18,18 @@ export function ReviewRail({
   approved,
   cvVersion,
   missingSourceIds,
+  editable = false,
+  busy,
+  onUndo,
 }: {
   pack: Pack;
   appId: string;
   approved: boolean;
   cvVersion: number;
   missingSourceIds: string[];
+  editable?: boolean;
+  busy?: string;
+  onUndo?: (target: string, text: string) => void;
 }) {
   const bullets = pack.cv.sections.flatMap((s) => s.items.flatMap((i) => i.bullets));
   const cited = bullets.filter((b) => b.sourceIds.length > 0).length;
@@ -34,6 +41,7 @@ export function ReviewRail({
   return (
     <div className="grid items-start gap-4 @2xl:@max-4xl:grid-cols-2">
       {pack.ats.score != null ? <AtsScoreCard ats={pack.ats} /> : null}
+      <OptimiseCard pack={pack} editable={editable} busy={busy} onUndo={onUndo} />
       <AtsCard ats={pack.ats} />
 
       <WritingCard appId={appId} pack={pack} />

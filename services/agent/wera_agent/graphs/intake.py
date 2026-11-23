@@ -15,6 +15,8 @@ Cancellation is checked between steps (UX-01): a person who changes their mind s
 to wait for a model call they no longer want.
 """
 
+import contextvars
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -703,7 +705,9 @@ def judge(
     pending: dict[Future, Job] = {}
     done = 0
     stopped = False
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="score") as pool:
+    # 22 Nov (SPEC 3.30): one span a batch, so scoring's share of a search shows in Logfire.
+    batch = logfire.span("score batch n={n} workers={workers}", n=len(chosen), workers=workers)
+    with batch, ThreadPoolExecutor(max_workers=workers, thread_name_prefix="score") as pool:
 
         def start_next() -> None:
             job = next(queue_, None)
@@ -754,6 +758,8 @@ def judge(
                         if len(pending) == before:
                             break
                 start_next()
+
+        batch.set_attributes({"scored": out.scored, "answered": len(scored), "stopped": stopped})
 
     # Ranking is read back from the fit reports when the shortlist is listed, so the order here
     # only needs to exist — the store sorts on `fit.total`.
@@ -890,8 +896,8 @@ async def run_intake(channels: list[str], run_ids: dict[str, str]) -> dict[str, 
 
 
 def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
-    """One intake pass over the given channels. Each channel's row is updated as it finishes."""
-    from ..db.models import IntakeRunRow
+    """One intake pass over the given channels. Each channel's row is finished when its own work
+    ends: the board search's as its pipeline returns, the others' after their shared judging."""
     from ..services.store import Store
 
     now = now_ms()
@@ -926,106 +932,238 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
     if cache is not None:
         cache.prune()
 
-    outcomes: list[ChannelOutcome] = []
     report(run_ids, phase="queued", progress=0.02)
 
-    def ticker(channel: str, index: int) -> Progress:
-        """The slice of the bar this channel owns, as something it can report into.
+    # SRCH-20 (22 Nov): each channel finishes its own row when its own work ends. The board search
+    # runs here, and its row is finished the moment its pipeline returns; the watchlist and the
+    # inbox run beside it on their own thread and finish theirs after their own shared judging.
+    # On 22 Nov the board search's row waited about four minutes behind the watchlist's 46 feeds
+    # and the filter and score of their 2,297 jobs.
+    board = "board_search" in channels
+    side = [c for c in channels if c != "board_search"]
+    board_done = threading.Event()
+    held: list[ChannelOutcome] = []  # a board search that didn't judge its own jobs joins the shared pass
+    side_summary: dict[str, Any] = {}
 
-        Targeted at this channel's own row, not every row in the run: "7 / 16 queries" is a fact
-        about the board search, and writing it onto the watchlist's row too would be a lie. The
-        between-channel heartbeat below still moves every row, because that paces the run.
-        """
-        lo = SEARCH_SHARE * index / max(len(channels), 1)
-        hi = SEARCH_SHARE * (index + 1) / max(len(channels), 1)
-        mine = {channel: run_ids[channel]} if channel in run_ids else {}
-
-        def tick(
-            fraction: float,
-            *,
-            phase: str,
-            detail: str | None = None,
-            done: int,
-            total: int,
-            results: int,
-            note: str | None = None,
-            took_ms: int | None = None,
-        ) -> None:
-            progress = lo + (hi - lo) * min(max(fraction, 0.0), 1.0)
-            report(
-                mine,
-                phase=phase,
-                progress=max(progress, 0.02),
-                detail=detail,
-                done=done,
-                total=total,
-                results=results,
-                stage=done / total if total else None,
-                note=note,
-                took_ms=took_ms,
+    def side_pass() -> None:
+        outcomes = _fetch(
+            side, profile=profile, now=now, run_ids=run_ids, known_urls=known_urls, last_uid=last_uid, discover=discover
+        )
+        # The fetch runs beside the board search; the judging waits for it. Both save jobs and
+        # spend the day's scoring allowance, and one after the other a job both found is saved
+        # once and scored once, and the allowance can't be handed out twice (MATCH-05).
+        board_done.wait()
+        # A cancelled side channel brings back nothing, but a board search held for the shared
+        # pass is still judged and finished: its row would otherwise stay "running" (22 Nov).
+        if outcomes is not None or held:
+            side_summary.update(
+                _judge_and_finish([*held, *(outcomes or [])], run_ids=run_ids, now=now, discover=discover, find_sites=find_sites)
             )
 
-        return tick
+    failed: list[BaseException] = []
 
+    def on_thread() -> None:
+        try:
+            side_pass()
+        except BaseException as exc:  # noqa: BLE001 — handed back to `run`, which raises it
+            failed.append(exc)
+
+    if not board:
+        board_done.set()
+    worker: threading.Thread | None = None
+    if side and board and _side_by_side():
+        # The thread carries this one's context, so its spans sit under the same trace.
+        worker = threading.Thread(target=contextvars.copy_context().run, args=(on_thread,), name="intake-side", daemon=True)
+        worker.start()
+
+    if board:
+        try:
+            outcome = _fetch(
+                ["board_search"],
+                profile=profile,
+                now=now,
+                run_ids=run_ids,
+                known_urls=known_urls,
+                caps=caps,
+                cache=cache,
+                find_sites=find_sites,
+            )
+            if cache is not None:
+                cache.summary()
+            if outcome and outcome[0].judged:
+                summary = _merge(summary, _judge_and_finish(outcome, run_ids=run_ids, now=now, find_sites=find_sites))
+            elif outcome:
+                held.extend(outcome)
+        finally:
+            board_done.set()
+    elif cache is not None:
+        cache.summary()
+
+    if side and worker is None:
+        side_pass()
+    elif worker is not None:
+        worker.join()
+        if failed:
+            raise failed[0]
+    elif held:
+        # A board search alone that left its jobs to the shared pass (the tests' stand-ins do).
+        summary = _merge(summary, _judge_and_finish(held, run_ids=run_ids, now=now, find_sites=find_sites))
+    summary = _merge(summary, side_summary)
+
+    logfire.info(
+        "Intake finished: {new} new job(s), {scored} scored",
+        new=summary["new_jobs"],
+        scored=summary["scored"],
+    )
+    return summary
+
+
+def _side_by_side() -> bool:
+    """Whether the side channels run on their own thread: not on SQLite, whose single writer
+    would make the two threads queue behind each other's transactions anyway."""
+    return engine().dialect.name != "sqlite"
+
+
+def _merge(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    out = dict(a)
+    for key in ("new_jobs", "scored", "credits_saved", "closed"):
+        if key in b:
+            out[key] = out.get(key, 0) + b[key]
+    out["errors"] = [*a.get("errors", []), *b.get("errors", [])]
+    return out
+
+
+def _fetch(
+    channels: list[str],
+    *,
+    profile: SearchProfile,
+    now: int,
+    run_ids: dict[str, str],
+    known_urls: set[str],
+    last_uid: int | None = None,
+    discover: bool = False,
+    caps: SearchCaps | None = None,
+    cache: "crawl_cache.CrawlCache | None" = None,
+    find_sites: bool = False,
+) -> list[ChannelOutcome] | None:
+    """Each channel's own fetch, one after another. None when the run was cancelled first."""
+    outcomes: list[ChannelOutcome] = []
     for index, channel in enumerate(channels):
         try:
             with transaction() as session:
                 _check_cancelled(session, list(run_ids.values()))
+            tick = _ticker(run_ids, channel, index, len(channels))
             if channel == "watchlist":
-                outcomes.append(from_watchlist(profile, now, discover=discover, tick=ticker(channel, index)))
+                outcomes.append(from_watchlist(profile, now, discover=discover, tick=tick))
             elif channel == "board_search":
                 mine = {channel: run_ids[channel]} if channel in run_ids else {}
                 outcomes.append(
                     from_board_search(
-                        profile, known_urls, caps, now, cache, ticker(channel, index), discover=find_sites, run_ids=mine
+                        profile, known_urls, caps or SearchCaps(), now, cache, tick, discover=find_sites, run_ids=mine
                     )
                 )
             else:
                 with transaction() as session:
-                    outcomes.append(from_inbox(session, profile, last_uid, now, tick=ticker(channel, index)))
+                    outcomes.append(from_inbox(session, profile, last_uid, now, tick=tick))
         except Cancelled:
             logfire.info("Intake cancelled before {channel}", channel=channel)
-            break
+            return None
         except ApiError as exc:
             outcomes.append(ChannelOutcome(channel=channel, errors=[(exc.code, exc.message)]))
         except Exception as exc:  # noqa: BLE001 — one channel never takes the run with it
             logfire.exception("Channel {channel} failed", channel=channel)
             outcomes.append(ChannelOutcome(channel=channel, errors=[("CHANNEL_FAILED", type(exc).__name__)]))
+    return outcomes
 
-    if cache is not None:
-        cache.summary()
+
+def _ticker(run_ids: dict[str, str], channel: str, index: int, count: int) -> Progress:
+    """The slice of the bar this channel owns, as something it can report into.
+
+    Targeted at this channel's own row, not every row in the run: "7 / 16 queries" is a fact about
+    the board search, and writing it onto the watchlist's row too would be a lie. `index` and
+    `count` are among the channels fetched one after another on the same thread.
+    """
+    lo = SEARCH_SHARE * index / max(count, 1)
+    hi = SEARCH_SHARE * (index + 1) / max(count, 1)
+    mine = {channel: run_ids[channel]} if channel in run_ids else {}
+
+    def tick(
+        fraction: float,
+        *,
+        phase: str,
+        detail: str | None = None,
+        done: int,
+        total: int,
+        results: int,
+        note: str | None = None,
+        took_ms: int | None = None,
+    ) -> None:
+        progress = lo + (hi - lo) * min(max(fraction, 0.0), 1.0)
+        report(
+            mine,
+            phase=phase,
+            progress=max(progress, 0.02),
+            detail=detail,
+            done=done,
+            total=total,
+            results=results,
+            stage=done / total if total else None,
+            note=note,
+            took_ms=took_ms,
+        )
+
+    return tick
+
+
+def _judge_and_finish(
+    outcomes: list[ChannelOutcome],
+    *,
+    run_ids: dict[str, str],
+    now: int,
+    discover: bool = False,
+    find_sites: bool = False,
+) -> dict[str, Any]:
+    """The shared pass for `outcomes`' channels, then their rows finished: collapse, judge what
+    the channels didn't judge themselves, close what the watchlist says is gone (ATS-03)."""
+    from ..db.models import IntakeRunRow
+    from ..services.store import Store
+
+    summary: dict[str, Any] = {"new_jobs": 0, "scored": 0, "credits_saved": 0, "errors": []}
+    mine = {o.channel: run_ids[o.channel] for o in outcomes if o.channel in run_ids}
 
     # Everything together, so a job found twice is scored once. Named, because on a run that
     # found a few hundred sightings this is seconds of silence between two long phases, and
     # silence between stages is what a frozen bar is made of.
-    total_found = sum(len(o.jobs) for o in outcomes)
-    merging = {o.channel: run_ids[o.channel] for o in outcomes if not o.judged and o.channel in run_ids}
-    report(
-        merging,
-        phase="collapsing",
-        progress=SEARCH_SHARE,
-        detail=f"Merging duplicates across {total_found} {'sighting' if total_found == 1 else 'sightings'}",
-    )
-    found = dedupe.collapse([job for outcome in outcomes for job in outcome.jobs])
-
-    # Outside a transaction: `judge` opens one per scored job so progress is readable while it
-    # works and the API is not locked out for the seven minutes that takes.
-    #
-    # Only the channels that didn't judge their own jobs. The board search's pipeline has already
-    # saved and scored its 8–12 (SRCH-26); a shared pass after it, on a search-only run, would go
-    # on to score up to twelve more from the backlog that nobody asked for.
     shared = {o.channel: run_ids[o.channel] for o in outcomes if not o.judged and o.channel in run_ids}
-    try:
-        with transaction() as session:
-            _check_cancelled(session, list(run_ids.values()))
-        judged = judge(found, now=now, run_ids=shared) if shared else Judged()
-    except Cancelled:
-        return summary
+    found: list[Job] = []
+    judged = Judged()
+    if shared:
+        total_found = sum(len(o.jobs) for o in outcomes)
+        report(
+            shared,
+            phase="collapsing",
+            progress=SEARCH_SHARE,
+            detail=f"Merging duplicates across {total_found} {'sighting' if total_found == 1 else 'sightings'}",
+        )
+        found = dedupe.collapse([job for outcome in outcomes for job in outcome.jobs])
+        # Outside a transaction: `judge` opens one per scored job so progress is readable while it
+        # works and the API is not locked out for the seven minutes that takes.
+        #
+        # Only the channels that didn't judge their own jobs. The board search's pipeline has
+        # already saved and scored its 8–12 (SRCH-26); a shared pass after it, on a search-only
+        # run, would go on to score up to twelve more from the backlog that nobody asked for.
+        try:
+            with transaction() as session:
+                _check_cancelled(session, list(run_ids.values()))
+            judged = judge(found, now=now, run_ids=shared)
+        except Cancelled:
+            return summary
 
     # ATS-03's sweep walks every job the watchlist can speak for, so it is the last thing between
     # the final score and a finished run. Named for the same reason as `collapsing`: an unnamed
     # pause at 99% is where someone reloads the page.
-    report(run_ids, phase="closing", progress=0.99, detail="Checking which saved jobs are still open")
+    report(mine, phase="closing", progress=0.99, detail="Checking which saved jobs are still open")
+    watchlist = next((o.feed for o in outcomes if o.channel == "watchlist" and o.feed is not None), None)
 
     with transaction() as session:
         store = Store(session, now)
@@ -1037,7 +1175,6 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
         summary["errors"] = score_errors
 
         # ATS-03, with the real feed: only a board that answered can close anything.
-        watchlist = next((o.feed for o in outcomes if o.channel == "watchlist" and o.feed is not None), None)
         summary["closed"] = store.close_jobs(ats_feeds.closed_tokens(watchlist, store.ats_by_job())) if watchlist else 0
 
         for outcome in outcomes:
@@ -1086,10 +1223,4 @@ def run(channels: list[str], run_ids: dict[str, str]) -> dict[str, Any]:
                     emails=outcome.emails,
                 )
         session.flush()
-
-    logfire.info(
-        "Intake finished: {new} new job(s), {scored} scored",
-        new=summary["new_jobs"],
-        scored=summary["scored"],
-    )
     return summary

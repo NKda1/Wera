@@ -88,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     cv_sub = cvp.add_subparsers(dest="cv_cmd", required=True)
     cv_sum = cv_sub.add_parser("summary", help="write the general summary a CV without one gets (TAIL-07)")
     cv_sum.add_argument("--write", action="store_true", help="put it on the current CV version (default: only show it)")
+    up = sub.add_parser("upskills", help="the Upskills report")
+    up_sub = up.add_subparsers(dest="upskills_cmd", required=True)
+    up_an = up_sub.add_parser("analyse", help="label the gap terms not labelled for this CV version yet (UPSK-08, one call)")
+    up_an.add_argument("--dry-run", action="store_true", help="count the terms it would send, and send nothing")
     gd = sub.add_parser("providers", help="each provider's breaker, today's use and shared answers in Redis (SRCH-33)")
     gd_sub = gd.add_subparsers(dest="providers_cmd", required=True)
     gd_sub.add_parser("status", help="print them")
@@ -207,6 +211,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         )
     if args.cmd == "cv":
         return _cv_summary(write=args.write)
+    if args.cmd == "upskills":
+        return _upskills_analyse(dry_run=args.dry_run)
     if args.cmd == "providers":
         return _providers(args.providers_cmd, provider=getattr(args, "provider", None))
     if args.cmd == "jobs":
@@ -241,6 +247,31 @@ def _dispatch(args: argparse.Namespace) -> int:
             return _eval_packs(args.model, args.cv, args.out, args.ads, args.strict)
         return _eval(args.model, args.cv, args.out, args.only, args.strict)
     return 2
+
+
+def _upskills_analyse(*, dry_run: bool) -> int:
+    """UPSK-08 for a backfill: the analyst's one call over the current report, as a search runs it."""
+    from .clock import now_ms
+    from .db.session import transaction
+    from .services import upskills_analyst
+    from .services.store import Store
+
+    with transaction() as session:
+        cv = Store(session).cv()
+    got = upskills_analyst.analyse(cv, now=now_ms(), dry_run=dry_run)
+    if not got.pending:
+        print(f"Every gap term is labelled for CV version {cv.version}. Nothing to send.")
+        return 0
+    if dry_run:
+        print(f"{got.pending} gap term(s) unlabelled for CV version {cv.version}; one call would send {got.sent}:")
+        for term in got.terms:
+            print(f"  {term}")
+        return 0
+    if got.error:
+        print(f"No notes this time ({got.error}). Nothing was kept.", file=sys.stderr)
+        return 1
+    print(f"Labelled {got.labelled} of {got.sent} sent ({got.merged} merged); {got.pending - got.labelled} still unlabelled.")
+    return 0
 
 
 def _cv_summary(*, write: bool) -> int:

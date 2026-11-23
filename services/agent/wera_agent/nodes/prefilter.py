@@ -12,6 +12,9 @@ between runs (DEMO-02).
 
 import hashlib
 import re
+import threading
+import time
+from collections import Counter
 from typing import Any, Protocol
 
 import logfire
@@ -77,6 +80,133 @@ def embedder(demo_mode: bool) -> Embedder:
     return _cached[key]
 
 
+# SRCH-26 (22 Nov): vectors kept across restarts. A server restart used to re-embed every title and
+# lead text it met: 31.3 s of a 49.5 s job-API step on 22 Nov was Arbeitnow's 3,785 titles, and the
+# lead ranker another ~7.5 s. Two levels: this process's dict, then Redis — one key a text, the
+# vector as its float32 bytes, kept 14 days. A text not in either is embedded with the others
+# missing in one batch and written back to both. Redis down, slow or holding something that isn't a
+# vector is a miss, never an error: the text is embedded, as before.
+EMBED_PREFIX = "wera:emb:"
+EMBED_TTL_SECONDS = 14 * 24 * 3600
+# The first level's size; past it the dict starts again (Redis still has everything).
+MEMORY_LIMIT = 50_000
+# How long Redis is left alone after it fails to answer, so a search with Redis down pays its
+# connect timeout once, not once an embedding.
+REDIS_RETRY_S = 60.0
+_vectors: dict[str, np.ndarray] = {}
+# Texts asked for and where each came from, since the process started (`evaluate search-latency`).
+STATS: Counter[str] = Counter()
+_stats_lock = threading.Lock()
+_redis_clients: dict[str, Any] = {}
+_redis_down_until = [0.0]
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha1(text.encode()).hexdigest()  # noqa: S324 — a cache key, not a secret
+
+
+def _redis() -> Any | None:
+    """The process's one client for the vectors, from the same `REDIS_URL` as the search queue
+    (`targets.connect`), made once and kept, so no call opens a connection of its own. It reads
+    bytes, which is why it isn't the queue's own client: that one decodes every answer to text."""
+    if time.monotonic() < _redis_down_until[0]:
+        return None
+    from ..settings import get_settings
+
+    url = get_settings().redis_url
+    if url not in _redis_clients:
+        try:
+            import redis
+
+            _redis_clients[url] = redis.Redis.from_url(url, socket_connect_timeout=1, socket_timeout=2)
+        except Exception:  # noqa: BLE001 — no cache is a slower search, not a failed one
+            _redis_down()
+            return None
+    return _redis_clients[url]
+
+
+def _redis_down() -> None:
+    _redis_down_until[0] = time.monotonic() + REDIS_RETRY_S
+    logfire.warn("Redis didn't answer; embeddings are computed without the cache for a minute")
+
+
+def _vector_of(raw: object) -> np.ndarray | None:
+    """A stored vector, or None for anything that isn't one (wrong length, not finite, not bytes)."""
+    if not isinstance(raw, bytes | bytearray) or len(raw) != DIMENSIONS * 4:
+        return None
+    vector = np.frombuffer(bytes(raw), dtype=np.float32).copy()
+    return vector if np.isfinite(vector).all() else None
+
+
+def _recall(keys: list[str], model: str) -> dict[str, np.ndarray]:
+    client = _redis()
+    if client is None or not keys:
+        return {}
+    try:
+        raws = client.mget([f"{EMBED_PREFIX}{model}:{k}" for k in keys])
+    except Exception:  # noqa: BLE001 — a miss
+        _redis_down()
+        return {}
+    found: dict[str, np.ndarray] = {}
+    for key, raw in zip(keys, raws or [], strict=False):
+        vector = _vector_of(raw)
+        if vector is not None:
+            found[key] = vector
+    return found
+
+
+def _keep(fresh: dict[str, np.ndarray], model: str) -> None:
+    client = _redis()
+    if client is None or not fresh:
+        return
+    try:
+        pipe = client.pipeline(transaction=False)
+        for key, vector in fresh.items():
+            pipe.set(f"{EMBED_PREFIX}{model}:{key}", np.asarray(vector, dtype=np.float32).tobytes(), ex=EMBED_TTL_SECONDS)
+        pipe.execute()
+    except Exception:  # noqa: BLE001 — the next search embeds them again
+        _redis_down()
+
+
+def embed_cached(texts: list[str], model: Embedder | None = None) -> np.ndarray:
+    """`model.embed(texts)`, from the cache where it can be (above). Rows in `texts`' order.
+
+    The hash embedder (demo mode, the tests) is instant and never touches Redis (DEMO-02)."""
+    if model is None:
+        from ..settings import get_settings
+
+        model = embedder(get_settings().wera_demo_mode)
+    if not texts:
+        return np.zeros((0, DIMENSIONS), dtype=np.float32)
+    if isinstance(model, HashEmbedder):
+        return model.embed(texts)
+    keys = [_digest(t) for t in texts]
+    got = {k: _vectors[k] for k in keys if k in _vectors}
+    in_memory = len(got)
+    stored = _recall([k for k in dict.fromkeys(keys) if k not in got], MODEL_NAME)
+    got.update(stored)
+    _vectors.update(stored)
+    fresh = list(dict.fromkeys(t for t, k in zip(texts, keys, strict=True) if k not in got))
+    with _stats_lock:
+        STATS.update(texts=len(texts), in_memory=in_memory, redis=len(stored), embedded=len(fresh))
+    with logfire.span(
+        "embed n={n} cached={cached}",
+        n=len(texts),
+        cached=len(texts) - len(fresh),
+        in_memory=in_memory,
+        redis=len(stored),
+        embedded=len(fresh),
+    ):
+        if fresh:
+            made = {_digest(t): v for t, v in zip(fresh, model.embed(fresh), strict=True)}
+            if len(_vectors) + len(made) > MEMORY_LIMIT:
+                _vectors.clear()
+            got.update(made)
+            _vectors.update(made)
+            _keep(made, MODEL_NAME)
+    return np.stack([got[k] for k in keys]).astype(np.float32, copy=False)
+
+
 def cv_profile_text(cv: MasterCV) -> str:
     """What the person is, in one blob, for comparison against a job ad."""
     parts = [cv.person.headline or "", cv.summary.text if cv.summary else ""]
@@ -115,7 +245,7 @@ def lead_ranker(cv: MasterCV, titles: list[str], *, demo_mode: bool) -> Any:
     then reads in the order it found things, as it did before, rather than not at all."""
     try:
         model = embedder(demo_mode)
-        reference = model.embed([cv_profile_text(cv)])[0]
+        reference = embed_cached([cv_profile_text(cv)], model)[0]
     except Exception:  # noqa: BLE001 — ranking is an improvement, never a reason a search fails
         logfire.warn("Couldn't load the embedding model; the search pool is read in the order found")
         return None
@@ -124,7 +254,7 @@ def lead_ranker(cv: MasterCV, titles: list[str], *, demo_mode: bool) -> Any:
     def rank(items: list[tuple[str, str]]) -> list[float]:
         if not items:
             return []
-        scores = cosine(reference, model.embed([f"{title}. {snippet}" for title, snippet in items]))
+        scores = cosine(reference, embed_cached([f"{title}. {snippet}" for title, snippet in items], model))
         return [
             float(score) + (TITLE_BOOST if any(w in title.casefold() for w in wanted) else 0.0)
             for (title, _snippet), score in zip(items, scores, strict=True)
@@ -154,7 +284,7 @@ def warm_titles(titles: list[str]) -> None:
     fresh = list(dict.fromkeys(t.strip() for t in titles if t.strip() and t.strip() not in _titles))
     if model is None or not fresh:
         return
-    for title, vector in zip(fresh, model.embed(fresh), strict=True):
+    for title, vector in zip(fresh, embed_cached(fresh, model), strict=True):
         _titles[title] = vector
 
 
@@ -195,8 +325,7 @@ def shortlist(jobs: list[Job], cv: MasterCV, *, demo_mode: bool, top_n: int = DE
     """
     if len(jobs) <= top_n:
         return jobs
-    model = embedder(demo_mode)
-    vectors = model.embed([cv_profile_text(cv), *[job_text(j) for j in jobs]])
+    vectors = embed_cached([cv_profile_text(cv), *[job_text(j) for j in jobs]], embedder(demo_mode))
     scores = cosine(vectors[0], vectors[1:])
     order = np.argsort(-scores)[:top_n]
     logfire.info(

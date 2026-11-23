@@ -6,6 +6,7 @@ import {
   filtersHref,
   focusCategory,
   focusStatus,
+  gapNotes,
   importanceOf,
   missingOnly,
   mostlyPoor,
@@ -35,6 +36,7 @@ const gap = (term: string, category: KeywordCategory = "tool"): Upskill => ({
   term,
   category,
   spellings: [term],
+  merged: [],
   jobs: 1,
   nearMisses: 0,
   share: 0.1,
@@ -206,5 +208,19 @@ describe("importance", () => {
     expect(importanceOf(report.withNearMisses!.demand[1])).toBe(7.5);
     expect(mostlyPoor({ poor: 5, jobs: 3, nearMisses: 4 })).toBe(true);
     expect(mostlyPoor({ poor: 2, jobs: 3, nearMisses: 1 })).toBe(false);
+  });
+});
+
+describe("gapNotes (UPSK-08)", () => {
+  it("says what would close the gap, who asks, and the spellings merged in", () => {
+    expect(gapNotes({ term: "dbt", evidence: " A project using dbt ", familyNote: "mostly data roles", merged: ["Data Build Tool", "dbt", "Data Build Tool"] })).toEqual({
+      evidence: "A project using dbt",
+      who: "mostly data roles",
+      also: "also written as Data Build Tool",
+    });
+  });
+  it("is empty before the analyst has labelled the term", () => {
+    expect(gapNotes({ term: "Kafka", merged: [] })).toEqual({ evidence: null, who: null, also: null });
+    expect(gapNotes({ term: "Kafka" })).toEqual({ evidence: null, who: null, also: null });
   });
 });

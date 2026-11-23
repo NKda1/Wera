@@ -20,6 +20,7 @@ not the person's.
 """
 
 import math
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -347,10 +348,17 @@ def _title_key(title: str) -> str:
     return " ".join(sorted(filters.title_tokens(_clean_title(title))))
 
 
+# German's gendered endings, written onto a role ("Analyst/in", "Analyst:in", "Analyst*in",
+# "Berater/innen"); "(m/w/d)" is a bracket and goes with the brackets. 22 Nov: a Swiss posting's
+# "Equity Analyst/in Schweizer Aktien" was suggested as written, and its slash broke the id's route.
+_GENDERED = re.compile(r"(?<=[A-Za-zÄÖÜäöüß])[/:*_](?:in|innen)\b")
+
+
 def _clean_title(title: str) -> str:
-    """A posting's title as a search title: its main part, without brackets or a trailing place."""
+    """A posting's title as a search title: its main part, without brackets, gendered endings or a
+    trailing place."""
     main = filters._BRACKETS.sub(" ", title).split(" - ")[0].split(",")[0].split("|")[0]
-    return " ".join(main.split())
+    return " ".join(_GENDERED.sub("", main).split())
 
 
 def _as_written(word: str, titles: list[str]) -> str:
